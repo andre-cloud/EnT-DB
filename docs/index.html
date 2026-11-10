@@ -47,6 +47,17 @@
       <option value="sim">Similarity to query</option>
     </select>
   </div>
+  <div class="tools" id="tools-filter">
+    <select id="f-role" aria-label="Role">
+      <option value="">Donors and acceptors</option>
+      <option value="acceptor">Acceptors only</option>
+      <option value="donor">Donors only</option>
+    </select>
+    <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
+    <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+    <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
+    <button class="btn small" id="f-reset" type="button">Reset filters</button>
+  </div>
 
   <section class="ssearch" id="ss-box" aria-labelledby="ss-title">
     <h2 id="ss-title">Structure search</h2>
@@ -160,6 +171,10 @@
       <div class="frow">
         <label class="field">UV-vis, if measured<input id="fm-uv" type="text" placeholder="λmax, ε, solvent" autocomplete="off"></label>
         <label class="field">Direct excitation wavelength<input id="fm-direct" type="text" placeholder="e.g. below 320 nm" autocomplete="off"></label>
+      </div>
+      <div class="frow">
+        <label class="field">Used in photocatalysis: DOI of a paper (optional)<input id="fm-usedoi" class="mono" type="text" placeholder="10.xxxx/…" spellcheck="false" autocomplete="off"></label>
+        <label class="field">What it was used for, briefly<input id="fm-usenote" type="text" placeholder="e.g. sensitizer for [2+2] cycloaddition of enones" autocomplete="off"></label>
       </div>
       <label class="field">Your name or contact (optional, seen only by curators)<input id="fm-by" type="text" autocomplete="off"></label>
       <div class="hp" aria-hidden="true"><label>Leave this field empty<input id="fm-website" type="text" tabindex="-1" autocomplete="off"></label></div>

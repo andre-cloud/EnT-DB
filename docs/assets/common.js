@@ -85,11 +85,15 @@
   }
 
   /* ---------- search state and controls ---------- */
-  Ent.newSearch = function () { return { q: "", origin: "", sort: "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
+  Ent.newSearch = function () { return { q: "", origin: "", role: "", cls: "", etmin: NaN, etmax: NaN, sort: "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
   Ent.filterRows = function (docs, st) {
     var q = st.q.trim().toLowerCase(), r = structureHits(docs, st.ss), hits = r.hits;
     var rows = docs.filter(function (d) {
       if (st.origin && d.origin !== st.origin) return false;
+      if (st.role && d.role !== st.role && d.role !== "both") return false;
+      if (st.cls && (d.cls || "") !== st.cls) return false;
+      if (!isNaN(st.etmin) && !(Number(d.et_kcal) >= st.etmin)) return false;
+      if (!isNaN(st.etmax) && !(Number(d.et_kcal) <= st.etmax)) return false;
       if (hits && !(d.id in hits)) return false;
       if (q) { var hay = [d.name, d.smiles, d.citation, d.cls, d.method, d.doi].join(" ").toLowerCase(); if (hay.indexOf(q) < 0) return false; }
       return true;
@@ -106,6 +110,15 @@
     $("q").addEventListener("input", function (e) { st.q = e.target.value; render(); });
     $("f-origin").addEventListener("change", function (e) { st.origin = e.target.value; render(); });
     $("f-sort").addEventListener("change", function (e) { st.sort = e.target.value; render(); });
+    $("f-role").addEventListener("change", function (e) { st.role = e.target.value; render(); });
+    $("f-cls").addEventListener("change", function (e) { st.cls = e.target.value; render(); });
+    $("f-etmin").addEventListener("input", function (e) { st.etmin = parseFloat(e.target.value); render(); });
+    $("f-etmax").addEventListener("input", function (e) { st.etmax = parseFloat(e.target.value); render(); });
+    $("f-reset").addEventListener("click", function () {
+      st.q = ""; st.origin = ""; st.role = ""; st.cls = ""; st.etmin = NaN; st.etmax = NaN;
+      ["q", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax"].forEach(function (id) { $(id).value = ""; });
+      render();
+    });
     $("ss-smiles").addEventListener("input", function (e) {
       clearTimeout(t); var v = e.target.value; t = setTimeout(function () { st.ss.smiles = v; render(); }, 350);
     });
@@ -126,11 +139,22 @@
     });
     $("ss-clear").addEventListener("click", function () { st.ss.smiles = ""; $("ss-smiles").value = ""; render(); });
   };
+  /* Keeps the class menu in step with the classes present in the data. */
+  var classSig = "";
+  Ent.fillClasses = function (docs) {
+    var seen = {}; docs.forEach(function (d) { if (d.cls) seen[d.cls] = 1; });
+    var list = Object.keys(seen).sort(), sig = list.join("|");
+    if (sig === classSig) return; classSig = sig;
+    var sel = $("f-cls"), cur = sel.value;
+    sel.replaceChildren(new Option("All classes", ""));
+    list.forEach(function (c) { sel.appendChild(new Option(c, c)); });
+    sel.value = seen[cur] ? cur : "";
+  };
   Ent.searchInfo = function (res, total) {
     var info = $("ss-info");
     info.className = res.err ? "err" : "hint";
     info.textContent = res.err ? res.err
-      : res.searching ? res.rows.length + " of " + total + " entries match the query."
+      : res.rows.length < total ? res.rows.length + " of " + total + " entries match the search and filters."
       : "Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.";
   };
 
@@ -233,6 +257,16 @@
       row(dl, "Received", d.created_at ? new Date(d.created_at).toLocaleString() : "");
     }
     c.appendChild(dl);
+    if (Array.isArray(d.uses) && d.uses.length) {
+      var uh = el("p", "hint", "Used in photocatalysis"), ul = el("ul", "uses");
+      d.uses.forEach(function (u) {
+        if (!u || !u.doi) return;
+        var li = el("li"); li.appendChild(link("doi:" + u.doi, "https://doi.org/" + encodeURI(u.doi)));
+        if (u.note) li.appendChild(document.createTextNode(" · " + u.note));
+        ul.appendChild(li);
+      });
+      c.appendChild(uh); c.appendChild(ul);
+    }
 
     if (adm) {
       var f = el("label", "field", "Note (optional)"), ni = el("input"); ni.id = "note-" + d.id; ni.type = "text";
@@ -248,12 +282,92 @@
         });
         act.appendChild(b);
       };
+      var eb = el("button", "btn", "Edit entry"); eb.type = "button"; eb.disabled = busy;
+      eb.addEventListener("click", function () { Ent.editor.open(d, function (patch) { return adm.onPatch(d.id, patch); }); });
       if (d.status === "pending") { decide("Approve", "primary", "approved"); decide("Reject", "reject", "rejected"); }
       else { decide("Back to queue", "", "pending"); if (d.status === "approved") decide("Reject", "reject", "rejected"); else decide("Approve", "primary", "approved"); }
+      act.appendChild(eb);
       c.appendChild(act);
       if (adm.busy[d.id] === "err") c.appendChild(el("p", "err", "Could not save. Try again."));
     }
     return c;
+  };
+
+  /* ---------- entry editor (review page) ---------- */
+  var EDIT = [
+    ["name", "Name", "text"], ["cls", "Class", "text"],
+    ["role", "Role", "select", [["acceptor", "Acceptor"], ["donor", "Donor"], ["both", "Donor and acceptor"]]],
+    ["origin", "Origin", "select", [["exp", "Experimental"], ["calc", "Computed"]]],
+    ["et_kcal", "E_T (kcal/mol)", "number"], ["et_unc", "± Uncertainty (kcal/mol)", "number"],
+    ["et_reported", "Value as reported", "text"], ["et_type", "Value type", "text"],
+    ["method", "Method", "area"], ["conditions", "Conditions", "text"],
+    ["citation", "Citation", "area"], ["doi", "DOI", "text"], ["location", "Where in the paper", "text"],
+    ["quote", "Verbatim line", "text"], ["evidence", "What it says", "area"],
+    ["pdf_url", "PDF link", "text"], ["si_url", "Supporting-information link", "text"],
+    ["uv", "UV-vis", "text"], ["direct_exc", "Direct excitation", "text"],
+    ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
+  ];
+  var edSave = null;
+  function useRow(u) {
+    var r = el("div", "ed-use");
+    var a = el("label", "field", "DOI of a paper where it was used"), ai = el("input"); ai.type = "text"; ai.className = "mono ed-use-doi"; ai.value = (u && u.doi) || ""; a.appendChild(ai);
+    var b = el("label", "field", "What it was used for"), bi = el("input"); bi.type = "text"; bi.className = "ed-use-note"; bi.maxLength = 300; bi.value = (u && u.note) || ""; b.appendChild(bi);
+    var x = el("button", "btn small", "Remove"); x.type = "button"; x.addEventListener("click", function () { r.remove(); });
+    r.appendChild(a); r.appendChild(b); r.appendChild(x); return r;
+  }
+  Ent.editor = {
+    open: function (d, onSave) {
+      var box = el("div", "sk-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+      box.appendChild(el("h2", null, "Edit · " + (d.name || "")));
+      box.appendChild(el("p", "hint", "The structure is edited with “Open in sketcher” on the card. Changes are saved for every reader as soon as you press Save."));
+      EDIT.forEach(function (f) {
+        var lab = el("label", "field", f[1]), inp;
+        if (f[2] === "select") { inp = el("select"); f[3].forEach(function (o) { inp.appendChild(new Option(o[1], o[0])); }); }
+        else if (f[2] === "area") { inp = el("textarea"); inp.rows = 2; }
+        else { inp = el("input"); inp.type = f[2] === "number" ? "number" : "text"; if (f[2] === "number") inp.step = "any"; }
+        inp.id = "ed-" + f[0]; inp.value = d[f[0]] == null ? "" : d[f[0]];
+        lab.appendChild(inp); box.appendChild(lab);
+      });
+      box.appendChild(el("p", "hint", "Papers in which this molecule was used in photocatalysis"));
+      var uses = el("div", "stack"); uses.id = "ed-uses";
+      (Array.isArray(d.uses) ? d.uses : []).forEach(function (u) { uses.appendChild(useRow(u)); });
+      box.appendChild(uses);
+      var add = el("button", "btn small", "Add a paper"); add.type = "button"; add.addEventListener("click", function () { uses.appendChild(useRow(null)); });
+      var addWrap = el("div", "actions"); addWrap.appendChild(add); box.appendChild(addWrap);
+      var err = el("p", "err"); err.hidden = true; box.appendChild(err);
+      var act = el("div", "actions"), save = el("button", "btn primary", "Save changes"), cancel = el("button", "btn", "Cancel");
+      save.type = "button"; cancel.type = "button"; act.appendChild(save); act.appendChild(cancel); box.appendChild(act);
+      cancel.addEventListener("click", Ent.editor.close);
+      save.addEventListener("click", function () {
+        var patch = {}, bad = "";
+        EDIT.forEach(function (f) {
+          var v = $("ed-" + f[0]).value.trim(), out;
+          if (f[2] === "number") { out = v === "" ? null : parseFloat(v); if (v !== "" && isNaN(out)) bad = f[1] + " must be a number."; }
+          else out = v === "" ? null : v;
+          if (f[0] === "doi" && out) out = EntScore.cleanDoi(out);
+          if (out !== (d[f[0]] == null ? null : d[f[0]])) patch[f[0]] = out;
+        });
+        if ("name" in patch && !patch.name) bad = "The name cannot be empty.";
+        if ("et_kcal" in patch && patch.et_kcal == null) bad = "E_T cannot be empty.";
+        var list = [];
+        Array.prototype.forEach.call(uses.children, function (r) {
+          var doi = EntScore.cleanDoi(r.querySelector(".ed-use-doi").value), note = r.querySelector(".ed-use-note").value.trim();
+          if (!doi && !note) return;
+          if (!EntScore.DOI_RE.test(doi)) bad = "“" + (doi || "(empty)") + "” does not look like a DOI.";
+          list.push({ doi: doi, note: note });
+        });
+        if (JSON.stringify(list) !== JSON.stringify(Array.isArray(d.uses) ? d.uses : [])) patch.uses = list.length ? list : null;
+        if (bad) { err.textContent = bad; err.hidden = false; return; }
+        if (!Object.keys(patch).length) { Ent.editor.close(); return; }
+        save.disabled = true; err.hidden = true;
+        Promise.resolve(onSave(patch)).then(function (ok) {
+          save.disabled = false;
+          if (ok) Ent.editor.close(); else { err.textContent = "Could not save. Try again."; err.hidden = false; }
+        });
+      });
+      var host = $("ed"); host.replaceChildren(box); host.hidden = false;
+    },
+    close: function () { var host = $("ed"); host.hidden = true; host.replaceChildren(); }
   };
 
   /* ---------- long lists: draw 50 cards at a time ---------- */

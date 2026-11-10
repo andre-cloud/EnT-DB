@@ -29,6 +29,7 @@
     var list = $("list"), status = $("status");
     if (!state.loaded) { status.hidden = false; status.textContent = "Loading…"; list.replaceChildren(); return; }
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
+    Ent.fillClasses(state.docs);
     var res = Ent.filterRows(inView, state.search);
     Ent.searchInfo(res, inView.length);
     Ent.drawList(list, res.rows, function (d) {
