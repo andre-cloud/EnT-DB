@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>EnT-DB · Review</title>
 <meta name="description" content="Curator review queue for EnT-DB.">
 <meta name="robots" content="noindex">
@@ -17,7 +18,7 @@
     <span><a href="./">Public site</a> · <a href="#" id="signout" hidden>Sign out</a></span>
   </header>
 
-  <p class="banner" id="adm-msg" hidden></p>
+  <p class="banner" id="adm-msg" role="status" hidden></p>
   <div class="banner" id="imp" hidden>
     <span id="imp-text"></span>
     <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
@@ -29,7 +30,7 @@
     <label class="field">Email<input id="login-email" type="email" autocomplete="username" required></label>
     <label class="field">Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
     <div class="actions"><button class="btn primary" id="login-send" type="submit">Sign in</button></div>
-    <p class="err" id="login-err" hidden></p>
+    <p class="err" id="login-err" role="alert" hidden></p>
   </form>
 
   <div id="panel" hidden>
@@ -57,8 +58,9 @@
   <div class="tools" id="tools-filter">
     <select id="f-role" aria-label="Role">
       <option value="">Donors and acceptors</option>
-      <option value="acceptor">Acceptors only</option>
-      <option value="donor">Donors only</option>
+      <option value="acceptor">Acceptors (with dual-role)</option>
+      <option value="donor">Donors (with dual-role)</option>
+      <option value="both">Dual-role only</option>
     </select>
     <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
     <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
@@ -79,7 +81,7 @@
       <button class="btn small" id="ss-draw" type="button">Draw query</button>
       <button class="btn small" id="ss-clear" type="button">Clear</button>
     </div>
-    <p class="hint" id="ss-info">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+    <p class="hint" id="ss-info" aria-live="polite">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
   </section>
 
   <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
@@ -90,7 +92,7 @@
       <button class="btn primary" id="bulk-confirm" type="button" hidden></button>
       <button class="btn" id="bulk-cancel" type="button" hidden>Cancel</button>
     </div>
-    <p class="err" id="bulk-err" hidden></p>
+    <p class="err" id="bulk-err" role="alert" hidden></p>
     <div id="status" class="status">Loading…</div>
     <main id="list" class="list"></main>
   </div>

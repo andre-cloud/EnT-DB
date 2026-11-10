@@ -1,8 +1,8 @@
-/* EnT-DB review page: curator sign-in by one-time link, then approve or reject. */
+/* EnT-DB review page: curator sign-in with email and password, then review, edit, approve or reject. */
 (function () {
   "use strict";
   var $ = Ent.$, api = Ent.api;
-  var state = { docs: [], view: "pending", loaded: false, busy: {}, drafts: {}, search: Ent.newSearch() };
+  var state = { docs: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, search: Ent.newSearch() };
 
   function banner(t) { var m = $("adm-msg"); m.hidden = !t; m.textContent = t || ""; }
   function show(which) { $("login").hidden = which !== "login"; $("panel").hidden = which !== "panel"; $("signout").hidden = which !== "panel"; }
@@ -27,16 +27,16 @@
       $("n-" + k).textContent = counts[k]; $("tab-" + k).setAttribute("aria-selected", String(state.view === k));
     });
     var list = $("list"), status = $("status");
-    if (!state.loaded) { status.hidden = false; status.textContent = "Loading…"; list.replaceChildren(); return; }
+    if (!state.loaded) { status.hidden = false; status.textContent = state.loadErr || "Loading…"; list.replaceChildren(); drawBulk([]); return; }
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
-    Ent.fillClasses(state.docs);
+    Ent.fillClasses(inView, state.search);   /* only the classes present in this tab */
     var res = Ent.filterRows(inView, state.search);
     Ent.searchInfo(res, inView.length);
     Ent.drawList(list, res.rows, function (d) {
       return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim",
         admin: { busy: state.busy, drafts: state.drafts, onPatch: onPatch } });
     }, state.search.pager, render);
-    drawBulk(res.rows);
+    drawBulk(res.err ? [] : res.rows);   /* never offer bulk approval when the search failed */
     status.hidden = res.rows.length > 0;
     if (!res.rows.length) {
       status.textContent = inView.length ? "No entry matches the current search and filters."
@@ -102,11 +102,14 @@
   }
 
   function load() {
-    state.loaded = false; render();
+    state.loaded = false; state.loadErr = ""; render();
     return api.adminList().then(function (rows) { state.docs = rows || []; state.loaded = true; render(); backfill(); checkBatches(); },
-      function (err) { if (err.status === 401) signedOut("Your session ended. Sign in again."); else { $("status").textContent = "The entries could not be loaded. Use Refresh to try again."; } });
+      function (err) {
+        if (err.status === 401) signedOut("Your session ended. Sign in again.");
+        else { state.loadErr = "The entries could not be loaded. Use Refresh to try again."; render(); }
+      });
   }
-  function signedOut(msg) { api.signOut(); show("login"); banner(msg || ""); }
+  function signedOut(msg) { Ent.editor.close(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
 
   function start() {
     if (!api.configured) { show(""); banner("The backend is not configured yet, so there is nothing to review. See the setup steps in the repository README."); return; }
@@ -115,7 +118,11 @@
       api.isAdmin().then(function (ok) {
         if (ok === true) { show("panel"); banner(""); load(); }
         else signedOut("This address is not a curator of this database.");
-      }, function () { signedOut("Sign-in could not be verified. Try again."); });
+      }, function (err) {
+        /* A rejected token ends the session; a network problem does not. */
+        if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
+        else { show(""); banner("The server could not be reached to check your sign-in. Check the connection and reload the page."); }
+      });
     });
   }
 
@@ -138,7 +145,8 @@
   ["pending", "approved", "rejected"].forEach(function (k) {
     $("tab-" + k).addEventListener("click", function () { state.view = k; state.search.pager.shown = 0; bulkReset(); render(); });
   });
-  Ent.bindSearch(state.search, render);
+  /* Changing the search or filters disarms a pending bulk approval: it must cover what was confirmed. */
+  Ent.bindSearch(state.search, function () { bulkReset(); render(); });
   Ent.sketcher.bind();
   Ent.loadOCL(function () { if (state.loaded) render(); backfill(); });
   start();
