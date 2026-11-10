@@ -11,12 +11,14 @@
 //   NOTIFY_FROM     sender, default "EnT-DB <onboarding@resend.dev>"
 //   NTFY_TOPIC      ntfy.sh topic name; sends a phone push per submission
 //   IP_SALT         any random string; salts the hash used for rate limiting
+//   SERVICE_KEY     only if the built-in SUPABASE_SERVICE_ROLE_KEY is missing: a secret (sb_secret_...) key
+// Deploy with "Verify JWT" switched OFF: visitors are anonymous and send only the publishable key.
 
 /*__SCORE_JS__*/
 
 const EntScore = globalThis.EntScore;
 const SB_URL = Deno.env.get("SUPABASE_URL");
-const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const SB_KEY = Deno.env.get("SERVICE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const MAX_PER_HOUR = 5;
 
 const CORS = {
@@ -30,7 +32,12 @@ function json(body, status = 200) {
 function rest(path, init = {}) {
   return fetch(`${SB_URL}/rest/v1/${path}`, {
     ...init,
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", ...(init.headers || {}) },
+    // "sb_secret_..." keys go in apikey only; a legacy service-role JWT is also sent as Bearer.
+    headers: {
+      apikey: SB_KEY, "Content-Type": "application/json",
+      ...(SB_KEY.startsWith("sb_") ? {} : { Authorization: `Bearer ${SB_KEY}` }),
+      ...(init.headers || {}),
+    },
   });
 }
 async function sha256(text) {

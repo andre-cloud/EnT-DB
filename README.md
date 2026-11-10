@@ -44,16 +44,19 @@ Repository **Settings → Pages → Build and deployment**: source *Deploy from 
 
 1. Create a project at supabase.com.
 2. **SQL Editor**: run `supabase/schema.sql`, then `supabase/seed.sql`.
-3. Still in the SQL editor, register yourself as curator (use the address you will sign in with):
+3. Still in the SQL editor, list the curators' email addresses:
    ```sql
-   insert into public.admins (email) values ('you@example.org');
+   insert into public.admins (email) values ('first@example.org'), ('second@example.org')
+   on conflict do nothing;
    ```
-4. **Authentication → URL Configuration**: set *Site URL* to `https://nuniwo-source.github.io/EnT-DB/admin.html`
-   and add the same address under *Redirect URLs*.
+4. **Authentication → Users → Add user → Create new user**: create one account per curator, with the same
+   email as in step 3, a password, and *Auto Confirm User* ticked. Curators sign in on `admin.html` with these.
+   (Email sign-in links are not used: Supabase's built-in mailer only delivers to members of the project's team.)
 5. **Edge Functions → Deploy a new function → Via editor**: name it `submit` and paste the whole of
-   `supabase/functions/submit/index.ts`. Keep "Verify JWT" on.
+   `supabase/functions/submit/index.ts`. Switch **Verify JWT off** for this function: visitors are anonymous.
+   Access is controlled inside the function (shared site login, rate limit).
 6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/EnT-DB` and `IP_SALT` = any random text,
-   plus the notification secrets from step 4 below.
+   plus the notification secret from step 4 below.
 7. **Project Settings → API**: copy the *Project URL* and the *anon / publishable* key into `docs/assets/config.js`
    and commit. These two values are meant to be public. Never commit the *service role* key.
 
@@ -102,5 +105,5 @@ node tools/build-function.mjs      # regenerate the server function after editin
 ## Limits worth knowing
 
 - The submission endpoint has a honeypot field and a limit of 5 submissions per hour per connection, no captcha.
-- Curator sign-in uses Supabase's built-in email sender, which allows only a few sign-in emails per hour.
+- Curator accounts are created by hand in the Supabase dashboard; there is no self-service password reset.
 - Values are transcribed from the cited papers. Check the source before relying on one.

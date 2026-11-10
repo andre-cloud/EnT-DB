@@ -305,7 +305,11 @@
   var api = Ent.api = { configured: !!(base && anon) };
 
   function headers(token, extra) {
-    var h = { apikey: anon, Authorization: "Bearer " + (token || anon), "Content-Type": "application/json" };
+    /* A signed-in curator sends their session token. Anonymous calls send only the API key:
+       the new "sb_..." keys are not JWTs and must not be used as a Bearer token. */
+    var h = { apikey: anon, "Content-Type": "application/json" };
+    if (token) h.Authorization = "Bearer " + token;
+    else if (!/^sb_/.test(anon)) h.Authorization = "Bearer " + anon;
     for (var k in (extra || {})) h[k] = extra[k];
     return h;
   }
@@ -328,25 +332,17 @@
     return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(), body: JSON.stringify(payload) }).then(asJson);
   };
 
-  /* admin session: magic link -> tokens in the URL fragment */
+  /* curator session: email + password sign-in */
   function saveSession(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {} }
   function readSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
   api.signOut = function () { try { localStorage.removeItem(SESSION_KEY); } catch (e) {} };
-  api.sendLink = function (email, redirectTo) {
-    return fetch(base + "/auth/v1/otp?redirect_to=" + encodeURIComponent(redirectTo),
-      { method: "POST", headers: headers(), body: JSON.stringify({ email: email, create_user: true }) }).then(asJson);
-  };
-  /* Picks tokens out of location.hash after the magic link, if present. Returns an error string or null. */
-  api.consumeHash = function () {
-    var h = location.hash.replace(/^#/, ""); if (!h) return null;
-    var p = new URLSearchParams(h);
-    if (p.get("error_description")) { history.replaceState(null, "", location.pathname); return p.get("error_description"); }
-    if (p.get("access_token")) {
-      saveSession({ access_token: p.get("access_token"), refresh_token: p.get("refresh_token"),
-        expires_at: Date.now() + (parseInt(p.get("expires_in"), 10) || 3600) * 1000 });
-      history.replaceState(null, "", location.pathname);
-    }
-    return null;
+  api.signIn = function (email, password) {
+    return fetch(base + "/auth/v1/token?grant_type=password",
+      { method: "POST", headers: headers(), body: JSON.stringify({ email: email, password: password }) })
+      .then(asJson).then(function (r) {
+        saveSession({ access_token: r.access_token, refresh_token: r.refresh_token, expires_at: Date.now() + (r.expires_in || 3600) * 1000 });
+        return true;
+      });
   };
   /* -> Promise<token | null>, refreshing when close to expiry */
   api.token = function () {

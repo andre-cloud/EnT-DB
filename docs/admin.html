@@ -21,10 +21,10 @@
 
   <form class="login" id="login" hidden novalidate>
     <h2>Curator sign-in</h2>
-    <p class="hint">Enter your curator email. You will receive a one-time link that signs you in on this device.</p>
-    <label class="field">Email<input id="login-email" type="email" autocomplete="email" required></label>
-    <div class="actions"><button class="btn primary" id="login-send" type="submit">Email me a sign-in link</button></div>
-    <p class="ok" id="login-ok" hidden></p>
+    <p class="hint">Sign in with the curator account you were given.</p>
+    <label class="field">Email<input id="login-email" type="email" autocomplete="username" required></label>
+    <label class="field">Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+    <div class="actions"><button class="btn primary" id="login-send" type="submit">Sign in</button></div>
     <p class="err" id="login-err" hidden></p>
   </form>
 
