@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EnT-DB · Review</title>
+<meta name="description" content="Curator review queue for EnT-DB.">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <h1>EnT-DB review</h1>
+    <span><a href="./">Public site</a> · <a href="#" id="signout" hidden>Sign out</a></span>
+  </header>
+
+  <p class="banner" id="adm-msg" hidden></p>
+
+  <form class="login" id="login" hidden novalidate>
+    <h2>Curator sign-in</h2>
+    <p class="hint">Enter your curator email. You will receive a one-time link that signs you in on this device.</p>
+    <label class="field">Email<input id="login-email" type="email" autocomplete="email" required></label>
+    <div class="actions"><button class="btn primary" id="login-send" type="submit">Email me a sign-in link</button></div>
+    <p class="ok" id="login-ok" hidden></p>
+    <p class="err" id="login-err" hidden></p>
+  </form>
+
+  <div id="panel" hidden>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button class="tab" id="tab-pending" role="tab" data-view="pending" aria-selected="true">Queue<span class="n" id="n-pending">0</span></button>
+      <button class="tab" id="tab-approved" role="tab" data-view="approved" aria-selected="false">Approved<span class="n" id="n-approved">0</span></button>
+      <button class="tab" id="tab-rejected" role="tab" data-view="rejected" aria-selected="false">Rejected<span class="n" id="n-rejected">0</span></button>
+      <button class="tab" id="reload" type="button">Refresh</button>
+    </nav>
+
+  <div class="tools" id="tools-main">
+    <input id="q" class="grow" type="search" placeholder="Search name, SMILES, DOI or source" aria-label="Text search">
+    <select id="f-origin" aria-label="Data origin">
+      <option value="">Experimental and computed</option>
+      <option value="exp">Experimental only</option>
+      <option value="calc">Computed only</option>
+    </select>
+    <select id="f-sort" aria-label="Sort order">
+      <option value="added">Order added</option>
+      <option value="et-asc">E_T ascending</option>
+      <option value="et-desc">E_T descending</option>
+      <option value="sim">Similarity to query</option>
+    </select>
+  </div>
+
+  <section class="ssearch" id="ss-box" aria-labelledby="ss-title">
+    <h2 id="ss-title">Structure search</h2>
+    <div class="tools">
+      <input id="ss-smiles" class="grow mono" type="text" placeholder="Query SMILES, e.g. C=Cc1ccccc1" aria-label="Query SMILES" spellcheck="false" autocomplete="off">
+      <select id="ss-mode" aria-label="Search type">
+        <option value="sub">Substructure</option>
+        <option value="exact">Exact structure</option>
+        <option value="sim">Similarity</option>
+      </select>
+      <input id="ss-thr" class="num" type="number" min="0" max="1" step="0.05" value="0.5" aria-label="Minimum Tanimoto similarity" hidden>
+      <button class="btn small" id="ss-draw" type="button">Draw query</button>
+      <button class="btn small" id="ss-clear" type="button">Clear</button>
+    </div>
+    <p class="hint" id="ss-info">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+  </section>
+
+  <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
+  <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
+
+    <div id="status" class="status">Loading…</div>
+    <main id="list" class="list"></main>
+  </div>
+</div>
+
+<div class="sk" id="sk" hidden>
+  <div class="sk-box" role="dialog" aria-modal="true" aria-labelledby="sk-title">
+    <h2 id="sk-title">Sketcher</h2>
+    <div id="sk-editor"></div>
+    <div class="sk-row">
+      <input id="sk-smiles" aria-label="SMILES" spellcheck="false" autocomplete="off">
+      <button class="btn small" id="sk-draw" type="button">Redraw from SMILES</button>
+      <button class="btn small" id="sk-read" type="button">Read SMILES from drawing</button>
+    </div>
+    <p class="hint" id="sk-hint"></p>
+    <p class="err" id="sk-msg" hidden></p>
+    <div class="actions">
+      <button class="btn primary" id="sk-save" type="button">Save structure</button>
+      <button class="btn" id="sk-close" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<script src="assets/config.js"></script>
+<script src="assets/score.js"></script>
+<script src="assets/common.js"></script>
+<script src="assets/admin.js"></script>
+</body>
+</html>
