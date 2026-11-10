@@ -1,7 +1,7 @@
 -- EnT-DB database schema. Run once in the Supabase SQL editor.
 -- Safe to re-run: every statement is idempotent.
 
-create extension if not exists pgcrypto;
+create extension if not exists pgcrypto with schema extensions;
 
 -- Curators. Add your own address after running this file (see README).
 create table if not exists public.admins (
@@ -100,4 +100,45 @@ select id, created_at, name, smiles, idcode, structure_note, cls, role,
 from public.entries
 where status = 'approved';
 
-grant select on public.public_entries to anon, authenticated;
+-- ---------------------------------------------------------------------------
+-- Shared site login (optional).
+-- While public.site_access has at least one row, the public data can be read and
+-- entries can be submitted only with a matching user name and password.
+-- Empty table = open site. Passwords are stored as bcrypt hashes, never in clear.
+-- Set or change the login with the statement in the README; open the site with
+--   delete from public.site_access;
+-- ---------------------------------------------------------------------------
+create table if not exists public.site_access (
+  username  text primary key,
+  pass_hash text not null
+);
+alter table public.site_access enable row level security;   -- no policies: used only by the functions below
+
+create or replace function public.check_access(p_user text default '', p_pass text default '')
+returns boolean
+language sql stable security definer
+set search_path = public, extensions
+as $$
+  select not exists (select 1 from public.site_access)
+      or exists (
+        select 1 from public.site_access s
+        where s.username = coalesce(p_user, '')
+          and s.pass_hash = crypt(coalesce(p_pass, ''), s.pass_hash)
+      );
+$$;
+
+create or replace function public.list_entries(p_user text default '', p_pass text default '')
+returns setof public.public_entries
+language sql stable security definer
+set search_path = public, extensions
+as $$
+  select * from public.public_entries
+  where public.check_access(p_user, p_pass);
+$$;
+
+-- The view is no longer readable directly: the site goes through list_entries().
+revoke all on public.public_entries from anon, authenticated;
+revoke all on function public.check_access(text, text) from public;
+revoke all on function public.list_entries(text, text) from public;
+grant execute on function public.check_access(text, text) to anon, authenticated, service_role;
+grant execute on function public.list_entries(text, text) to anon, authenticated, service_role;

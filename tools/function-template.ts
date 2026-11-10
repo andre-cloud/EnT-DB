@@ -137,6 +137,14 @@ Deno.serve(async (req) => {
   // Honeypot: real visitors never see or fill this field. Pretend it worked.
   if (String(payload.website || "").trim()) return json({ id: null, score: 0, grade: "Poor" });
 
+  // Shared site login: enforced by the database, so it cannot be skipped from the browser.
+  const acc = await rest("rpc/check_access", {
+    method: "POST",
+    body: JSON.stringify({ p_user: String(payload.access_user || "").slice(0, 100), p_pass: String(payload.access_pass || "").slice(0, 200) }),
+  });
+  if (!acc.ok) return json({ error: "The server could not check your access." }, 500);
+  if ((await acc.json()) !== true) return json({ error: "Sign in to submit an entry." }, 401);
+
   const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
   const ipHash = await sha256(ip + "|" + (Deno.env.get("IP_SALT") || "ent-db"));
   const since = new Date(Date.now() - 3600 * 1000).toISOString();

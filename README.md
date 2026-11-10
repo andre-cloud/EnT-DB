@@ -30,7 +30,7 @@ method fully specified, DOI resolves, agreement with existing entries). It does 
 | `supabase/functions/submit/index.ts` | Server function: validates, scores, stores, notifies. **Generated** |
 | `tools/` | `build-function.mjs` regenerates the server function; `test-score.mjs` tests the scoring |
 
-Until `docs/assets/config.js` is filled in, the site is read-only and shows `docs/data/entries.json`.
+Until `docs/assets/config.js` is filled in, the site shows only a "not open yet" notice.
 
 ## Setup
 
@@ -53,11 +53,30 @@ Repository **Settings → Pages → Build and deployment**: source *Deploy from 
 5. **Edge Functions → Deploy a new function → Via editor**: name it `submit` and paste the whole of
    `supabase/functions/submit/index.ts`. Keep "Verify JWT" on.
 6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/EnT-DB` and `IP_SALT` = any random text,
-   plus the notification secrets from step 3 below.
+   plus the notification secrets from step 4 below.
 7. **Project Settings → API**: copy the *Project URL* and the *anon / publishable* key into `docs/assets/config.js`
    and commit. These two values are meant to be public. Never commit the *service role* key.
 
-### 3. Notifications
+### 3. Shared site login (optional)
+
+To keep the site private while it is being set up, give it one shared user name and password.
+Run this in the SQL editor with your own values; the password is stored only as a bcrypt hash in the database,
+never in this repository:
+
+```sql
+insert into public.site_access (username, pass_hash)
+values ('USER NAME', extensions.crypt('PASSWORD', extensions.gen_salt('bf')))
+on conflict (username) do update set pass_hash = excluded.pass_hash;
+```
+
+While that table has a row, the data and the submission endpoint both refuse requests without the right login;
+the check runs in the database, so it cannot be skipped from the browser. To open the site to everyone:
+`delete from public.site_access;`
+
+The login is a single shared secret with no lockout after wrong attempts, so pick a long password
+and treat it as a temporary measure. The review page does not use it: curators sign in by email link.
+
+### 4. Notifications
 
 Choose one or both; the function sends whichever is configured.
 

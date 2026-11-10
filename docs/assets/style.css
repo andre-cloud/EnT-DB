@@ -129,3 +129,5 @@ dd q{font-style:italic}
 .login h2{font-family:var(--f-display);font-size:1.15rem;margin:0}
 footer.foot{color:var(--muted);font-size:.8rem;border-top:1px solid var(--line);padding-top:14px}
 footer.foot a{color:var(--accent)}
+.stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+.login .stack{gap:12px}
