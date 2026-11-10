@@ -16,6 +16,18 @@
     <p class="lede">Triplet energies of energy-transfer donors and acceptors, each with how it was determined and where it was published. Entries are reviewed by a curator before they appear.</p>
   </header>
 
+  <form class="login" id="gate" hidden novalidate>
+    <h2 id="gate-title">Private preview</h2>
+    <p class="hint" id="gate-text"></p>
+    <div class="stack" id="gate-fields">
+      <label class="field">User<input id="gate-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+      <label class="field">Password<input id="gate-pass" type="password" autocomplete="current-password"></label>
+      <div class="actions"><button class="btn primary" id="gate-send" type="submit">Enter</button></div>
+    </div>
+    <p class="err" id="gate-err" hidden></p>
+  </form>
+
+  <div class="stack" id="app-body" hidden>
   <nav class="tabs" role="tablist" aria-label="Views">
     <button class="tab" id="tab-db" role="tab" data-view="db" aria-selected="true">Database<span class="n" id="n-db">0</span></button>
     <button class="tab" id="tab-submit" role="tab" data-view="submit" aria-selected="false">Submit entry</button>
@@ -61,7 +73,6 @@
   <form class="form" id="form" hidden novalidate>
     <h2>Submit a triplet energy</h2>
     <p class="hint">The entry is scored as you type. After you send it, a curator reviews it; it appears in the database only once approved.</p>
-    <p class="banner" id="fm-closed" hidden>Submissions are not open yet. You can fill the form to see how an entry is scored, but it cannot be sent.</p>
 
     <fieldset>
       <legend>Molecule</legend>
@@ -165,7 +176,9 @@
       <button class="btn" id="fm-reset" type="button">Clear form</button>
     </div>
   </form>
-  <footer class="foot">Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/EnT-DB">github.com/nuniwo-source/EnT-DB</a>.</footer>
+  </div>
+
+  <footer class="foot"><a href="#" id="lock" hidden>Sign out</a> Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/EnT-DB">github.com/nuniwo-source/EnT-DB</a>.</footer>
 </div>
 
 <div class="sk" id="sk" hidden>

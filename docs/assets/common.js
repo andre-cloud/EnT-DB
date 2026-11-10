@@ -316,9 +316,13 @@
       return body;
     });
   }
-  api.listPublic = function () {
-    if (!api.configured) return fetch("data/entries.json", { cache: "no-store" }).then(asJson);
-    return fetch(base + "/rest/v1/public_entries?select=*&order=created_at.asc", { headers: headers() }).then(asJson);
+  function creds(a) { return JSON.stringify({ p_user: (a && a.user) || "", p_pass: (a && a.pass) || "" }); }
+  /* -> Promise<true|false>: true when the site is open or the login matches */
+  api.checkAccess = function (a) {
+    return fetch(base + "/rest/v1/rpc/check_access", { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
+  };
+  api.listPublic = function (a) {
+    return fetch(base + "/rest/v1/rpc/list_entries?order=created_at.asc", { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
   };
   api.submit = function (payload) {
     return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(), body: JSON.stringify(payload) }).then(asJson);
