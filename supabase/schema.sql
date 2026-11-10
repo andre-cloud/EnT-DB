@@ -55,6 +55,9 @@ create table if not exists public.entries (
   note           text,
   ip_hash        text
 );
+-- Key of an entry imported from a literature batch (docs/batches/*.json); makes imports repeatable.
+alter table public.entries add column if not exists import_key text;
+create unique index if not exists entries_import_key_idx on public.entries (import_key);
 create index if not exists entries_status_idx on public.entries (status);
 create index if not exists entries_idcode_idx on public.entries (idcode);
 create index if not exists entries_ip_idx     on public.entries (ip_hash, created_at);
@@ -80,13 +83,15 @@ grant execute on function public.is_admin() to authenticated;
 drop policy if exists entries_admin_select on public.entries;
 drop policy if exists entries_admin_update on public.entries;
 drop policy if exists entries_admin_delete on public.entries;
+drop policy if exists entries_admin_insert on public.entries;
+create policy entries_admin_insert on public.entries for insert to authenticated with check (public.is_admin());
 create policy entries_admin_select on public.entries for select to authenticated using (public.is_admin());
 create policy entries_admin_update on public.entries for update to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy entries_admin_delete on public.entries for delete to authenticated using (public.is_admin());
 
 revoke all on public.entries from anon;
 revoke all on public.entries from authenticated;
-grant select, update, delete on public.entries to authenticated;
+grant select, insert, update, delete on public.entries to authenticated;
 
 -- What the public site reads: approved rows only, without the private columns.
 -- The view deliberately runs with its owner's rights so anonymous visitors can read it

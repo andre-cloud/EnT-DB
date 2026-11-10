@@ -22,9 +22,9 @@
     }
     var res = Ent.filterRows(state.docs, state.search);
     Ent.searchInfo(res, state.docs.length);
-    list.replaceChildren.apply(list, res.rows.map(function (d) {
+    Ent.drawList(list, res.rows, function (d) {
       return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim" });
-    }));
+    }, state.search.pager, render);
     status.hidden = res.rows.length > 0;
     if (!res.rows.length) {
       status.textContent = state.docs.length ? "No entry matches the current search and filters."

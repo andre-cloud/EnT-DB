@@ -18,6 +18,10 @@
   </header>
 
   <p class="banner" id="adm-msg" hidden></p>
+  <div class="banner" id="imp" hidden>
+    <span id="imp-text"></span>
+    <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
+  </div>
 
   <form class="login" id="login" hidden novalidate>
     <h2>Curator sign-in</h2>
@@ -70,6 +74,12 @@
   <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
   <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
 
+    <div class="actions" id="bulk">
+      <button class="btn" id="bulk-approve" type="button" hidden></button>
+      <button class="btn primary" id="bulk-confirm" type="button" hidden></button>
+      <button class="btn" id="bulk-cancel" type="button" hidden>Cancel</button>
+    </div>
+    <p class="err" id="bulk-err" hidden></p>
     <div id="status" class="status">Loading…</div>
     <main id="list" class="list"></main>
   </div>

@@ -27,6 +27,7 @@ method fully specified, DOI resolves, agreement with existing entries). It does 
 | `docs/assets/score.js` | The scoring rules (shared by browser and server) |
 | `supabase/schema.sql` | Database tables, access rules and the public view |
 | `supabase/seed.sql` | First batch of literature entries, imported as pending |
+| `docs/batches/` | Literature batches (JSON). A curator imports new ones into the queue from the review page |
 | `supabase/functions/submit/index.ts` | Server function: validates, scores, stores, notifies. **Generated** |
 | `tools/` | `build-function.mjs` regenerates the server function; `test-score.mjs` tests the scoring |
 
@@ -94,6 +95,16 @@ Choose one or both; the function sends whichever is configured.
 
 Supabase pauses a free project after a week without requests. Any visit to the site counts as a request;
 if the site may sit unvisited, set up a weekly ping of the site's public data URL.
+
+## Literature batches
+
+`docs/batches/index.json` lists JSON files of entries transcribed from openly licensed datasets, in review-priority order
+(experimental values and well-known catalysts first). When a curator opens `admin.html`, entries not yet in the database are
+offered for import as *pending*; each carries an `import_key`, so importing twice adds nothing. Sources and licences:
+
+- MarcusEnT supporting data (Hölter, Schlosser, Hümpel, Spierling, Glorius), Zenodo doi:10.5281/zenodo.23505512, CC BY 4.0
+- EnTdecker dataset (Schlosser et al., J. Am. Chem. Soc. 2024, 146, 13266), Zenodo doi:10.5281/zenodo.10391170, CC BY 4.0
+- DvTE benchmark data (Popescu, Paton, Chem 2024, 10, 3428), github.com/patonlab/DvTE, MIT licence
 
 ## Development
 

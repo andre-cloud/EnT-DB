@@ -85,7 +85,7 @@
   }
 
   /* ---------- search state and controls ---------- */
-  Ent.newSearch = function () { return { q: "", origin: "", sort: "added", ss: { smiles: "", mode: "sub", thr: 0.5 } }; };
+  Ent.newSearch = function () { return { q: "", origin: "", sort: "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
   Ent.filterRows = function (docs, st) {
     var q = st.q.trim().toLowerCase(), r = structureHits(docs, st.ss), hits = r.hits;
     var rows = docs.filter(function (d) {
@@ -100,8 +100,9 @@
     else rows.sort(function (a, b) { return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1; });
     return { rows: rows, scores: hits || {}, searching: !!hits, err: r.err };
   };
-  Ent.bindSearch = function (st, render) {
+  Ent.bindSearch = function (st, rerender) {
     var t = null;
+    var render = function () { if (st.pager) st.pager.shown = 0; rerender(); };
     $("q").addEventListener("input", function (e) { st.q = e.target.value; render(); });
     $("f-origin").addEventListener("change", function (e) { st.origin = e.target.value; render(); });
     $("f-sort").addEventListener("change", function (e) { st.sort = e.target.value; render(); });
@@ -255,6 +256,21 @@
     return c;
   };
 
+  /* ---------- long lists: draw 50 cards at a time ---------- */
+  var STEP = 50;
+  /* pager = {shown: n}; reset pager.shown to 0 when the filters change */
+  Ent.drawList = function (list, rows, makeCard, pager, rerender) {
+    if (!pager.shown) pager.shown = STEP;
+    var nodes = rows.slice(0, pager.shown).map(makeCard);
+    if (rows.length > pager.shown) {
+      var more = el("button", "btn", "Show " + Math.min(STEP, rows.length - pager.shown) + " more (" + (rows.length - pager.shown) + " not shown)");
+      more.type = "button";
+      more.addEventListener("click", function () { pager.shown += STEP; rerender(); });
+      nodes.push(more);
+    }
+    list.replaceChildren.apply(list, nodes);
+  };
+
   /* ---------- sketcher ---------- */
   var editor = null, skOpts = null;
   function skMsg(t) { var m = $("sk-msg"); m.hidden = !t; m.textContent = t || ""; }
@@ -325,8 +341,22 @@
   api.checkAccess = function (a) {
     return fetch(base + "/rest/v1/rpc/check_access", { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
   };
+  /* The API returns at most 1000 rows per request, so long lists are read page by page. */
+  var PAGE = 1000;
+  function allPages(getPage) {
+    var out = [];
+    return (function next(offset) {
+      return getPage(offset).then(function (rows) {
+        out = out.concat(rows || []);
+        return rows && rows.length === PAGE ? next(offset + PAGE) : out;
+      });
+    })(0);
+  }
   api.listPublic = function (a) {
-    return fetch(base + "/rest/v1/rpc/list_entries?order=created_at.asc", { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
+    return allPages(function (offset) {
+      return fetch(base + "/rest/v1/rpc/list_entries?order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
+        { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
+    });
   };
   api.submit = function (payload) {
     return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(), body: JSON.stringify(payload) }).then(asJson);
@@ -363,7 +393,42 @@
     return authed(function (t) { return fetch(base + "/rest/v1/rpc/is_admin", { method: "POST", headers: headers(t), body: "{}" }).then(asJson); });
   };
   api.adminList = function () {
-    return authed(function (t) { return fetch(base + "/rest/v1/entries?select=*&order=created_at.asc", { headers: headers(t) }).then(asJson); });
+    return authed(function (t) {
+      return allPages(function (offset) {
+        return fetch(base + "/rest/v1/entries?select=*&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset, { headers: headers(t) }).then(asJson);
+      });
+    });
+  };
+  /* Same patch on many rows, 100 ids per request. -> Promise<number of rows changed> */
+  api.adminPatchMany = function (ids, patch) {
+    var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    return authed(function (t) {
+      return chunks.reduce(function (p, c) {
+        return p.then(function (n) {
+          return fetch(base + "/rest/v1/entries?id=in.(" + c.join(",") + ")",
+            { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) })
+            .then(asJson).then(function (rows) { return n + (rows ? rows.length : 0); });
+        });
+      }, Promise.resolve(0));
+    });
+  };
+  /* Insert literature rows; rows whose import_key already exists are skipped. */
+  api.adminImport = function (rows) {
+    var chunks = []; for (var i = 0; i < rows.length; i += 100) chunks.push(rows.slice(i, i + 100));
+    return authed(function (t) {
+      return chunks.reduce(function (p, c) {
+        return p.then(function () {
+          return fetch(base + "/rest/v1/entries?on_conflict=import_key",
+            { method: "POST", headers: headers(t, { Prefer: "resolution=ignore-duplicates,return=minimal" }), body: JSON.stringify(c) }).then(asJson);
+        });
+      }, Promise.resolve());
+    });
+  };
+  /* Literature batches published with the site: index.json lists the files. */
+  api.batches = function () {
+    return fetch("batches/index.json", { cache: "no-store" }).then(asJson).then(function (idx) {
+      return Promise.all((idx.files || []).map(function (f) { return fetch("batches/" + f, { cache: "no-store" }).then(asJson); }));
+    }).then(function (lists) { return [].concat.apply([], lists); });
   };
   api.adminPatch = function (id, patch) {
     return authed(function (t) {
