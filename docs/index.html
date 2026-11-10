@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EnT-DB · Triplet Energy Database</title>
+<meta name="description" content="Curated triplet energies of energy-transfer donors and acceptors, with method, source and structure search.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>EnT-DB</h1>
+    <p class="lede">Triplet energies of energy-transfer donors and acceptors, each with how it was determined and where it was published. Entries are reviewed by a curator before they appear.</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" id="tab-db" role="tab" data-view="db" aria-selected="true">Database<span class="n" id="n-db">0</span></button>
+    <button class="tab" id="tab-submit" role="tab" data-view="submit" aria-selected="false">Submit entry</button>
+  </nav>
+
+  <div class="tools" id="tools-main">
+    <input id="q" class="grow" type="search" placeholder="Search name, SMILES, DOI or source" aria-label="Text search">
+    <select id="f-origin" aria-label="Data origin">
+      <option value="">Experimental and computed</option>
+      <option value="exp">Experimental only</option>
+      <option value="calc">Computed only</option>
+    </select>
+    <select id="f-sort" aria-label="Sort order">
+      <option value="added">Order added</option>
+      <option value="et-asc">E_T ascending</option>
+      <option value="et-desc">E_T descending</option>
+      <option value="sim">Similarity to query</option>
+    </select>
+  </div>
+
+  <section class="ssearch" id="ss-box" aria-labelledby="ss-title">
+    <h2 id="ss-title">Structure search</h2>
+    <div class="tools">
+      <input id="ss-smiles" class="grow mono" type="text" placeholder="Query SMILES, e.g. C=Cc1ccccc1" aria-label="Query SMILES" spellcheck="false" autocomplete="off">
+      <select id="ss-mode" aria-label="Search type">
+        <option value="sub">Substructure</option>
+        <option value="exact">Exact structure</option>
+        <option value="sim">Similarity</option>
+      </select>
+      <input id="ss-thr" class="num" type="number" min="0" max="1" step="0.05" value="0.5" aria-label="Minimum Tanimoto similarity" hidden>
+      <button class="btn small" id="ss-draw" type="button">Draw query</button>
+      <button class="btn small" id="ss-clear" type="button">Clear</button>
+    </div>
+    <p class="hint" id="ss-info">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+  </section>
+
+  <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
+  <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
+
+  <div id="status" class="status">Loading the database…</div>
+  <main id="list" class="list"></main>
+
+  <form class="form" id="form" hidden novalidate>
+    <h2>Submit a triplet energy</h2>
+    <p class="hint">The entry is scored as you type. After you send it, a curator reviews it; it appears in the database only once approved.</p>
+    <p class="banner" id="fm-closed" hidden>Submissions are not open yet. You can fill the form to see how an entry is scored, but it cannot be sent.</p>
+
+    <fieldset>
+      <legend>Molecule</legend>
+      <div class="frow">
+        <label class="field">Name<input id="fm-name" type="text" autocomplete="off"></label>
+        <label class="field">Class (optional)<input id="fm-cls" type="text" placeholder="e.g. Styrenes" autocomplete="off"></label>
+      </div>
+      <label class="field">SMILES<input id="fm-smiles" class="mono" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. C/C=C/c1ccccc1"></label>
+      <div class="struct">
+        <div class="paper" id="fm-preview">Type a SMILES or draw the structure</div>
+        <div class="sinfo">
+          <button class="btn small" id="fm-draw" type="button">Draw structure</button>
+          <span class="formula" id="fm-formula"></span>
+          <label class="field">Role in energy transfer
+            <select id="fm-role"><option value="acceptor">Acceptor</option><option value="donor">Donor (sensitizer)</option><option value="both">Both</option></select>
+          </label>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Triplet energy</legend>
+      <div class="frow">
+        <label class="field">Value<input id="fm-et" type="number" step="any" inputmode="decimal"></label>
+        <label class="field">Unit
+          <select id="fm-unit"><option value="kcal">kcal/mol</option><option value="kj">kJ/mol</option><option value="ev">eV</option></select>
+        </label>
+        <label class="field">± Uncertainty (optional)<input id="fm-unc" type="number" step="any" min="0" inputmode="decimal"></label>
+      </div>
+      <div class="frow">
+        <label class="field">How was it obtained
+          <select id="fm-origin"><option value="exp">Experiment</option><option value="calc">Computation</option></select>
+        </label>
+        <label class="field">Value type
+          <select id="fm-kind">
+            <option value="">Choose…</option>
+            <option>Spectroscopic, 0-0 band</option>
+            <option>Spectroscopic, vertical (band onset or maximum)</option>
+            <option>Relaxed triplet</option>
+            <option>From energy-transfer kinetics</option>
+            <option>Computed, adiabatic</option>
+            <option>Computed, vertical</option>
+            <option>Other or not stated</option>
+          </select>
+        </label>
+      </div>
+      <div id="fm-exp">
+        <div class="frow">
+          <label class="field">Technique
+            <select id="fm-tech">
+              <option value="">Choose…</option>
+              <option>Phosphorescence</option>
+              <option>S0→T1 absorption (O2 or heavy-atom perturbed)</option>
+              <option>Energy-transfer bracketing or quenching kinetics</option>
+              <option>Photoacoustic calorimetry</option>
+              <option>Electron-energy-loss spectroscopy</option>
+              <option>Other</option>
+            </select>
+          </label>
+          <label class="field">Solvent or matrix<input id="fm-solvent" type="text" autocomplete="off"></label>
+          <label class="field">Temperature<input id="fm-temp" type="text" placeholder="e.g. 77 K" autocomplete="off"></label>
+        </div>
+      </div>
+      <div id="fm-calc" hidden>
+        <div class="frow">
+          <label class="field">Method or functional<input id="fm-func" type="text" placeholder="e.g. ωB97X-D" autocomplete="off"></label>
+          <label class="field">Basis set<input id="fm-basis" type="text" placeholder="e.g. def2-TZVP" autocomplete="off"></label>
+          <label class="field">Solvent model<input id="fm-solv" type="text" placeholder="e.g. PCM (MeCN) or gas phase" autocomplete="off"></label>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Source</legend>
+      <label class="field">Citation<input id="fm-cite" type="text" placeholder="Authors, journal, year, volume, pages" autocomplete="off"></label>
+      <div class="frow">
+        <label class="field">DOI<input id="fm-doi" class="mono" type="text" placeholder="10.xxxx/…" spellcheck="false" autocomplete="off"></label>
+        <label class="field">Where in the paper<input id="fm-loc" type="text" placeholder="e.g. Table 2, p. 460, or SI p. S14" autocomplete="off"></label>
+      </div>
+      <label class="field">Short verbatim line stating the value or method (optional)<input id="fm-quote" type="text" autocomplete="off"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Absorption (optional)</legend>
+      <div class="frow">
+        <label class="field">UV-vis, if measured<input id="fm-uv" type="text" placeholder="λmax, ε, solvent" autocomplete="off"></label>
+        <label class="field">Direct excitation wavelength<input id="fm-direct" type="text" placeholder="e.g. below 320 nm" autocomplete="off"></label>
+      </div>
+      <label class="field">Your name or contact (optional, seen only by curators)<input id="fm-by" type="text" autocomplete="off"></label>
+      <div class="hp" aria-hidden="true"><label>Leave this field empty<input id="fm-website" type="text" tabindex="-1" autocomplete="off"></label></div>
+    </fieldset>
+
+    <div class="scorebox" aria-live="polite">
+      <div class="top"><span class="num" id="fm-score">0</span><span class="chip plain" id="fm-grade">Poor</span><span class="hint">Completeness and consistency score, out of 100. It does not prove the value is correct. The final score is recomputed on the server.</span></div>
+      <ul id="fm-items"></ul>
+    </div>
+    <p class="err" id="fm-err" hidden></p>
+    <p class="ok" id="fm-ok" hidden></p>
+    <div class="actions">
+      <button class="btn primary" id="fm-submit" type="submit">Send for review</button>
+      <button class="btn" id="fm-reset" type="button">Clear form</button>
+    </div>
+  </form>
+  <footer class="foot">Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/EnT-DB">github.com/nuniwo-source/EnT-DB</a>.</footer>
+</div>
+
+<div class="sk" id="sk" hidden>
+  <div class="sk-box" role="dialog" aria-modal="true" aria-labelledby="sk-title">
+    <h2 id="sk-title">Sketcher</h2>
+    <div id="sk-editor"></div>
+    <div class="sk-row">
+      <input id="sk-smiles" aria-label="SMILES" spellcheck="false" autocomplete="off">
+      <button class="btn small" id="sk-draw" type="button">Redraw from SMILES</button>
+      <button class="btn small" id="sk-read" type="button">Read SMILES from drawing</button>
+    </div>
+    <p class="hint" id="sk-hint"></p>
+    <p class="err" id="sk-msg" hidden></p>
+    <div class="actions">
+      <button class="btn primary" id="sk-save" type="button">Save structure</button>
+      <button class="btn" id="sk-close" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<script src="assets/config.js"></script>
+<script src="assets/score.js"></script>
+<script src="assets/common.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
