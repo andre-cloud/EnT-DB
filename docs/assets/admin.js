@@ -61,9 +61,8 @@
 
   function start() {
     if (!api.configured) { show(""); banner("The backend is not configured yet, so there is nothing to review. See the setup steps in the repository README."); return; }
-    var hashErr = api.consumeHash();
     api.token().then(function (t) {
-      if (!t) { show("login"); if (hashErr) banner("Sign-in failed: " + hashErr); return; }
+      if (!t) { show("login"); return; }
       api.isAdmin().then(function (ok) {
         if (ok === true) { show("panel"); banner(""); load(); }
         else signedOut("This address is not a curator of this database.");
@@ -73,15 +72,15 @@
 
   $("login").addEventListener("submit", function (e) {
     e.preventDefault();
-    var email = $("login-email").value.trim(); $("login-ok").hidden = true; $("login-err").hidden = true;
-    if (!/^\S+@\S+\.\S+$/.test(email)) { $("login-err").textContent = "Enter a valid email address."; $("login-err").hidden = false; return; }
-    $("login-send").disabled = true;
-    api.sendLink(email, location.origin + location.pathname).then(function () {
-      $("login-send").disabled = false;
-      $("login-ok").textContent = "Check your inbox for the sign-in link, then open it on this device."; $("login-ok").hidden = false;
+    var email = $("login-email").value.trim(), pass = $("login-pass").value; $("login-err").hidden = true;
+    if (!/^\S+@\S+\.\S+$/.test(email) || !pass) { $("login-err").textContent = "Enter your email and password."; $("login-err").hidden = false; return; }
+    $("login-send").disabled = true; banner("");
+    api.signIn(email, pass).then(function () {
+      $("login-send").disabled = false; $("login-pass").value = ""; start();
     }, function (err) {
       $("login-send").disabled = false;
-      $("login-err").textContent = err.status === 429 ? "Too many sign-in emails. Wait a few minutes and try again." : "The link could not be sent. Try again.";
+      $("login-err").textContent = err.status === 400 || err.status === 401 ? "Wrong email or password."
+        : err.status === 429 ? "Too many attempts. Wait a few minutes and try again." : "Sign-in failed. Try again.";
       $("login-err").hidden = false;
     });
   });
