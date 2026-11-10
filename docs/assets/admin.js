@@ -31,16 +31,64 @@
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
     var res = Ent.filterRows(inView, state.search);
     Ent.searchInfo(res, inView.length);
-    list.replaceChildren.apply(list, res.rows.map(function (d) {
+    Ent.drawList(list, res.rows, function (d) {
       return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim",
         admin: { busy: state.busy, drafts: state.drafts, onPatch: onPatch } });
-    }));
+    }, state.search.pager, render);
+    drawBulk(res.rows);
     status.hidden = res.rows.length > 0;
     if (!res.rows.length) {
       status.textContent = inView.length ? "No entry matches the current search and filters."
         : state.view === "pending" ? "The queue is empty." : state.view === "approved" ? "Nothing approved yet." : "Nothing rejected.";
     }
   }
+
+  /* ---------- approve everything the current filters show ---------- */
+  var bulkIds = [], bulkArmed = false;
+  function drawBulk(rows) {
+    bulkIds = state.view === "pending" ? rows.map(function (d) { return d.id; }) : [];
+    var n = bulkIds.length;
+    $("bulk-approve").hidden = !n || bulkArmed; $("bulk-approve").textContent = "Approve all " + n + " listed";
+    $("bulk-confirm").hidden = !n || !bulkArmed; $("bulk-confirm").textContent = "Confirm: approve " + n + " entries";
+    $("bulk-cancel").hidden = !n || !bulkArmed;
+  }
+  function bulkReset() { bulkArmed = false; $("bulk-confirm").disabled = false; }
+  $("bulk-approve").addEventListener("click", function () { bulkArmed = true; $("bulk-err").hidden = true; render(); });
+  $("bulk-cancel").addEventListener("click", function () { bulkReset(); render(); });
+  $("bulk-confirm").addEventListener("click", function () {
+    var ids = bulkIds.slice(); $("bulk-confirm").disabled = true;
+    api.adminPatchMany(ids, { status: "approved", decided_at: new Date().toISOString() }).then(function () {
+      bulkReset(); load();
+    }, function () {
+      bulkReset(); $("bulk-err").textContent = "Not all entries could be approved. Refresh to see which ones went through."; $("bulk-err").hidden = false; load();
+    });
+  });
+
+  /* ---------- literature batches published with the site ---------- */
+  var pendingImport = [];
+  function checkBatches() {
+    api.batches().then(function (rows) {
+      var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
+      pendingImport = rows.filter(function (r) { return r.import_key && !have[r.import_key]; });
+      $("imp").hidden = !pendingImport.length;
+      $("imp-text").textContent = pendingImport.length + " new literature entries are ready to add to the queue.";
+    }, function () { $("imp").hidden = true; });   /* no batches published: nothing to offer */
+  }
+  $("imp-go").addEventListener("click", function () {
+    var base = Date.now();
+    var rows = pendingImport.map(function (r, i) {
+      var o = {}; for (var k in r) o[k] = r[k];
+      o.status = "pending"; o.created_at = new Date(base + i).toISOString(); o.idcode = Ent.idCode(r.smiles);
+      return o;
+    });
+    $("imp-go").disabled = true; $("imp-text").textContent = "Importing " + rows.length + " entries…";
+    api.adminImport(rows).then(function () { $("imp-go").disabled = false; $("imp").hidden = true; load(); },
+      function (err) {
+        $("imp-go").disabled = false;
+        $("imp-text").textContent = "The import stopped: " + (err.message || "unknown error") + ". Entries already added are kept; press the button to continue.";
+        load();
+      });
+  });
 
   /* Rows imported without a structure code get one as soon as the structure library is ready,
      so the server can match later submissions of the same molecule. */
@@ -54,7 +102,7 @@
 
   function load() {
     state.loaded = false; render();
-    return api.adminList().then(function (rows) { state.docs = rows || []; state.loaded = true; render(); backfill(); },
+    return api.adminList().then(function (rows) { state.docs = rows || []; state.loaded = true; render(); backfill(); checkBatches(); },
       function (err) { if (err.status === 401) signedOut("Your session ended. Sign in again."); else { $("status").textContent = "The entries could not be loaded. Use Refresh to try again."; } });
   }
   function signedOut(msg) { api.signOut(); show("login"); banner(msg || ""); }
@@ -87,7 +135,7 @@
   $("signout").addEventListener("click", function (e) { e.preventDefault(); signedOut(""); });
   $("reload").addEventListener("click", load);
   ["pending", "approved", "rejected"].forEach(function (k) {
-    $("tab-" + k).addEventListener("click", function () { state.view = k; render(); });
+    $("tab-" + k).addEventListener("click", function () { state.view = k; state.search.pager.shown = 0; bulkReset(); render(); });
   });
   Ent.bindSearch(state.search, render);
   Ent.sketcher.bind();
