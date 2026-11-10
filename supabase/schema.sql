@@ -66,19 +66,25 @@ create index if not exists entries_ip_idx     on public.entries (ip_hash, create
 
 alter table public.entries enable row level security;
 
--- True when the signed-in user's email is listed in public.admins.
+-- True when the signed-in user's account has a confirmed email listed in public.admins.
+-- The email is read from auth.users, not from the sign-in token, and must be confirmed,
+-- so signing up with a curator's address that has no account yet gives no rights.
 create or replace function public.is_admin()
 returns boolean
 language sql stable security definer
-set search_path = public
+set search_path = ''
 as $$
   select exists (
-    select 1 from public.admins a
-    where lower(a.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+    select 1
+    from auth.users u
+    join public.admins a on lower(a.email) = lower(u.email)
+    where u.id = auth.uid() and u.email_confirmed_at is not null
   );
 $$;
-revoke all on function public.is_admin() from public;
+revoke all on function public.is_admin() from public, anon;
 grant execute on function public.is_admin() to authenticated;
+-- Only the functions above and below read these tables.
+revoke all on public.admins from anon, authenticated;
 
 -- Curators read, edit and delete everything. Nobody else touches the table directly:
 -- new rows come only from the "submit" edge function, which uses the service role.
@@ -86,10 +92,11 @@ drop policy if exists entries_admin_select on public.entries;
 drop policy if exists entries_admin_update on public.entries;
 drop policy if exists entries_admin_delete on public.entries;
 drop policy if exists entries_admin_insert on public.entries;
-create policy entries_admin_insert on public.entries for insert to authenticated with check (public.is_admin());
-create policy entries_admin_select on public.entries for select to authenticated using (public.is_admin());
-create policy entries_admin_update on public.entries for update to authenticated using (public.is_admin()) with check (public.is_admin());
-create policy entries_admin_delete on public.entries for delete to authenticated using (public.is_admin());
+-- "(select ...)" makes Postgres call is_admin() once per query instead of once per row.
+create policy entries_admin_insert on public.entries for insert to authenticated with check ((select public.is_admin()));
+create policy entries_admin_select on public.entries for select to authenticated using ((select public.is_admin()));
+create policy entries_admin_update on public.entries for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+create policy entries_admin_delete on public.entries for delete to authenticated using ((select public.is_admin()));
 
 revoke all on public.entries from anon;
 revoke all on public.entries from authenticated;
@@ -120,24 +127,25 @@ create table if not exists public.site_access (
   pass_hash text not null
 );
 alter table public.site_access enable row level security;   -- no policies: used only by the functions below
+revoke all on public.site_access from anon, authenticated;
 
 create or replace function public.check_access(p_user text default '', p_pass text default '')
 returns boolean
 language sql stable security definer
-set search_path = public, extensions
+set search_path = ''
 as $$
   select not exists (select 1 from public.site_access)
       or exists (
         select 1 from public.site_access s
         where s.username = coalesce(p_user, '')
-          and s.pass_hash = crypt(coalesce(p_pass, ''), s.pass_hash)
+          and s.pass_hash = extensions.crypt(coalesce(p_pass, ''), s.pass_hash)
       );
 $$;
 
 create or replace function public.list_entries(p_user text default '', p_pass text default '')
 returns setof public.public_entries
 language sql stable security definer
-set search_path = public, extensions
+set search_path = ''
 as $$
   select * from public.public_entries
   where public.check_access(p_user, p_pass);
@@ -145,7 +153,7 @@ $$;
 
 -- The view is no longer readable directly: the site goes through list_entries().
 revoke all on public.public_entries from anon, authenticated;
-revoke all on function public.check_access(text, text) from public;
-revoke all on function public.list_entries(text, text) from public;
+revoke all on function public.check_access(text, text) from public, anon, authenticated;
+revoke all on function public.list_entries(text, text) from public, anon, authenticated;
 grant execute on function public.check_access(text, text) to anon, authenticated, service_role;
 grant execute on function public.list_entries(text, text) to anon, authenticated, service_role;

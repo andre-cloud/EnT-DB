@@ -50,8 +50,54 @@ assert.equal(S.normalize({ name: "x".repeat(1000) }).name.length, 200);
 const doc = S.toDoc(f, S.scoreEntry(f, okCtx));
 assert.equal(doc.et_kcal, 62);
 assert.equal(doc.et_reported, "2.69 ± 0.02 eV");
-assert.equal(doc.et_unc, 0.5);
+assert.equal(doc.et_unc, 0.46);   // 0.02 eV, kept to two decimals
 assert.equal(doc.score, 100);
 assert.ok(!("status" in doc) && !("ip_hash" in doc));
+
+// computed branch: a complete computed entry scores 100; a non-computed value type loses 3
+const calc = { ...full, origin: "calc", kind: "Computed, adiabatic", func: "B3LYP", basis: "6-31G*", solv: "PCM, MeCN" };
+assert.equal(S.scoreEntry(S.normalize(calc), okCtx).total, 100);
+const item = (sc, l) => sc.items.find((i) => i.label === l).got;
+assert.equal(item(S.scoreEntry(S.normalize({ ...calc, kind: "Relaxed triplet" }), okCtx), "Value type matches a computation"), 0);
+// ...and so does a measured entry with a computed value type
+assert.equal(item(S.scoreEntry(S.normalize({ ...full, kind: "Computed, vertical" }), okCtx), "Value type stated"), 5);
+// a structure that could not be checked gets no points but is not refused
+const unchecked = S.scoreEntry(S.normalize(full), { ...okCtx, structureOk: null });
+assert.equal(item(unchecked, "Structure parses"), 0);
+assert.equal(S.requiredError(S.normalize(full), { structureOk: null }), null);
+// a verbatim line longer than 25 words loses its points
+assert.equal(item(S.scoreEntry(S.normalize({ ...full, quote: "w ".repeat(26) }), okCtx), "Verbatim line"), 0);
+// DOI clean-up and validation
+assert.equal(S.normalize({ doi: "doi: 10.1021/jacs.0c05069" }).doi, "10.1021/jacs.0c05069");
+assert.equal(S.normalize({ doi: "http://dx.doi.org/10.1021/jacs.0c05069" }).doi, "10.1021/jacs.0c05069");
+assert.equal(item(S.scoreEntry(S.normalize({ ...full, doi: "jacs.0c05069" }), okCtx), "DOI well formed"), 0);
+// grade boundaries
+assert.equal(S.gradeOf(80).label, "Good"); assert.equal(S.gradeOf(79).label, "Fair");
+assert.equal(S.gradeOf(50).label, "Fair"); assert.equal(S.gradeOf(49).label, "Poor");
+// consistency unknown (no structure match possible) scores 0
+assert.equal(S.scoreEntry(f, { ...okCtx, same: null }).items.find((i) => i.label.startsWith("Consistency")).got, 0);
+// duplicate edge: 62.05 is stored as 62.1, and a later 62.05 is still a duplicate
+const f2 = S.normalize({ ...full, et: "62.05", unit: "kcal", unc: "" });
+assert.equal(S.scoreEntry(f2, { ...okCtx, same: [{ name: "a", doi: "10.1234/example.5678", et_kcal: 62.1 }] })
+  .items.find((i) => i.label.startsWith("Consistency")).got, 0);
+// a measured value is not compared with computed ones of the same molecule
+assert.equal(cons([{ name: "a", doi: "10.1234/example.5678", et_kcal: 62.0, origin: "calc" }]), 8);
+assert.equal(cons([{ name: "a", doi: "x", et_kcal: 40, origin: "calc" }, { name: "b", doi: "y", et_kcal: 61, origin: "exp" }]), 8);
+// E_T must be a number in (0, 200] kcal/mol
+assert.ok(S.requiredError(S.normalize({ ...full, et: "1e308" }), okCtx));
+assert.ok(S.requiredError(S.normalize({ ...full, et: "-3", unit: "kcal" }), okCtx));
+assert.ok(S.requiredError(S.normalize({ ...full, et: "250", unit: "kcal" }), okCtx));
+assert.equal(S.requiredError(S.normalize({ ...full, et: "200", unit: "kcal" }), okCtx), null);
+// strict numbers, decimal comma accepted
+assert.ok(isNaN(S.num("62abc")));
+assert.equal(S.num("2,69"), 2.69);
+assert.equal(S.num(" 61.5 "), 61.5);
+// small uncertainties survive rounding
+assert.equal(S.toDoc(S.normalize({ ...full, unc: "0.1", unit: "kj", et: "250" }), { total: 0, items: [] }).et_unc, 0.02);
+// "used in" papers
+assert.ok(S.requiredError(S.normalize({ ...full, usedoi: "not a doi" }), okCtx));
+assert.ok(S.requiredError(S.normalize({ ...full, usenote: "used as donor" }), okCtx));
+const used = S.toDoc(S.normalize({ ...full, usedoi: "https://doi.org/10.1/x", usenote: "donor" }), { total: 0, items: [] });
+assert.deepEqual(used.uses, [{ doi: "10.1/x", note: "donor" }]);
 
 console.log("score tests passed");

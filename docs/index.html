@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>EnT-DB · Triplet Energy Database</title>
 <meta name="description" content="Curated triplet energies of energy-transfer donors and acceptors, with method, source and structure search.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -24,7 +25,7 @@
       <label class="field">Password<input id="gate-pass" type="password" autocomplete="current-password"></label>
       <div class="actions"><button class="btn primary" id="gate-send" type="submit">Enter</button></div>
     </div>
-    <p class="err" id="gate-err" hidden></p>
+    <p class="err" id="gate-err" role="alert" hidden></p>
   </form>
 
   <div class="stack" id="app-body" hidden>
@@ -50,8 +51,9 @@
   <div class="tools" id="tools-filter">
     <select id="f-role" aria-label="Role">
       <option value="">Donors and acceptors</option>
-      <option value="acceptor">Acceptors only</option>
-      <option value="donor">Donors only</option>
+      <option value="acceptor">Acceptors (with dual-role)</option>
+      <option value="donor">Donors (with dual-role)</option>
+      <option value="both">Dual-role only</option>
     </select>
     <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
     <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
@@ -72,7 +74,7 @@
       <button class="btn small" id="ss-draw" type="button">Draw query</button>
       <button class="btn small" id="ss-clear" type="button">Clear</button>
     </div>
-    <p class="hint" id="ss-info">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+    <p class="hint" id="ss-info" aria-live="polite">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
   </section>
 
   <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
@@ -184,7 +186,7 @@
       <div class="top"><span class="num" id="fm-score">0</span><span class="chip plain" id="fm-grade">Poor</span><span class="hint">Completeness and consistency score, out of 100. It does not prove the value is correct. The final score is recomputed on the server.</span></div>
       <ul id="fm-items"></ul>
     </div>
-    <p class="err" id="fm-err" hidden></p>
+    <p class="err" id="fm-err" role="alert" hidden></p>
     <p class="ok" id="fm-ok" hidden></p>
     <div class="actions">
       <button class="btn primary" id="fm-submit" type="submit">Send for review</button>

@@ -15,16 +15,19 @@
   function pct(v) { return Math.max(0, Math.min(100, (v - S_MIN) / (S_MAX - S_MIN) * 100)); }
 
   /* ---------- OpenChemLib ---------- */
+  /* The same version as the server (supabase/functions/submit), so structure codes match.
+     The integrity hash makes the browser refuse a file that differs from the published one;
+     a curator's session token lives in this page, so a tampered library must never run. */
   var OCL_URLS = [
     "https://cdn.jsdelivr.net/npm/openchemlib@8.19.0/dist/openchemlib-full.js",
-    "https://unpkg.com/openchemlib@8.19.0/dist/openchemlib-full.js",
-    "https://cdn.jsdelivr.net/npm/openchemlib@8.15.0/dist/openchemlib-full.js",
-    "https://cdn.jsdelivr.net/npm/openchemlib@7.5.0/dist/openchemlib-full.js"
+    "https://unpkg.com/openchemlib@8.19.0/dist/openchemlib-full.js"
   ];
+  var OCL_SRI = "sha256-QXEA2RW3DM6tLPYhhn9caWyk+jMJ6IllT31UYjDydSk=";
   Ent.loadOCL = function (onReady) {
     (function next(urls) {
       if (!urls.length) { var m = $("ocl-msg"); if (m) m.hidden = false; return; }
       var s = document.createElement("script"); s.src = urls[0];
+      s.integrity = OCL_SRI; s.crossOrigin = "anonymous";
       s.onload = function () { if (window.OCL) onReady(); else next(urls.slice(1)); };
       s.onerror = function () { next(urls.slice(1)); };
       document.head.appendChild(s);
@@ -56,11 +59,12 @@
     if (m) { try { ix = searcher.createIndex(m); } catch (e) { try { ix = m.getIndex(); } catch (e2) { ix = null; } } }
     idxCache[smiles] = ix; return ix;
   }
-  /* -> {hits: null | {id: score}, err: ""} ; hits null means no structure query is active */
+  /* -> {hits: null | {id: score}, err: ""} ; hits null means no structure query is active.
+     A query that cannot be run matches nothing, so a failed search never shows (or bulk-approves) everything. */
   function structureHits(docs, ss) {
     var qs = (ss.smiles || "").trim();
     if (!qs) return { hits: null, err: "" };
-    if (!window.OCL) return { hits: null, err: "Structure search needs the structure library, which did not load." };
+    if (!window.OCL) return { hits: {}, err: "Structure search needs the structure library, which did not load." };
     var q = null;
     try { q = OCL.Molecule.fromSmiles(qs); if (!(q.getAllAtoms() > 0)) q = null; } catch (e) { q = null; }
     if (!q) return { hits: {}, err: "The query SMILES could not be read." };
@@ -80,7 +84,7 @@
           var t = OCL.SSSearcherWithIndex.getSimilarityTanimoto(qi, ix); if (t >= ss.thr) hits[d.id] = t;
         });
       }
-    } catch (e) { return { hits: null, err: "This search type is not available with the loaded structure library." }; }
+    } catch (e) { return { hits: {}, err: "This search type is not available with the loaded structure library." }; }
     return { hits: hits, err: "" };
   }
 
@@ -101,7 +105,10 @@
     if (st.sort === "et-asc") rows.sort(function (a, b) { return a.et_kcal - b.et_kcal; });
     else if (st.sort === "et-desc") rows.sort(function (a, b) { return b.et_kcal - a.et_kcal; });
     else if (st.sort === "sim" && hits) rows.sort(function (a, b) { return (hits[b.id] || 0) - (hits[a.id] || 0); });
-    else rows.sort(function (a, b) { return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1; });
+    else rows.sort(function (a, b) {
+      var x = String(a.created_at || ""), y = String(b.created_at || "");
+      return x < y ? -1 : x > y ? 1 : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
+    });
     return { rows: rows, scores: hits || {}, searching: !!hits, err: r.err };
   };
   Ent.bindSearch = function (st, rerender) {
@@ -115,8 +122,11 @@
     $("f-etmin").addEventListener("input", function (e) { st.etmin = parseFloat(e.target.value); render(); });
     $("f-etmax").addEventListener("input", function (e) { st.etmax = parseFloat(e.target.value); render(); });
     $("f-reset").addEventListener("click", function () {
-      st.q = ""; st.origin = ""; st.role = ""; st.cls = ""; st.etmin = NaN; st.etmax = NaN;
-      ["q", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax"].forEach(function (id) { $(id).value = ""; });
+      var fresh = Ent.newSearch();
+      ["q", "origin", "role", "cls", "etmin", "etmax", "sort"].forEach(function (k) { st[k] = fresh[k]; });
+      st.ss.smiles = ""; st.ss.mode = fresh.ss.mode; st.ss.thr = fresh.ss.thr;
+      ["q", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "ss-smiles"].forEach(function (id) { $(id).value = ""; });
+      $("f-sort").value = st.sort; $("ss-mode").value = st.ss.mode; $("ss-thr").value = String(st.ss.thr); $("ss-thr").hidden = true;
       render();
     });
     $("ss-smiles").addEventListener("input", function (e) {
@@ -139,16 +149,19 @@
     });
     $("ss-clear").addEventListener("click", function () { st.ss.smiles = ""; $("ss-smiles").value = ""; render(); });
   };
-  /* Keeps the class menu in step with the classes present in the data. */
+  /* Keeps the class menu in step with the classes present in the data, and the search
+     state in step with the menu: a class that is no longer listed stops filtering. */
   var classSig = "";
-  Ent.fillClasses = function (docs) {
+  Ent.fillClasses = function (docs, st) {
     var seen = {}; docs.forEach(function (d) { if (d.cls) seen[d.cls] = 1; });
-    var list = Object.keys(seen).sort(), sig = list.join("|");
-    if (sig === classSig) return; classSig = sig;
-    var sel = $("f-cls"), cur = sel.value;
-    sel.replaceChildren(new Option("All classes", ""));
-    list.forEach(function (c) { sel.appendChild(new Option(c, c)); });
-    sel.value = seen[cur] ? cur : "";
+    if (st && st.cls && !seen[st.cls]) st.cls = "";
+    var list = Object.keys(seen).sort(), sig = list.join("|"), sel = $("f-cls");
+    if (sig !== classSig) {
+      classSig = sig;
+      sel.replaceChildren(new Option("All classes", ""));
+      list.forEach(function (c) { sel.appendChild(new Option(c, c)); });
+    }
+    sel.value = st ? st.cls : (seen[sel.value] ? sel.value : "");
   };
   Ent.searchInfo = function (res, total) {
     var info = $("ss-info");
@@ -251,21 +264,23 @@
     if (adm) {
       if (d.score_items && d.score_items.length) {
         var lost = d.score_items.filter(function (i) { return i.got < i.max; });
-        row(dl, "Check", lost.length ? "Points lost on: " + lost.map(function (i) { return i.label + " (" + i.got + "/" + i.max + ")"; }).join("; ") : "All checks passed");
+        var edited = d.score_items.filter(function (i) { return i.edited; }).pop();
+        row(dl, "Check", (lost.length ? "Points lost on: " + lost.map(function (i) { return i.label + " (" + i.got + "/" + i.max + ")"; }).join("; ") : "All checks passed")
+          + (edited ? ". The score predates a curator's edit of " + edited.note + "." : ""));
       }
       row(dl, "Submitted by", d.submitted_by);
       row(dl, "Received", d.created_at ? new Date(d.created_at).toLocaleString() : "");
     }
     c.appendChild(dl);
-    if (Array.isArray(d.uses) && d.uses.length) {
-      var uh = el("p", "hint", "Used in photocatalysis"), ul = el("ul", "uses");
-      d.uses.forEach(function (u) {
-        if (!u || !u.doi) return;
+    var usesList = Array.isArray(d.uses) ? d.uses.filter(function (u) { return u && u.doi; }) : [];
+    if (usesList.length) {
+      var ul = el("ul", "uses");
+      usesList.forEach(function (u) {
         var li = el("li"); li.appendChild(link("doi:" + u.doi, "https://doi.org/" + encodeURI(u.doi)));
         if (u.note) li.appendChild(document.createTextNode(" · " + u.note));
         ul.appendChild(li);
       });
-      c.appendChild(uh); c.appendChild(ul);
+      c.appendChild(el("p", "hint", "Used in photocatalysis")); c.appendChild(ul);
     }
 
     if (adm) {
@@ -307,7 +322,8 @@
     ["uv", "UV-vis", "text"], ["direct_exc", "Direct excitation", "text"],
     ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
   ];
-  var edSave = null;
+  /* Fields the score was computed from: editing one marks the score as older than the entry. */
+  var SCORED = ["name", "origin", "et_kcal", "et_unc", "et_type", "method", "conditions", "citation", "doi", "location", "quote", "uv", "direct_exc"];
   function useRow(u) {
     var r = el("div", "ed-use");
     var a = el("label", "field", "DOI of a paper where it was used"), ai = el("input"); ai.type = "text"; ai.className = "mono ed-use-doi"; ai.value = (u && u.doi) || ""; a.appendChild(ai);
@@ -318,7 +334,8 @@
   Ent.editor = {
     open: function (d, onSave) {
       var box = el("div", "sk-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
-      box.appendChild(el("h2", null, "Edit · " + (d.name || "")));
+      var h = el("h2", null, "Edit · " + (d.name || "")); h.id = "ed-title"; box.setAttribute("aria-labelledby", "ed-title");
+      box.appendChild(h);
       box.appendChild(el("p", "hint", "The structure is edited with “Open in sketcher” on the card. Changes are saved for every reader as soon as you press Save."));
       EDIT.forEach(function (f) {
         var lab = el("label", "field", f[1]), inp;
@@ -334,21 +351,34 @@
       box.appendChild(uses);
       var add = el("button", "btn small", "Add a paper"); add.type = "button"; add.addEventListener("click", function () { uses.appendChild(useRow(null)); });
       var addWrap = el("div", "actions"); addWrap.appendChild(add); box.appendChild(addWrap);
-      var err = el("p", "err"); err.hidden = true; box.appendChild(err);
+      var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
       var act = el("div", "actions"), save = el("button", "btn primary", "Save changes"), cancel = el("button", "btn", "Cancel");
       save.type = "button"; cancel.type = "button"; act.appendChild(save); act.appendChild(cancel); box.appendChild(act);
       cancel.addEventListener("click", Ent.editor.close);
       save.addEventListener("click", function () {
         var patch = {}, bad = "";
         EDIT.forEach(function (f) {
-          var v = $("ed-" + f[0]).value.trim(), out;
-          if (f[2] === "number") { out = v === "" ? null : parseFloat(v); if (v !== "" && isNaN(out)) bad = f[1] + " must be a number."; }
-          else out = v === "" ? null : v;
+          var v = $("ed-" + f[0]).value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
+          if (f[2] === "number") {
+            out = v === "" ? null : EntScore.num(v);
+            if (v !== "" && isNaN(out)) bad = f[1] + " must be a number.";
+            old = old == null ? null : Number(old);
+          } else out = v === "" ? null : v;
           if (f[0] === "doi" && out) out = EntScore.cleanDoi(out);
-          if (out !== (d[f[0]] == null ? null : d[f[0]])) patch[f[0]] = out;
+          if (out === old) return;
+          /* only what changed is checked, so an old odd value never blocks other edits */
+          if (f[0] === "doi" && out && !EntScore.DOI_RE.test(out)) bad = "“" + out + "” does not look like a DOI.";
+          if ((f[0] === "pdf_url" || f[0] === "si_url") && out && !/^https?:\/\//i.test(out)) bad = f[1] + " must start with http:// or https://.";
+          patch[f[0]] = out;
         });
+        /* A number field that the browser could not read shows as empty: keep the old value. */
+        EDIT.forEach(function (f) { if (f[2] === "number" && $("ed-" + f[0]).validity && $("ed-" + f[0]).validity.badInput) bad = f[1] + " must be a number."; });
         if ("name" in patch && !patch.name) bad = "The name cannot be empty.";
         if ("et_kcal" in patch && patch.et_kcal == null) bad = "E_T cannot be empty.";
+        else if ("et_kcal" in patch && !(patch.et_kcal > 0 && patch.et_kcal <= EntScore.ET_MAX)) bad = "E_T must be above 0 and at most " + EntScore.ET_MAX + " kcal/mol.";
+        if ("et_unc" in patch && patch.et_unc != null && patch.et_unc < 0) bad = "The uncertainty cannot be negative.";
+        if (("et_kcal" in patch || "et_unc" in patch) && !("et_reported" in patch) && d.et_reported)
+          bad = "You changed the value: update “Value as reported” too, so the card does not contradict itself.";
         var list = [];
         Array.prototype.forEach.call(uses.children, function (r) {
           var doi = EntScore.cleanDoi(r.querySelector(".ed-use-doi").value), note = r.querySelector(".ed-use-note").value.trim();
@@ -359,6 +389,11 @@
         if (JSON.stringify(list) !== JSON.stringify(Array.isArray(d.uses) ? d.uses : [])) patch.uses = list.length ? list : null;
         if (bad) { err.textContent = bad; err.hidden = false; return; }
         if (!Object.keys(patch).length) { Ent.editor.close(); return; }
+        var touched = SCORED.filter(function (k) { return k in patch; });
+        if (touched.length && Array.isArray(d.score_items)) {
+          patch.score_items = d.score_items.filter(function (i) { return !i.edited; })
+            .concat([{ label: "Edited by a curator", got: 0, max: 0, edited: true, note: touched.join(", ") + " on " + new Date().toLocaleDateString("en-CA") }]);
+        }
         save.disabled = true; err.hidden = true;
         Promise.resolve(onSave(patch)).then(function (ok) {
           save.disabled = false;
@@ -366,9 +401,23 @@
         });
       });
       var host = $("ed"); host.replaceChildren(box); host.hidden = false;
+      edReturn = document.activeElement;
+      var first = $("ed-name"); if (first) first.focus();
     },
-    close: function () { var host = $("ed"); host.hidden = true; host.replaceChildren(); }
+    close: function () {
+      var host = $("ed"); if (!host || host.hidden) return;
+      host.hidden = true; host.replaceChildren();
+      if (edReturn && edReturn.focus) edReturn.focus(); edReturn = null;
+    }
   };
+  var edReturn = null;
+  /* Escape closes whichever dialog is open. */
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    var ed = $("ed"), sk = $("sk");
+    if (ed && !ed.hidden) Ent.editor.close();
+    else if (sk && !sk.hidden) Ent.sketcher.close();
+  });
 
   /* ---------- long lists: draw 50 cards at a time ---------- */
   var STEP = 50;
@@ -386,7 +435,7 @@
   };
 
   /* ---------- sketcher ---------- */
-  var editor = null, skOpts = null;
+  var editor = null, skOpts = null, skReturn = null;
   function skMsg(t) { var m = $("sk-msg"); m.hidden = !t; m.textContent = t || ""; }
   function editorSmiles() {
     if (!editor) return "";
@@ -398,7 +447,8 @@
       skOpts = opts;
       $("sk-title").textContent = opts.title; $("sk-smiles").value = opts.smiles || ""; $("sk-save").textContent = opts.saveLabel;
       $("sk-hint").textContent = opts.hint + " The sketcher is built for a mouse and may respond poorly to touch."; skMsg("");
-      $("sk").hidden = false;
+      skReturn = document.activeElement;
+      $("sk").hidden = false; $("sk-smiles").focus();
       if (!editor) {
         try {
           if (!window.OCL || !OCL.StructureEditor) throw new Error("no editor");
@@ -408,7 +458,10 @@
       }
       if (editor) { try { editor.setSmiles(opts.smiles || ""); } catch (e) { if (opts.smiles) skMsg("This SMILES could not be drawn."); } }
     },
-    close: function () { $("sk").hidden = true; skOpts = null; },
+    close: function () {
+      $("sk").hidden = true; skOpts = null;
+      if (skReturn && skReturn.focus) skReturn.focus(); skReturn = null;
+    },
     bind: function () {
       $("sk-draw").addEventListener("click", function () {
         skMsg(""); if (!editor) return;

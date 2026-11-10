@@ -8,7 +8,17 @@
   var KCAL_PER_EV = 23.0605, KJ_PER_KCAL = 4.184;
 
   function str(v, max) { return String(v == null ? "" : v).trim().slice(0, max || 500); }
-  function num(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }
+  /* A whole number only: "62abc" is not 62. A decimal comma is accepted ("2,69"). */
+  var NUM_RE = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
+  function num(v) {
+    if (typeof v === "number") return isFinite(v) ? v : NaN;
+    var t = String(v == null ? "" : v).trim();
+    if (t.indexOf(",") >= 0 && t.indexOf(".") < 0) t = t.replace(",", ".");
+    if (!NUM_RE.test(t)) return NaN;
+    var n = parseFloat(t); return isFinite(n) ? n : NaN;
+  }
+  var ET_MAX = 200;   /* kcal/mol; anything above is a typing or unit error, never stored */
+  function round1(x) { return Math.round(x * 10) / 10; }
   function pick(v, allowed, fallback) { return allowed.indexOf(v) >= 0 ? v : fallback; }
 
   var DOI_RE = /^10\.\d{4,9}\/\S+$/;
@@ -56,14 +66,15 @@
     var okEt = !isNaN(f.kcal) && f.kcal >= 20 && f.kcal <= 120;
     add("E_T in a plausible range", okEt ? 12 : 0, 12, isNaN(f.kcal) ? "No value given" : okEt ? "" : "Outside 20–120 kcal/mol: check the unit");
 
-    add("Value type stated", f.kind && f.kind !== "Other or not stated" ? 8 : 0, 8);
+    var stated = f.kind && f.kind !== "Other or not stated", computedKind = /^Computed/.test(f.kind);
+    if (stated && f.origin !== "calc" && computedKind) add("Value type stated", 5, 8, "A computed value type on a measured value");
+    else add("Value type stated", stated ? 8 : 0, 8);
 
     if (f.origin === "calc") {
       add("Method or functional", f.func ? 8 : 0, 8);
       add("Basis set", f.basis ? 7 : 0, 7);
       add("Solvent model", f.solv ? 5 : 0, 5);
-      var ck = /^Computed/.test(f.kind);
-      add("Value type matches a computation", ck ? 3 : 0, 3, ck ? "" : "Choose adiabatic or vertical");
+      add("Value type matches a computation", computedKind ? 3 : 0, 3, computedKind ? "" : "Choose adiabatic or vertical");
     } else {
       add("Technique", f.tech ? 10 : 0, 10);
       add("Solvent or matrix", f.solvent ? 5 : 0, 5);
@@ -83,16 +94,22 @@
     var words = f.quote ? f.quote.split(/\s+/).length : 0;
     add("Verbatim line", words > 0 && words <= 25 ? 4 : 0, 4, words > 25 ? "Keep it to one short line (25 words or fewer)" : "");
 
+    /* Measured and computed values of one molecule legitimately differ, so each is
+       compared only with entries of its own origin (entries without an origin count as both). */
     var cons = 0, note = "No structure to compare";
     if (ctx.same && !isNaN(f.kcal)) {
-      var dup = null, best = Infinity;
-      ctx.same.forEach(function (d) {
+      var dup = null, best = Infinity, mine = round1(f.kcal);
+      var peers = ctx.same.filter(function (d) { return !d.origin || d.origin === f.origin; });
+      peers.forEach(function (d) {
         var diff = Math.abs(Number(d.et_kcal) - f.kcal);
         if (diff < best) best = diff;
-        if (f.doi && String(d.doi || "").toLowerCase() === f.doi.toLowerCase() && diff < 0.05) dup = d;
+        /* stored values are rounded to 0.1, so compare rounded values */
+        if (f.doi && String(d.doi || "").toLowerCase() === f.doi.toLowerCase() && Math.abs(round1(Number(d.et_kcal)) - mine) < 0.05) dup = d;
       });
       if (dup) { cons = 0; note = "Looks like a duplicate of “" + dup.name + "” (same structure, DOI and value)"; }
-      else if (!ctx.same.length) { cons = 8; note = "No existing entry for this structure"; }
+      else if (!peers.length) {
+        cons = 8; note = ctx.same.length ? "No existing " + (f.origin === "calc" ? "computed" : "measured") + " value for this structure" : "No existing entry for this structure";
+      }
       else {
         cons = best <= 5 ? 8 : best <= 10 ? 5 : 2;
         note = best <= 5 ? "Within 5 kcal/mol of an existing entry for this structure"
@@ -113,6 +130,7 @@
     if (!f.smiles) return "Add the structure as a SMILES or draw it.";
     if (ctx.structureOk === false) return "The SMILES could not be read. Fix it or redraw the structure.";
     if (isNaN(f.kcal)) return "Enter the triplet energy value.";
+    if (!(f.kcal > 0 && f.kcal <= ET_MAX)) return "The triplet energy must be above 0 and at most " + ET_MAX + " kcal/mol. Check the value and the unit.";
     if (!f.cite && !f.doi) return "Add a citation or a DOI so the value can be traced.";
     if (f.usedoi && !DOI_RE.test(f.usedoi)) return "The DOI of the paper where the molecule was used does not look like a DOI.";
     if (f.usenote && !f.usedoi) return "Add the DOI of the paper the description refers to.";
@@ -124,19 +142,20 @@
     var unitLabel = f.unit === "kj" ? "kJ/mol" : f.unit === "ev" ? "eV" : "kcal/mol";
     var doc = {
       name: f.name || "(unnamed)", smiles: f.smiles, role: f.role, origin: f.origin,
-      et_kcal: Math.round(f.kcal * 10) / 10,
+      et_kcal: round1(f.kcal),
       et_reported: f.et + (isNaN(f.unc) ? "" : " ± " + f.unc) + " " + unitLabel,
       et_type: f.kind || "Not stated",
       method: f.origin === "calc" ? ["Computation", f.func, f.basis].filter(Boolean).join(", ") : (f.tech || "Not stated"),
       conditions: f.origin === "calc" ? f.solv : [f.solvent, f.temp].filter(Boolean).join(", "),
       source_kind: "form", score: sc.total, score_items: sc.items
     };
-    if (!isNaN(f.uncKcal)) doc.et_unc = Math.round(f.uncKcal * 10) / 10;
+    /* two decimals: 0.02 eV is 0.46 kcal/mol, and 0.1 kJ/mol must not round to 0 */
+    if (!isNaN(f.uncKcal)) doc.et_unc = Math.round(f.uncKcal * 100) / 100;
     [["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv", f.uv], ["direct_exc", f.direct], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
     if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
     return doc;
   }
 
-  root.EntScore = { DOI_RE: DOI_RE, cleanDoi: cleanDoi, normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
+  root.EntScore = { DOI_RE: DOI_RE, ET_MAX: ET_MAX, num: num, cleanDoi: cleanDoi, normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
 })(typeof globalThis !== "undefined" ? globalThis : this);

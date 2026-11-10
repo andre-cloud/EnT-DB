@@ -9,7 +9,7 @@
 
   function render() {
     $("n-db").textContent = state.docs.length;
-    Ent.fillClasses(state.docs);
+    Ent.fillClasses(state.docs, state.search);
     $("tab-db").setAttribute("aria-selected", String(state.view === "db"));
     $("tab-submit").setAttribute("aria-selected", String(state.view === "submit"));
     var sub = state.view === "submit", list = $("list"), status = $("status");
