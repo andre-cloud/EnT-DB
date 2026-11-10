@@ -54,6 +54,17 @@
       <option value="sim">Similarity to query</option>
     </select>
   </div>
+  <div class="tools" id="tools-filter">
+    <select id="f-role" aria-label="Role">
+      <option value="">Donors and acceptors</option>
+      <option value="acceptor">Acceptors only</option>
+      <option value="donor">Donors only</option>
+    </select>
+    <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
+    <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+    <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
+    <button class="btn small" id="f-reset" type="button">Reset filters</button>
+  </div>
 
   <section class="ssearch" id="ss-box" aria-labelledby="ss-title">
     <h2 id="ss-title">Structure search</h2>
@@ -84,6 +95,8 @@
     <main id="list" class="list"></main>
   </div>
 </div>
+
+<div class="sk" id="ed" hidden></div>
 
 <div class="sk" id="sk" hidden>
   <div class="sk-box" role="dialog" aria-modal="true" aria-labelledby="sk-title">

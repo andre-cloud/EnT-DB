@@ -9,10 +9,11 @@
 
   function render() {
     $("n-db").textContent = state.docs.length;
+    Ent.fillClasses(state.docs);
     $("tab-db").setAttribute("aria-selected", String(state.view === "db"));
     $("tab-submit").setAttribute("aria-selected", String(state.view === "submit"));
     var sub = state.view === "submit", list = $("list"), status = $("status");
-    ["tools-main", "ss-box", "legend", "list"].forEach(function (id) { $(id).hidden = sub; });
+    ["tools-main", "tools-filter", "ss-box", "legend", "list"].forEach(function (id) { $(id).hidden = sub; });
     $("form").hidden = !sub;
     if (sub) { status.hidden = true; updateForm(); return; }
     if (!state.loaded) {
@@ -34,7 +35,7 @@
 
   /* ---------- submission form ---------- */
   var FIELDS = ["name", "cls", "smiles", "role", "et", "unit", "unc", "origin", "kind", "tech", "solvent", "temp",
-                "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv", "direct", "by", "website"];
+                "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv", "direct", "usedoi", "usenote", "by", "website"];
   function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); return p; }
   function context(f) {
     var ok = Ent.structureOk(f.smiles), same = null;

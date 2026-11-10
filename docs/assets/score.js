@@ -11,13 +11,16 @@
   function num(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }
   function pick(v, allowed, fallback) { return allowed.indexOf(v) >= 0 ? v : fallback; }
 
+  var DOI_RE = /^10\.\d{4,9}\/\S+$/;
+  function cleanDoi(v) { return str(v, 200).replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/^doi:\s*/i, ""); }
+
   /* Raw form payload -> clean, length-capped fields. */
   function normalize(p) {
     p = p || {};
     var unit = pick(p.unit, ["kcal", "kj", "ev"], "kcal");
     var k = unit === "kj" ? 1 / KJ_PER_KCAL : unit === "ev" ? KCAL_PER_EV : 1;
     var et = num(p.et), unc = num(p.unc);
-    var doi = str(p.doi, 200).replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/^doi:\s*/i, "");
+    var doi = cleanDoi(p.doi);
     return {
       name: str(p.name, 200), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
       role: pick(p.role, ["acceptor", "donor", "both"], "acceptor"),
@@ -28,7 +31,8 @@
       kind: str(p.kind, 80), tech: str(p.tech, 80), solvent: str(p.solvent, 120), temp: str(p.temp, 60),
       func: str(p.func, 120), basis: str(p.basis, 120), solv: str(p.solv, 120),
       cite: str(p.cite, 400), doi: doi, loc: str(p.loc, 200), quote: str(p.quote, 300),
-      uv: str(p.uv, 200), direct: str(p.direct, 200), by: str(p.by, 120)
+      uv: str(p.uv, 200), direct: str(p.direct, 200), by: str(p.by, 120),
+      usedoi: cleanDoi(p.usedoi), usenote: str(p.usenote, 300)
     };
   }
 
@@ -110,6 +114,8 @@
     if (ctx.structureOk === false) return "The SMILES could not be read. Fix it or redraw the structure.";
     if (isNaN(f.kcal)) return "Enter the triplet energy value.";
     if (!f.cite && !f.doi) return "Add a citation or a DOI so the value can be traced.";
+    if (f.usedoi && !DOI_RE.test(f.usedoi)) return "The DOI of the paper where the molecule was used does not look like a DOI.";
+    if (f.usenote && !f.usedoi) return "Add the DOI of the paper the description refers to.";
     return null;
   }
 
@@ -128,8 +134,9 @@
     if (!isNaN(f.uncKcal)) doc.et_unc = Math.round(f.uncKcal * 10) / 10;
     [["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv", f.uv], ["direct_exc", f.direct], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
+    if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
     return doc;
   }
 
-  root.EntScore = { normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
+  root.EntScore = { DOI_RE: DOI_RE, cleanDoi: cleanDoi, normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
 })(typeof globalThis !== "undefined" ? globalThis : this);

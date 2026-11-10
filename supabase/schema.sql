@@ -58,6 +58,8 @@ create table if not exists public.entries (
 -- Key of an entry imported from a literature batch (docs/batches/*.json); makes imports repeatable.
 alter table public.entries add column if not exists import_key text;
 create unique index if not exists entries_import_key_idx on public.entries (import_key);
+-- Papers in which the molecule was used in photocatalysis: [{"doi": "...", "note": "..."}]
+alter table public.entries add column if not exists uses jsonb;
 create index if not exists entries_status_idx on public.entries (status);
 create index if not exists entries_idcode_idx on public.entries (idcode);
 create index if not exists entries_ip_idx     on public.entries (ip_hash, created_at);
@@ -101,7 +103,7 @@ create or replace view public.public_entries as
 select id, created_at, name, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
        citation, doi, location, quote, evidence, pdf_url, pdf_label, si_url, url, url_label,
-       verify_level, verify_note, uv, direct_exc, score
+       verify_level, verify_note, uv, direct_exc, score, uses
 from public.entries
 where status = 'approved';
 
