@@ -82,6 +82,17 @@ BUILTIN_MOLECULES: dict[str, str] = {
     "3-acetylpyrene": "CC(=O)c1ccc2ccc3cccc4ccc1c2c34",
     "trans,trans-1,4-diphenyl-1,3-butadiene": "C(/C=C/c1ccccc1)=C\\c1ccccc1",
     "michler's ketone": "CN(C)c1ccc(C(=O)c2ccc(N(C)C)cc2)cc1",
+    "ir(ppy)3": "[Ir]123(c4ccccc4-c4ccccn->14)(c1ccccc1-c1ccccn->21)c1ccccc1-c1ccccn->31",
+    "fac-ir(ppy)3": "[Ir]123(c4ccccc4-c4ccccn->14)(c1ccccc1-c1ccccn->21)c1ccccc1-c1ccccn->31",
+    "ir(dfppy)3": "[Ir]123(c4cc(F)cc(F)c4-c4ccccn->14)(c1cc(F)cc(F)c1-c1ccccn->21)c1cc(F)cc(F)c1-c1ccccn->31",
+    "fac-ir(dfppy)3": "[Ir]123(c4cc(F)cc(F)c4-c4ccccn->14)(c1cc(F)cc(F)c1-c1ccccn->21)c1cc(F)cc(F)c1-c1ccccn->31",
+    "ru(bpy)3": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "[ru(bpy)3]2+": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "ru(bpy)3(pf6)2": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "[ir(df(cf3)ppy)2(dtbbpy)]+": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C(F)(F)F)cn->14)(c1cc(F)cc(F)c1-c1ccc(C(F)(F)F)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(cf3)ppy)2(dtbbpy)]pf6": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C(F)(F)F)cn->14)(c1cc(F)cc(F)c1-c1ccc(C(F)(F)F)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(me)ppy)2(dtbbpy)]+": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C)cn->14)(c1cc(F)cc(F)c1-c1ccc(C)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(me)ppy)2(dtbbpy)]pf6": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C)cn->14)(c1cc(F)cc(F)c1-c1ccc(C)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
 }
 
 _TRAILING_LABEL_RE = re.compile(r"\s*\((?![ezrs]\)|[ezrs],)[^()]*\)\s*$", re.IGNORECASE)

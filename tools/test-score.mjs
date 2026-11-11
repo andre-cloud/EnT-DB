@@ -111,18 +111,25 @@ assert.equal(S.cleanDoi("https://pubs-acs-org.example-proxy.org/doi/pdf/10.1021/
 assert.equal(S.cleanDoi("https://doi-org.example-proxy.org/10.1021/cm051312%2B"), "10.1021/cm051312+");
 assert.equal(S.cleanDoi("doi: 10.1039/c8cs00054a."), "10.1039/c8cs00054a");
 assert.ok(!S.isDoi(S.cleanDoi("https://pubs.example.org/jacsat/article/145/39/21576")));
-assert.ok(S.requiredError(S.normalize({ smiles: "C=C", et: "60", doi: "https://example.org/article/1" }), {}).startsWith("Give the source as a DOI"));
+assert.ok(S.requiredError(S.normalize({ name: "Ethene", smiles: "C=C", et: "60", doi: "https://example.org/article/1" }), {}).startsWith("Give the source as a DOI"));
+// IUPAC name is always required; commercial_name is optional
+assert.equal(S.requiredError(S.normalize({ ...full, name: "" }), okCtx), "Enter the IUPAC name.");
+assert.equal(S.toDoc(S.normalize({ ...full, commercial_name: "Styrene" }), { total: 0, items: [] }).commercial_name, "Styrene");
+assert.equal("commercial_name" in S.toDoc(S.normalize(full), { total: 0, items: [] }), false);
 // CAS numbers: format and check digit
 assert.ok(S.casValid("100-42-5"));          // styrene
 assert.ok(S.casValid("7732-18-5"));         // water
 assert.ok(!S.casValid("100-42-6"));
 assert.equal(S.cleanCas("100425"), "100-42-5");
 assert.equal(S.cleanCas(" 100–42–5 "), "100-42-5");
-assert.ok(S.requiredError(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-6" }), {}).startsWith("The CAS number"));
-assert.equal(S.toDoc(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-5" }), { total: 0, items: [] }).cas, "100-42-5");
+assert.ok(S.requiredError(S.normalize({ name: "Ethene", smiles: "C=C", et: "60", cite: "x", cas: "100-42-6" }), {}).startsWith("The CAS number"));
+assert.equal(S.toDoc(S.normalize({ name: "Ethene", smiles: "C=C", et: "60", cite: "x", cas: "100-42-5" }), { total: 0, items: [] }).cas, "100-42-5");
 // reader corrections
-let cs = S.checkSuggestion({ et_kcal: "61,2", doi: "https://doi.org/10.1021/jacs.0c05069", uv_lmax: "354", uv_eps: "12000", direct_exc: "LED: 415, Kessil: 427", uses_add: { doi: "10.1021/jacs.3c07678", note: "sensitizer" } });
+let cs = S.checkSuggestion({ commercial_name: "Thioxanthone", et_kcal: "61,2", doi: "https://doi.org/10.1021/jacs.0c05069", uv_lmax: "354", uv_eps: "12000", direct_exc: "LED: 415, Kessil: 427", uses_add: { doi: "10.1021/jacs.3c07678", note: "sensitizer" } });
 assert.equal(cs.error, null);
+assert.equal(cs.clean.commercial_name, "Thioxanthone");
+assert.equal(S.checkSuggestion({ name: "" }).error, "IUPAC name cannot be empty.");
+assert.equal(S.checkSuggestion({ commercial_name: "" }).clean.commercial_name, null);
 assert.equal(cs.clean.et_kcal, 61.2);
 assert.equal(cs.clean.doi, "10.1021/jacs.0c05069");
 assert.equal(cs.clean.uv_lmax, 354);

@@ -1,7 +1,7 @@
 /* TrEnDB shared front-end: structure handling (OpenChemLib), search, cards, sketcher, API. */
 (function () {
   "use strict";
-  var Ent = window.Ent = {};
+  var Ent = window.Ent = window.Ent || {};
   var CFG = window.ENT_CONFIG || {};
   var REFS = [{ l: "Ru", v: 46.5 }, { l: "Ir", v: 55.2 }, { l: "TX", v: 63.3 }, { l: "BP", v: 68 }];
   var S_MIN = 40, S_MAX = 80;
@@ -23,6 +23,22 @@
   var elT = Ent.elT = function (tag, cls, text) { return setText(el(tag, cls), text); };
   var fmt = Ent.fmt = function (n, d) { return (Math.round(n * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d); };
   function pct(v) { return Math.max(0, Math.min(100, (v - S_MIN) / (S_MAX - S_MIN) * 100)); }
+  function trimStr(v) { return v == null ? "" : String(v).trim(); }
+  var displayName = Ent.displayName = function (d) {
+    return (d && (trimStr(d.commercial_name) || trimStr(d.name))) || "(unnamed)";
+  };
+  var renderMolTitle = Ent.renderMolTitle = function (host, d, prefix) {
+    var comm = d ? trimStr(d.commercial_name) : "", iupac = d ? trimStr(d.name) : "";
+    var box = el("div", "card-title");
+    box.appendChild(el("h2", null, (prefix || "") + (comm || iupac || "(unnamed)")));
+    if (comm && iupac) {
+      var sub = el("p", "iupac-sub", iupac);
+      sub.title = "IUPAC name";
+      box.appendChild(sub);
+    }
+    host.appendChild(box);
+    return box;
+  };
 
   /* ---------- OpenChemLib ---------- */
   /* The same version as the server (supabase/functions/submit), so structure codes match.
@@ -54,7 +70,9 @@
     if (svgCache[smiles]) return svgCache[smiles];
     var m = molOf(smiles); if (!m) return null;
     try {
-      var out = { svg: m.toSVG(260, 170, undefined, { suppressChiralText: true, suppressESR: true, suppressCIPParity: true, noStereoProblem: true }), formula: "" };
+      var rendered = Ent.renderStructure ? Ent.renderStructure(m, { cssThemed: true, width: 290, height: 185 }) : null;
+      var svg = rendered ? rendered.svg : m.toSVG(260, 170, undefined, { suppressChiralText: true, suppressESR: true, suppressCIPParity: true, noStereoProblem: true });
+      var out = { svg: svg, formula: "" };
       try { var f = m.getMolecularFormula(); out.formula = f.formula + " · " + fmt(f.relativeWeight, 2) + " g/mol"; } catch (e) {}
       svgCache[smiles] = out; return out;
     } catch (e) { return null; }
@@ -63,44 +81,78 @@
   /* true / false when the library is loaded, null when it is not */
   Ent.structureOk = function (smiles) { return window.OCL ? !!molOf(smiles) : null; };
 
-  /* ---------- CAS numbers from PubChem ---------- */
+  /* ---------- CAS numbers & IUPAC names from PubChem ---------- */
+  function pubchemPost(by, endpoint, query) {
+    return fetch("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/" + by + "/" + endpoint + "/JSON", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: by + "=" + encodeURIComponent(query)   /* POST: "/", "#" and "\\" break URL paths */
+    }).then(function (r) {
+      if (r.status === 404 || r.status === 400) return { status: r.status, json: null };   /* unknown or unreadable input */
+      if (!r.ok) { var e = new Error("PubChem answered " + r.status); e.status = r.status; throw e; }
+      return r.json().then(function (j) { return { status: r.status, json: j }; });
+    });
+  }
+
+  function parseCasResponse(res, by) {
+    if (res.status === 400) return { values: [], code: "bad_input", reason: by === "smiles" ? "PubChem could not parse SMILES (HTTP 400)" : "PubChem could not read this name (HTTP 400)" };
+    if (res.status === 404) return { values: [], code: "not_found", reason: "Not found on PubChem" };
+    var seen = {}, out = [];
+    ((res.json && res.json.InformationList && res.json.InformationList.Information) || []).forEach(function (inf) {
+      (inf.Synonym || []).forEach(function (syn) {
+        var c = String(syn).trim(); if (EntScore.casValid(c) && !seen[c]) { seen[c] = 1; out.push(c); }
+      });
+    });
+    if (!out.length) return { values: [], code: "no_cas", reason: "On PubChem, but no CAS number listed" };
+    return { values: out, code: "ok", reason: "" };
+  }
+
+  function parseIupacResponse(res, by) {
+    if (res.status === 400) return { value: "", code: "bad_input", reason: by === "smiles" ? "PubChem could not parse SMILES (HTTP 400)" : "PubChem could not read this name (HTTP 400)" };
+    if (res.status === 404) return { value: "", code: "not_found", reason: "Not found on PubChem" };
+    var p = res.json && res.json.PropertyTable && res.json.PropertyTable.Properties && res.json.PropertyTable.Properties[0];
+    var name = (p && p.CID && p.IUPACName) ? String(p.IUPACName) : "";
+    if (!name) return { value: "", code: "no_iupac", reason: "On PubChem, but no IUPAC name listed" };
+    return { value: name, code: "ok", reason: "" };
+  }
+
+  /* Detailed CAS lookup by SMILES: resolves to { values, code, reason }. Rejects on network / HTTP 5xx / 429 errors. */
+  Ent.lookupCasDetailed = function (smiles) {
+    var q = String(smiles || "").trim();
+    if (!q) return Promise.resolve({ values: [], code: "no_smiles", reason: "Missing SMILES" });
+    return pubchemPost("smiles", "synonyms", q).then(function (res) { return parseCasResponse(res, "smiles"); });
+  };
+
+  /* Detailed CAS lookup by compound name: resolves to { values, code, reason }. */
+  Ent.lookupCasByName = function (name) {
+    var q = String(name || "").trim();
+    if (!q) return Promise.resolve({ values: [], code: "no_name", reason: "Enter a name to look up" });
+    return pubchemPost("name", "synonyms", q).then(function (res) { return parseCasResponse(res, "name"); });
+  };
+
   /* A CAS number cannot be computed from a structure: it is looked up on PubChem, whose synonyms
      include the CAS numbers depositors gave. Resolves to the valid ones, most relevant first;
      [] when PubChem does not know the structure or lists no CAS number. Rejects on network errors. */
   Ent.lookupCas = function (smiles) {
-    if (!smiles) return Promise.resolve([]);
-    return fetch("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/synonyms/JSON", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "smiles=" + encodeURIComponent(smiles)   /* POST: "/", "#" and "\\" in a SMILES break URLs */
-    }).then(function (r) {
-      if (r.status === 404 || r.status === 400) return null;   /* unknown or unreadable structure */
-      if (!r.ok) { var e = new Error("PubChem answered " + r.status); e.status = r.status; throw e; }
-      return r.json();
-    }).then(function (j) {
-      var seen = {}, out = [];
-      ((j && j.InformationList && j.InformationList.Information) || []).forEach(function (inf) {
-        (inf.Synonym || []).forEach(function (syn) {
-          var c = String(syn).trim(); if (EntScore.casValid(c) && !seen[c]) { seen[c] = 1; out.push(c); }
-        });
-      });
-      return out;
-    });
+    return Ent.lookupCasDetailed(smiles).then(function (r) { return r.values; });
+  };
+
+  /* Detailed IUPAC lookup by SMILES: resolves to { value, code, reason }. Rejects on network / HTTP 5xx / 429 errors. */
+  Ent.lookupIupacDetailed = function (smiles) {
+    var q = String(smiles || "").trim();
+    if (!q) return Promise.resolve({ value: "", code: "no_smiles", reason: "Missing SMILES" });
+    return pubchemPost("smiles", "property/IUPACName", q).then(function (res) { return parseIupacResponse(res, "smiles"); });
+  };
+
+  /* Detailed IUPAC lookup by compound name: resolves to { value, code, reason }. */
+  Ent.lookupIupacByName = function (name) {
+    var q = String(name || "").trim();
+    if (!q) return Promise.resolve({ value: "", code: "no_name", reason: "Enter a name to look up" });
+    return pubchemPost("name", "property/IUPACName", q).then(function (res) { return parseIupacResponse(res, "name"); });
   };
 
   /* IUPAC name of a structure from PubChem; "" when PubChem does not know it. Rejects on network errors. */
   Ent.lookupIupac = function (smiles) {
-    if (!smiles) return Promise.resolve("");
-    return fetch("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/property/IUPACName/JSON", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "smiles=" + encodeURIComponent(smiles)
-    }).then(function (r) {
-      if (r.status === 404 || r.status === 400) return null;
-      if (!r.ok) { var e = new Error("PubChem answered " + r.status); e.status = r.status; throw e; }
-      return r.json();
-    }).then(function (j) {
-      var p = j && j.PropertyTable && j.PropertyTable.Properties && j.PropertyTable.Properties[0];
-      return (p && p.CID && p.IUPACName) ? String(p.IUPACName) : "";
-    });
+    return Ent.lookupIupacDetailed(smiles).then(function (r) { return r.value; });
   };
 
   function fpIndex(searcher, smiles) {
@@ -150,7 +202,7 @@
       if (!isNaN(st.etmin) && !(Number(d.et_kcal) >= st.etmin)) return false;
       if (!isNaN(st.etmax) && !(Number(d.et_kcal) <= st.etmax)) return false;
       if (hits && !(d.id in hits)) return false;
-      if (q) { var hay = [d.name, d.cas, d.smiles, d.citation, d.cls, d.method, d.doi].join(" ").toLowerCase(); if (hay.indexOf(q) < 0) return false; }
+      if (q) { var hay = [d.name, d.commercial_name, d.cas, d.smiles, d.citation, d.cls, d.method, d.doi].join(" ").toLowerCase(); if (hay.indexOf(q) < 0) return false; }
       return true;
     });
     if (st.sort === "et-asc") rows.sort(function (a, b) { return a.et_kcal - b.et_kcal; });
@@ -233,17 +285,18 @@
     if (badge) badge.hidden = !res.searching;
   };
 
-  Ent.copyText = function (text, btn) {
+  function flashBtn(btn, label) {
+    if (!btn) return;
+    var orig = btn.getAttribute("data-orig") || btn.textContent;
+    btn.setAttribute("data-orig", orig);
+    btn.textContent = label || "Copied";
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(function () { btn.textContent = orig; }, 1400);
+  }
+  Ent.copyText = function (text, btn, flashLabel) {
     var val = String(text || "");
     if (!val) return;
-    function flash() {
-      if (!btn) return;
-      var orig = btn.getAttribute("data-orig") || btn.textContent;
-      btn.setAttribute("data-orig", orig);
-      btn.textContent = "Copied";
-      clearTimeout(btn._copyTimer);
-      btn._copyTimer = setTimeout(function () { btn.textContent = orig; }, 1400);
-    }
+    function flash() { flashBtn(btn, flashLabel || "Copied"); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(val).then(flash, function () { fallbackCopy(val, flash); });
     } else fallbackCopy(val, flash);
@@ -264,11 +317,64 @@
     b.addEventListener("click", function (e) { e.stopPropagation(); Ent.copyText(typeof getVal === "function" ? getVal() : getVal, b); });
     return b;
   }
-  function syncModalOpen() {
-    var ed = $("ed"), sk = $("sk");
-    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden));
-    document.body.classList.toggle("modal-open", open);
+  function safeXyzName(title) {
+    var s = String(title || "").trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+    return (s ? s.slice(0, 64) : "molecule") + ".xyz";
   }
+  function buildXYZ(smiles, title) {
+    var smi = String(smiles || "").trim();
+    if (!smi) { Ent.toast("Give a SMILES structure first."); return null; }
+    if (!window.OCL || typeof Ent.molToXYZ !== "function") {
+      Ent.toast("3D structure generator is still loading — try again in a moment.");
+      return null;
+    }
+    var xyz = Ent.molToXYZ(smi, title);
+    if (!xyz) { Ent.toast("Could not generate a 3D XYZ geometry for this structure."); return null; }
+    return xyz;
+  }
+  Ent.downloadXYZ = function (smiles, title, btn) {
+    var xyz = buildXYZ(smiles, title);
+    if (!xyz) return false;
+    var blob = new Blob([xyz], { type: "chemical/x-xyz;charset=utf-8" });
+    if (Ent.downloadBlob) Ent.downloadBlob(blob, safeXyzName(title));
+    else {
+      var url = URL.createObjectURL(blob), a = document.createElement("a");
+      a.href = url; a.download = safeXyzName(title); a.style.display = "none";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }
+    flashBtn(btn, "Saved");
+    return true;
+  };
+  function xyzBtns(getSmiles, getTitle, cls) {
+    var btnCls = "btn " + (cls || "tiny");
+    var dl = el("button", btnCls, "Download XYZ"); dl.type = "button";
+    dl.setAttribute("aria-label", "Download 3D XYZ coordinates");
+    dl.addEventListener("click", function (e) {
+      e.stopPropagation();
+      Ent.downloadXYZ(typeof getSmiles === "function" ? getSmiles() : getSmiles, typeof getTitle === "function" ? getTitle() : getTitle, dl);
+    });
+    var cp = el("button", btnCls, "Copy XYZ"); cp.type = "button";
+    cp.setAttribute("aria-label", "Copy 3D XYZ coordinates to clipboard");
+    cp.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var smi = typeof getSmiles === "function" ? getSmiles() : getSmiles;
+      var ttl = typeof getTitle === "function" ? getTitle() : getTitle;
+      var xyz = buildXYZ(smi, ttl);
+      if (xyz) Ent.copyText(xyz, cp, "Copied");
+    });
+    return { dl: dl, cp: cp };
+  }
+  function xyzActions(getSmiles, getTitle) {
+    var row = el("div", "sinfo-actions xyz-actions"), btns = xyzBtns(getSmiles, getTitle, "tiny");
+    row.appendChild(btns.dl); row.appendChild(btns.cp);
+    return row;
+  }
+  var syncModalOpen = Ent.syncModalOpen = function () {
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
+    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden));
+    document.body.classList.toggle("modal-open", open);
+  };
 
   var THEME_KEY = "entdb-theme", THEMES = ["auto", "light", "dark"];
   function applyTheme(t, btn) {
@@ -397,6 +503,20 @@
     return wrap;
   }
 
+  function bindPaperPreview(paper, getCardData) {
+    if (!Ent.cardGraphic) return;
+    paper.classList.add("paper-interactive");
+    paper.setAttribute("role", "button");
+    paper.setAttribute("tabindex", "0");
+    paper.setAttribute("aria-label", "View molecule card graphic");
+    paper.title = "Click for slide/paper molecule card graphic";
+    function openGfx(ev) { ev.stopPropagation(); Ent.cardGraphic.open(getCardData()); }
+    paper.addEventListener("click", openGfx);
+    paper.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openGfx(ev); }
+    });
+  }
+
   /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.clusterTag, o.onSuggest(d),
      o.admin = {busy, drafts, activeId, onFocusCard, onPatch(id, patch) -> Promise<bool>, approve(d, note), selected, onSelect, onDelete} */
   Ent.card = function (d, o) {
@@ -406,7 +526,7 @@
     c.setAttribute("data-id", d.id);
     if (adm && adm.onFocusCard) {
       c.addEventListener("click", function (ev) {
-        if (ev.target && ev.target.closest && ev.target.closest("a,button,input,textarea,select,summary,label")) return;
+        if (ev.target && ev.target.closest && ev.target.closest("a,button,input,textarea,select,summary,label,.paper-interactive")) return;
         adm.onFocusCard(d.id);
       });
     }
@@ -430,7 +550,7 @@
       head.appendChild(top);
     }
     if (o.clusterTag) head.appendChild(el("span", "cluster-tag", o.clusterTag));
-    head.appendChild(el("h2", null, d.name || "(unnamed)"));
+    renderMolTitle(head, d);
 
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
@@ -457,7 +577,16 @@
     c.appendChild(et); c.appendChild(scale(d));
 
     var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(d.smiles);
-    if (info) paper.innerHTML = info.svg; else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
+    if (info) {
+      paper.innerHTML = info.svg;
+      bindPaperPreview(paper, function () {
+        return {
+          name: d.name, commercial_name: d.commercial_name, smiles: d.smiles, role: d.role, origin: d.origin, cls: d.cls,
+          cas: d.cas, et_kcal: d.et_kcal, et_unc: d.et_unc, formula: info.formula,
+          method: d.method, conditions: d.conditions, citation: d.citation, doi: d.doi
+        };
+      });
+    } else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
     st.appendChild(paper);
     var si = el("div", "sinfo"), busy = adm && !!adm.busy[d.id];
     if (d.cas) {
@@ -473,6 +602,7 @@
       smiRow.appendChild(el("code", "smiles", d.smiles));
       smiRow.appendChild(copyBtn(d.smiles, "Copy SMILES"));
       si.appendChild(smiRow);
+      si.appendChild(xyzActions(d.smiles, displayName(d)));
     } else {
       si.appendChild(el("code", "smiles", "—"));
     }
@@ -483,7 +613,7 @@
       var ob = el("button", "btn small", "Open in sketcher"); ob.type = "button"; ob.disabled = busy;
       ob.addEventListener("click", function () {
         Ent.sketcher.open({
-          title: "Sketcher · " + (d.name || ""), smiles: d.smiles || "", saveLabel: "Save structure",
+          title: "Sketcher · " + displayName(d), smiles: d.smiles || "", saveLabel: "Save structure",
           hint: "Edit the drawing or the SMILES, then save. Saving marks the structure as verified.",
           onSave: function (s) { return adm.onPatch(d.id, { smiles: s, idcode: Ent.idCode(s), smiles_checked: true }); }
         });
@@ -646,11 +776,44 @@
     }
     return v;
   }
-  /* items: entries of one molecule; o = {scores, simMode, onSuggest(d)} */
+  Ent.slideItemKey = function (items) {
+    var arr = Array.isArray(items) ? items : [items];
+    for (var i = 0; i < arr.length; i++) {
+      var k = keysOf(arr[i]);
+      if (k.cas) return "cas:" + k.cas;
+      if (k.id) return "id:" + k.id;
+      if (k.smi) return "smi:" + k.smi;
+    }
+    return "row:" + String((arr[0] && (arr[0].id || arr[0].name)) || "");
+  };
+  Ent.slideItemFromGroup = function (items) {
+    var sorted = (Array.isArray(items) ? items : [items]).slice().sort(byQuality);
+    var p = sorted[0], roles = {}, vals = [];
+    sorted.forEach(function (d) {
+      roles[d.role || "acceptor"] = 1;
+      if (isFinite(Number(d.et_kcal))) vals.push(Number(d.et_kcal));
+    });
+    var role = roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor";
+    var comm = sorted.map(function (d) { return trimStr(d.commercial_name); }).filter(Boolean)[0] || "";
+    var iupac = trimStr(p.name) || sorted.map(function (d) { return trimStr(d.name); }).filter(Boolean)[0] || "";
+    return {
+      key: Ent.slideItemKey(sorted), name: iupac, commercial_name: comm, smiles: p.smiles, role: role,
+      et_kcal: Number(p.et_kcal),
+      et_min: vals.length ? Math.min.apply(null, vals) : Number(p.et_kcal),
+      et_max: vals.length ? Math.max.apply(null, vals) : Number(p.et_kcal),
+      cls: sorted.map(function (d) { return d.cls; }).filter(Boolean)[0] || ""
+    };
+  };
+
+  /* items: entries of one molecule; o = {scores, simMode, onSuggest(d), isSlidePicked(key), onSlideToggle(item)} */
   Ent.moleculeCard = function (items, o) {
     o = o || {}; items = items.slice().sort(byQuality);
-    var p = items[0], many = items.length > 1, c = el("article", "card mol"), head = el("div", "head");
-    head.appendChild(el("h2", null, p.name || "(unnamed)"));
+    var p = items[0], many = items.length > 1, molKey = Ent.slideItemKey(items);
+    var comm = items.map(function (d) { return trimStr(d.commercial_name); }).filter(Boolean)[0] || "";
+    var iupac = trimStr(p.name) || items.map(function (d) { return trimStr(d.name); }).filter(Boolean)[0] || "";
+    var picked = o.isSlidePicked ? !!o.isSlidePicked(molKey) : false;
+    var c = el("article", "card mol" + (picked ? " mol-picked" : "")), head = el("div", "head");
+    renderMolTitle(head, { name: iupac, commercial_name: comm });
     var chips = el("div", "chips"), roles = {};
     items.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
     var role = roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor";
@@ -661,6 +824,17 @@
     if (o.simMode && o.scores) {
       var best = null; items.forEach(function (d) { var x = o.scores[d.id]; if (x != null && (best == null || x > best)) best = x; });
       if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
+    }
+    if (o.onSlideToggle && Ent.slideGraphic) {
+      var pickBtn = el("button", "chip slide-pick", picked ? "✓ Slide" : "+ Slide");
+      pickBtn.type = "button";
+      pickBtn.setAttribute("aria-pressed", String(picked));
+      pickBtn.title = "Select multiple molecules to compare in one E_T slide";
+      pickBtn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        o.onSlideToggle(Ent.slideItemFromGroup(items));
+      });
+      chips.appendChild(pickBtn);
     }
     head.appendChild(chips); c.appendChild(head);
 
@@ -674,10 +848,19 @@
     }
 
     var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(p.smiles);
-    if (info) paper.innerHTML = info.svg; else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
+    var cas = items.map(function (d) { return d.cas; }).filter(Boolean)[0];
+    if (info) {
+      paper.innerHTML = info.svg;
+      bindPaperPreview(paper, function () {
+        return {
+          name: iupac, commercial_name: comm, smiles: p.smiles, role: role, cls: cls, cas: cas,
+          values: items, formula: info.formula, method: p.method,
+          conditions: p.conditions, citation: p.citation, doi: p.doi
+        };
+      });
+    } else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
     st.appendChild(paper);
     var si = el("div", "sinfo");
-    var cas = items.map(function (d) { return d.cas; }).filter(Boolean)[0];
     if (cas) {
       var casRow = el("div", "copy-row");
       casRow.appendChild(el("span", "formula", "CAS " + cas));
@@ -689,6 +872,7 @@
       smiRow.appendChild(el("code", "smiles", p.smiles));
       smiRow.appendChild(copyBtn(p.smiles, "Copy SMILES"));
       si.appendChild(smiRow);
+      si.appendChild(xyzActions(p.smiles, comm || iupac));
     } else {
       si.appendChild(el("code", "smiles", "—"));
     }
@@ -791,7 +975,9 @@
     return res;
   };
   function describe(e) {
-    return (e.name || "(unnamed)") + " · " + fmt(Number(e.et_kcal), 1) + " kcal/mol · " + (e.origin === "calc" ? "computed" : "experimental")
+    var comm = trimStr(e.commercial_name), iupac = trimStr(e.name);
+    var label = comm && iupac ? (comm + " (" + iupac + ")") : (comm || iupac || "(unnamed)");
+    return label + " · " + fmt(Number(e.et_kcal), 1) + " kcal/mol · " + (e.origin === "calc" ? "computed" : "experimental")
       + (e.doi ? " · " + e.doi : "");
   }
   function dupNote(dup) {
@@ -806,7 +992,7 @@
       var uq = el("ul"); dup.queue.forEach(function (m) { uq.appendChild(el("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(uq);
     }
     if (dup.stereo.length) {
-      box.appendChild(el("p", "hint", "A different stereoisomer (E/Z or enantiomer) is in the database: " + dup.stereo.map(function (e) { return e.name; }).join("; ") + ". This is not treated as a duplicate."));
+      box.appendChild(el("p", "hint", "A different stereoisomer (E/Z or enantiomer) is in the database: " + dup.stereo.map(function (e) { return displayName(e); }).join("; ") + ". This is not treated as a duplicate."));
     }
     return box;
   }
@@ -847,7 +1033,8 @@
   /* s: suggestion row, entry: current entry or null, h = {busy, approve(s, note), reject(s, note), edit(s, entry, note)} */
   Ent.suggestionCard = function (s, entry, h) {
     var c = el("article", "card sugg"), head = el("div", "head");
-    head.appendChild(el("h2", null, "Suggested correction · " + (entry ? entry.name : "entry no longer available")));
+    if (entry) renderMolTitle(head, entry, "Suggested correction · ");
+    else head.appendChild(el("h2", null, "Suggested correction · entry no longer available"));
     var chips = el("div", "chips"); chips.appendChild(el("span", "chip suggchip", "Correction from a reader"));
     if (entry && entry.cas) chips.appendChild(el("span", "chip plain", "CAS " + entry.cas));
     if (entry && entry.origin) chips.appendChild(el("span", "chip " + (entry.origin === "calc" ? "calc" : "exp"), entry.origin === "calc" ? "Computed" : "Experimental"));
@@ -910,7 +1097,7 @@
 
   /* ---------- entry editor (review page) ---------- */
   var EDIT = [
-    ["name", "IUPAC name", "text"], ["cas", "CAS number", "text"], ["cls", "Class", "text"],
+    ["name", "IUPAC name", "text"], ["commercial_name", "Commercial name (optional)", "text"], ["cas", "CAS number", "text"], ["cls", "Class", "text"],
     ["role", "Role", "select", [["acceptor", "Acceptor"], ["donor", "Donor"], ["both", "Donor and acceptor"]]],
     ["origin", "Origin", "select", [["exp", "Experimental"], ["calc", "Computed"]]],
     ["et_kcal", "E_T (kcal/mol)", "number"], ["et_unc", "± Uncertainty (kcal/mol)", "number"],
@@ -924,7 +1111,7 @@
   ];
   var EDIT_MAP = {}; EDIT.forEach(function (f) { EDIT_MAP[f[0]] = f; });
   var EDIT_GROUPS = [
-    { legend: "Molecule", rows: [["name"], ["cas", "cls", "role"], ["structure_note"]] },
+    { legend: "Molecule", rows: [["name"], ["commercial_name"], ["cas", "cls", "role"], ["structure_note"]] },
     { legend: "Triplet energy", rows: [["origin", "et_kcal", "et_unc"], ["et_reported", "et_type"], ["method", "conditions"]] },
     { legend: "Source & verification", rows: [["citation"], ["doi", "location"], ["quote"], ["evidence"], ["verify_note"]] },
     { legend: "Absorption & excitation", rows: [["uv_lmax", "uv_eps", "uv_cond"], ["direct_exc"]] }
@@ -982,7 +1169,7 @@
       var box = el("div", "sk-box ed-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
 
       var head = el("div", "ed-head");
-      var h = el("h2", null, opts.title || ("Edit · " + (d.name || ""))); h.id = "ed-title"; box.setAttribute("aria-labelledby", "ed-title");
+      var h = el("h2", null, opts.title || ("Edit · " + displayName(d))); h.id = "ed-title"; box.setAttribute("aria-labelledby", "ed-title");
       var headAct = el("div", "ed-head-actions"), doiSlot = el("span"), closeX = el("button", "btn small", "Close");
       closeX.type = "button"; closeX.setAttribute("aria-label", "Close editor");
       headAct.appendChild(doiSlot); headAct.appendChild(closeX);
@@ -994,7 +1181,8 @@
       var stWrap = el("div", "ed-struct"), paper = el("div", "paper"), si = el("div", "sinfo");
       var smiRow = el("div", "copy-row"), smiCode = el("code", "smiles"), smiCopy = copyBtn(function () { return curSmiles; }, "Copy SMILES");
       var fml = el("span", "formula"), skBtn = el("button", "btn small", "Edit structure in sketcher"); skBtn.type = "button";
-      var stAct = el("div", "actions"); stAct.appendChild(skBtn);
+      var xyzEd = xyzBtns(function () { return curSmiles; }, function () { return (fieldInputs.commercial_name && fieldInputs.commercial_name.value.trim()) || (fieldInputs.name && fieldInputs.name.value.trim()) || displayName(d); }, "small");
+      var stAct = el("div", "actions"); stAct.appendChild(skBtn); stAct.appendChild(xyzEd.dl); stAct.appendChild(xyzEd.cp);
       smiRow.appendChild(smiCode); smiRow.appendChild(smiCopy);
       si.appendChild(smiRow); si.appendChild(fml); si.appendChild(stAct);
       stWrap.appendChild(paper); stWrap.appendChild(si); body.appendChild(stWrap);
@@ -1003,10 +1191,11 @@
         if (info) { paper.innerHTML = info.svg; fml.textContent = info.formula || ""; }
         else { paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available"; fml.textContent = ""; }
         smiCode.textContent = curSmiles || "—";
+        xyzEd.dl.disabled = xyzEd.cp.disabled = !curSmiles;
         stWrap.classList.toggle("changed", curSmiles !== origSmiles);
       }
 
-      var fieldLabs = {};
+      var fieldLabs = {}, fieldInputs = {};
       function buildField(k) {
         var f = EDIT_MAP[k]; if (!f) return null;
         var lab = el("label", "field"), lbl = elT("span", null, f[1]), inp;
@@ -1025,6 +1214,7 @@
         if (f[0] === "cas") lab.appendChild(casLookup(inp, function () { return curSmiles; }));
         if (f[0] === "name") lab.appendChild(iupacLookup(inp, function () { return curSmiles; }));
         fieldLabs[k] = lab;
+        fieldInputs[k] = inp;
         return lab;
       }
 
@@ -1075,7 +1265,7 @@
           patch.smiles_checked = true;
         }
         EDIT.forEach(function (f) {
-          var v = $("ed-" + f[0]).value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
+          var v = fieldInputs[f[0]].value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
           if (f[2] === "direct_map") {
             var dm = EntScore.parseDirectExc(v);
             if (dm.bad) { if (validate) bad = f[1] + " must be like \"LED: 415, Kessil: 427\" or JSON {\"LED\": 415}."; else patch[f[0]] = v; return; }
@@ -1099,8 +1289,8 @@
           patch[f[0]] = out;
         });
         if (validate) {
-          EDIT.forEach(function (f) { if (f[2] === "number" && $("ed-" + f[0]).validity && $("ed-" + f[0]).validity.badInput) bad = f[1] + " must be a number."; });
-          if ("name" in patch && !patch.name) bad = "The name cannot be empty.";
+          EDIT.forEach(function (f) { var inp = fieldInputs[f[0]]; if (f[2] === "number" && inp.validity && inp.validity.badInput) bad = f[1] + " must be a number."; });
+          if (("name" in patch && !patch.name) || (!d.name && !("name" in patch))) bad = "The IUPAC name cannot be empty.";
           if ("et_kcal" in patch && patch.et_kcal == null) bad = "The triplet energy cannot be empty.";
           else if ("et_kcal" in patch && !(patch.et_kcal > 0 && patch.et_kcal <= EntScore.ET_MAX)) bad = "The triplet energy must be above 0 and at most " + EntScore.ET_MAX + " kcal/mol.";
           if ("et_unc" in patch && patch.et_unc != null && patch.et_unc < 0) bad = "The uncertainty cannot be negative.";
@@ -1119,7 +1309,7 @@
       }
 
       function syncDoiLink() {
-        var raw = $("ed-doi").value.trim(), cleaned = EntScore.cleanDoi(raw);
+        var raw = fieldInputs.doi.value.trim(), cleaned = EntScore.cleanDoi(raw);
         doiSlot.replaceChildren();
         if (EntScore.isDoi(cleaned)) {
           var a = link("Open DOI", "https://doi.org/" + encodeURI(cleaned));
@@ -1138,14 +1328,14 @@
       }
 
       EDIT.forEach(function (f) {
-        var inp = $("ed-" + f[0]);
+        var inp = fieldInputs[f[0]];
         inp.addEventListener("input", syncDirty);
         inp.addEventListener("change", syncDirty);
       });
 
       skBtn.addEventListener("click", function () {
         Ent.sketcher.open({
-          title: "Sketcher · " + ($("ed-name").value.trim() || d.name || ""), smiles: curSmiles, saveLabel: "Apply to editor",
+          title: "Sketcher · " + (fieldInputs.name.value.trim() || d.name || ""), smiles: curSmiles, saveLabel: "Apply to editor",
           hint: "Edit the drawing or SMILES, then apply to review the change inside the editor.",
           onSave: function (s) { curSmiles = s; drawStruct(); syncDirty(); return true; }
         });
@@ -1221,12 +1411,25 @@
   };
 
   /* ---------- sketcher ---------- */
-  var editor = null, skOpts = null, skReturn = null;
+  var editor = null, skOpts = null, skReturn = null, suppressChange = false;
   function skMsg(t) { var m = $("sk-msg"); m.hidden = !t; m.textContent = t || ""; }
   function editorSmiles() {
     if (!editor) return "";
-    try { var m = OCL.Molecule.fromMolfile(editor.getMolFile()); return m.toIsomericSmiles ? m.toIsomericSmiles() : m.toSmiles(); }
-    catch (e) { try { return editor.getSmiles(); } catch (e2) { return ""; } }
+    try {
+      var m = OCL.Molecule.fromMolfile(editor.getMolFile());
+      return Ent.molToSmiles ? Ent.molToSmiles(m) : (m.toIsomericSmiles ? m.toIsomericSmiles() : m.toSmiles());
+    } catch (e) { try { return editor.getSmiles(); } catch (e2) { return ""; } }
+  }
+  function loadEditorStructure(smi) {
+    if (!editor) return;
+    suppressChange = true;
+    try {
+      var mf = smi && Ent.toCleanMolfile ? Ent.toCleanMolfile(smi) : null;
+      if (mf && editor.setMolFile) editor.setMolFile(mf);
+      else editor.setSmiles(smi || "");
+    } finally {
+      suppressChange = false;
+    }
   }
   Ent.sketcher = {
     open: function (opts) {
@@ -1239,10 +1442,13 @@
         try {
           if (!window.OCL || !OCL.StructureEditor) throw new Error("no editor");
           editor = OCL.StructureEditor.createSVGEditor("sk-editor", 1);
-          if (editor.setChangeListenerCallback) editor.setChangeListenerCallback(function () { var s = editorSmiles(); if (s) $("sk-smiles").value = s; });
+          if (editor.setChangeListenerCallback) editor.setChangeListenerCallback(function () {
+            if (suppressChange) return;
+            var s = editorSmiles(); if (s) $("sk-smiles").value = s;
+          });
         } catch (e) { editor = null; skMsg("The sketcher is not available in this browser. You can still type the SMILES by hand."); }
       }
-      if (editor) { try { editor.setSmiles(opts.smiles || ""); } catch (e) { if (opts.smiles) skMsg("This SMILES could not be drawn."); } }
+      if (editor) { try { loadEditorStructure(opts.smiles || ""); } catch (e) { if (opts.smiles) skMsg("This SMILES could not be drawn."); } }
     },
     close: function () {
       $("sk").hidden = true; skOpts = null; syncModalOpen();
@@ -1251,7 +1457,7 @@
     bind: function () {
       $("sk-draw").addEventListener("click", function () {
         skMsg(""); if (!editor) return;
-        try { editor.setSmiles($("sk-smiles").value.trim()); } catch (e) { skMsg("The SMILES could not be read."); }
+        try { loadEditorStructure($("sk-smiles").value.trim()); } catch (e) { skMsg("The SMILES could not be read."); }
       });
       $("sk-read").addEventListener("click", function () { var s = editorSmiles(); if (s) { $("sk-smiles").value = s; skMsg(""); } else skMsg("The drawing could not be read."); });
       $("sk-close").addEventListener("click", Ent.sketcher.close);
@@ -1296,7 +1502,8 @@
   };
   /* The API returns at most 1000 rows per request, so long lists are read page by page. */
   var PAGE = 1000;
-  var PUBLIC_COLS = "id,created_at,name,cas,smiles,idcode,structure_note,cls,role,origin,et_kcal,et_unc,et_reported,et_type,method,conditions,citation,doi,location,quote,evidence,uv_lmax,uv_eps,uv_cond,direct_exc,score,uses";
+  var PUBLIC_COLS = "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,role,origin,et_kcal,et_unc,et_reported,et_type,method,conditions,citation,doi,location,quote,evidence,uv_lmax,uv_eps,uv_cond,direct_exc,score,uses";
+  var LEGACY_PUBLIC_COLS = PUBLIC_COLS.replace(",commercial_name,", ",");
   function allPages(getPage) {
     var out = [];
     return (function next(offset) {
@@ -1309,9 +1516,17 @@
   api.listPublic = function (a, useAdmin) {
     if (useAdmin) {
       return authed(function (t) {
-        return allPages(function (offset) {
-          return fetch(base + "/rest/v1/entries?select=" + PUBLIC_COLS + "&status=eq.approved&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
-            { headers: headers(t) }).then(asJson);
+        function fetchWithCols(cols) {
+          return allPages(function (offset) {
+            return fetch(base + "/rest/v1/entries?select=" + cols + "&status=eq.approved&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
+              { headers: headers(t) }).then(asJson);
+          });
+        }
+        return fetchWithCols(PUBLIC_COLS).catch(function (err) {
+          if (err && err.status === 400 && /commercial_name/i.test(err.message || "")) {
+            return fetchWithCols(LEGACY_PUBLIC_COLS);
+          }
+          throw err;
         });
       });
     }
@@ -1376,18 +1591,22 @@
       });
     });
   };
-  /* Same patch on many rows, 100 ids per request. -> Promise<number of rows changed> */
-  api.adminPatchMany = function (ids, patch) {
+  /* Same patch on many rows, 100 ids per request. -> Promise<updated rows> / Promise<number changed> */
+  function patchManyRows(ids, patch) {
     var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
     return authed(function (t) {
       return chunks.reduce(function (p, c) {
-        return p.then(function (n) {
+        return p.then(function (all) {
           return fetch(base + "/rest/v1/entries?id=in.(" + c.join(",") + ")",
             { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) })
-            .then(asJson).then(function (rows) { return n + (rows ? rows.length : 0); });
+            .then(asJson).then(function (rows) { return all.concat(rows || []); });
         });
-      }, Promise.resolve(0));
+      }, Promise.resolve([]));
     });
+  }
+  api.adminPatchManyRows = patchManyRows;
+  api.adminPatchMany = function (ids, patch) {
+    return patchManyRows(ids, patch).then(function (rows) { return rows.length; });
   };
   /* Insert literature rows; rows whose import_key already exists are skipped. */
   api.adminImport = function (rows) {

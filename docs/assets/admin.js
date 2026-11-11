@@ -37,7 +37,13 @@
   Ent.initTheme("theme-toggle");
   var toast = Ent.toast;
 
-  /* ---------- Tool log helper ---------- */
+  /* ---------- Tool log & enrichment helpers ---------- */
+  function docsById() {
+    var byId = {};
+    state.docs.forEach(function (d) { byId[d.id] = d; });
+    return byId;
+  }
+
   var toolLogs = [];
   function addToolLog(msg) {
     var stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -54,17 +60,28 @@
   $("tool-log-clear").addEventListener("click", function () { toolLogs = []; drawToolLog(); });
 
   function updateToolsBadge() {
-    var n = (pendingImport.length ? 1 : 0) + ((nameFix().length || namePc().length) ? 1 : 0) + (casTodo().length ? 1 : 0);
+    var n = (pendingImport.length ? 1 : 0) + (smiFix().length ? 1 : 0) + ((nameFix().length || namePc().length) ? 1 : 0) + (casTodo().length ? 1 : 0);
     var b = $("n-tools"); b.textContent = n; b.hidden = !n;
+  }
+
+  function applyUpdatedRows(rows) {
+    var byUp = {};
+    (rows || []).forEach(function (r) { byUp[r.id] = r; });
+    state.docs = state.docs.map(function (d) { return byUp[d.id] || d; });
+    dupCache = {};
+    return byUp;
   }
 
   function onPatch(id, patch) {
     state.busy[id] = true; render();
     return api.adminPatch(id, patch).then(function (rows) {
       delete state.busy[id];
-      if (rows && rows[0]) { state.docs = state.docs.map(function (d) { return d.id === id ? rows[0] : d; }); dupCache = {}; }
+      if (rows && rows[0]) {
+        applyUpdatedRows(rows);
+        if ("smiles" in patch) { delete casMiss[id]; delete nameTried[id]; }
+      }
       else state.busy[id] = "err";               /* no row returned: not allowed or gone */
-      render(); drawCas(); drawNames(); return !!(rows && rows[0]);
+      render(); drawCas(); drawSmiSync(); drawNames(); drawEnrichIssues(); return !!(rows && rows[0]);
     }, function (err) {
       if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
       state.busy[id] = "err"; render(); return false;
@@ -72,16 +89,22 @@
   }
 
   /* ---------- Triage pills & suggestion filtering ---------- */
+  function enrichIssueDocIds() {
+    var map = {};
+    enrichIssues.forEach(function (it) { it.docIds.forEach(function (id) { map[id] = 1; }); });
+    return map;
+  }
   var TRIAGE_PRED = {
     dup: function (d) { var x = dupOf(d); return !!(x && x.flag); },
     unchecked: function (d) { return !d.smiles_checked; },
     nocas: function (d) { return !d.cas; },
     verify: function (d) { return d.verify_level === "abstract" || d.verify_level === "secondaria"; },
     form: function (d) { return d.source_kind === "form"; },
-    low: function (d) { return d.score != null && Number(d.score) < 50; }
+    low: function (d) { return d.score != null && Number(d.score) < 50; },
+    enrich: function (d) { return !!enrichIssueDocIds()[d.id]; }
   };
   function updateTriageBar(inView) {
-    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0 };
+    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0, enrich: 0 };
     inView.forEach(function (d) {
       Object.keys(TRIAGE_PRED).forEach(function (k) { if (TRIAGE_PRED[k](d)) counts[k]++; });
     });
@@ -124,14 +147,53 @@
     return out;
   }
 
-  function setFocusCard(id, scrollIntoView) {
+  function setFocusCard(id, scrollIntoView, blockPos) {
     state.activeId = id || "";
     Array.prototype.forEach.call($("list").children, function (node) {
       if (!node.getAttribute) return;
       var hit = node.getAttribute("data-id") === state.activeId;
       node.classList.toggle("kb-focus", hit);
-      if (hit && scrollIntoView && node.scrollIntoView) node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (hit && scrollIntoView && node.scrollIntoView) node.scrollIntoView({ block: blockPos || "nearest", behavior: "smooth" });
     });
+  }
+
+  function visibleRowsForView() {
+    var inView = state.docs.filter(function (d) { return d.status === state.view; });
+    var res = Ent.filterRows(inView, state.search);
+    var rows = state.triage === "sugg" ? [] : (state.triage && TRIAGE_PRED[state.triage] ? res.rows.filter(TRIAGE_PRED[state.triage]) : res.rows);
+    if (state.view === "pending" && state.search.sort === "review") rows = clusterDuplicates(rows).rows;
+    return rows;
+  }
+
+  function resetFiltersForJump() {
+    var fresh = Ent.newSearch(state.search.defSort);
+    ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "sort"].forEach(function (k) { state.search[k] = fresh[k]; });
+    state.search.ss.smiles = ""; state.search.ss.mode = fresh.ss.mode; state.search.ss.thr = fresh.ss.thr;
+    ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "ss-smiles"].forEach(function (id) { $(id).value = ""; });
+    $("f-sort").value = state.search.sort; $("ss-mode").value = state.search.ss.mode;
+    $("ss-thr").value = String(state.search.ss.thr); $("ss-thr").hidden = true;
+    state.triage = "";
+  }
+
+  function focusIssueCard(docId) {
+    var doc = docsById()[docId];
+    if (!doc) { toast("This entry is no longer in the database."); drawEnrichIssues(); return; }
+    if (state.view !== doc.status) {
+      state.view = doc.status; state.triage = ""; state.search.pager.shown = 0; clearSel();
+    }
+    var rows = visibleRowsForView();
+    var idx = -1;
+    rows.forEach(function (r, i) { if (r.id === doc.id) idx = i; });
+    if (idx < 0) {
+      if (state.triage) { state.triage = ""; rows = visibleRowsForView(); rows.forEach(function (r, i) { if (r.id === doc.id) idx = i; }); }
+      if (idx < 0) { resetFiltersForJump(); rows = visibleRowsForView(); rows.forEach(function (r, i) { if (r.id === doc.id) idx = i; }); }
+    }
+    if (idx >= 0) {
+      var minShown = Math.ceil((idx + 1) / 50) * 50;
+      if ((state.search.pager.shown || 50) < minShown) state.search.pager.shown = minShown;
+    }
+    render();
+    setFocusCard(doc.id, true, "center");
   }
 
   var lastOrderIds = [];
@@ -178,7 +240,7 @@
     }
     syncActiveAfterRender(res.rows);
 
-    var byId = {}; state.docs.forEach(function (d) { byId[d.id] = d; });
+    var byId = docsById();
     var shownSugg = res.err ? [] : filterSuggestions(byId);
 
     Ent.searchInfo(res, inView.length);
@@ -216,6 +278,7 @@
       status.textContent = (inView.length || state.sugg.length) ? "No entry matches the current search and filters."
         : state.view === "pending" ? "The queue is empty." : state.view === "approved" ? "Nothing approved yet." : "Nothing rejected.";
     }
+    if (enrichIssues.length) drawEnrichIssues();
   }
 
   /* Review order: rows arrive sorted by score; entries that duplicate each other (the same value
@@ -253,7 +316,7 @@
     var prev = { status: d.status, decided_at: d.decided_at || null, note: d.note || null };
     return onPatch(d.id, { status: "rejected", decided_at: new Date().toISOString(), note: note }).then(function (ok) {
       if (ok && prev.status === "pending") {
-        toast("Rejected “" + (d.name || "entry") + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+        toast("Rejected “" + Ent.displayName(d) + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
       }
       return ok;
     });
@@ -265,7 +328,7 @@
     thead.appendChild(hr); tbl.appendChild(thead);
     var tbody = el("tbody");
     var rows = [
-      ["Name", d.name || "—", existing.name || "—"],
+      ["IUPAC name", d.name || "—", existing.name || "—"],
       ["E_T (kcal/mol)", Ent.fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : ""), Ent.fmt(Number(existing.et_kcal), 1) + (existing.et_unc ? " ± " + existing.et_unc : "")],
       ["Origin", d.origin === "calc" ? "Computed" : "Experimental", existing.origin === "calc" ? "Computed" : "Experimental"],
       ["Value type", d.et_type || "—", existing.et_type || "—"],
@@ -276,6 +339,9 @@
       ["Verbatim", d.quote || "—", existing.quote || "—"],
       ["Score", d.score != null ? String(d.score) : "—", existing.score != null ? String(existing.score) : "—"]
     ];
+    if (d.commercial_name || existing.commercial_name) {
+      rows.unshift(["Commercial name", d.commercial_name || "—", existing.commercial_name || "—"]);
+    }
     rows.forEach(function (r) {
       var tr = el("tr", r[1] !== r[2] ? "differs" : null);
       tr.appendChild(elT("th", null, r[0]));
@@ -293,13 +359,13 @@
     if (!dup || !dup.dbSame.length) {
       return onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok) {
         if (ok && prev.status === "pending") {
-          toast("Approved “" + (d.name || "entry") + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+          toast("Approved “" + Ent.displayName(d) + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
         }
         return ok;
       });
     }
     return new Promise(function (resolve) {
-      Ent.dialog("Possible duplicate: " + (d.name || ""), function (box) {
+      Ent.dialog("Possible duplicate: " + Ent.displayName(d), function (box) {
         box.appendChild(el("p", null, "The same value for this molecule is already in the database. Compare the fields and choose which entry to keep:"));
         var opts = el("div", "stack"), cmpWrap = el("div", "diff-table-wrap");
         function drawCmp(entry) { cmpWrap.replaceChildren(buildDupComparison(d, entry)); }
@@ -307,7 +373,7 @@
           var lab = el("label", "check"), r = el("input"); r.type = "radio"; r.name = "dup-target"; r.value = m.entry.id; r.checked = i === 0;
           r.addEventListener("change", function () { if (r.checked) drawCmp(m.entry); });
           lab.appendChild(r);
-          lab.appendChild(document.createTextNode(m.entry.name + " · " + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol · " +
+          lab.appendChild(document.createTextNode(Ent.displayName(m.entry) + " · " + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol · " +
             (m.entry.origin === "calc" ? "computed" : "experimental") + (m.entry.doi ? " · " + m.entry.doi : "") + " (" + m.why + ")"));
           opts.appendChild(lab);
         });
@@ -431,6 +497,7 @@
     $("sel-all").hidden = !listed.length;
     $("sel-all").textContent = "Select all " + listed.length + " listed";
     $("sel-none").hidden = !n;
+    if ($("sel-slide")) $("sel-slide").hidden = !n || !Ent.slideGraphic;
     $("sel-approve").hidden = !n || v === "approved";
     $("sel-reject").hidden = !n || v === "rejected";
     $("sel-queue").hidden = !n || v === "pending";
@@ -445,6 +512,12 @@
   });
   $("sel-all").addEventListener("click", function () { listed.forEach(function (d) { state.selected[d.id] = true; }); render(); });
   $("sel-none").addEventListener("click", function () { clearSel(); render(); });
+  if ($("sel-slide")) $("sel-slide").addEventListener("click", function () {
+    var sel = selectedDocs();
+    if (!sel.length || !Ent.slideGraphic) return;
+    var items = Ent.groupByMolecule(sel).map(Ent.slideItemFromGroup);
+    Ent.slideGraphic.open(items);
+  });
   function bulkError(t) { $("bulk-err").textContent = t; $("bulk-err").hidden = !t; }
   function runPatch(docs, patch, verb) {
     bulkError("");
@@ -510,7 +583,7 @@
 
   /* ---------- literature batches published with the site + manual JSON upload ---------- */
   var UPLOAD_KEYS = [
-    "import_key", "name", "cas", "smiles", "idcode", "smiles_checked", "structure_note",
+    "import_key", "name", "commercial_name", "cas", "smiles", "idcode", "smiles_checked", "structure_note",
     "cls", "role", "origin", "et_kcal", "et_unc", "et_reported", "et_type", "method",
     "conditions", "citation", "doi", "location", "quote", "evidence", "verify_level",
     "verify_note", "uv_lmax", "uv_eps", "uv_cond", "direct_exc", "source_kind",
@@ -532,17 +605,19 @@
     });
   }
 
-  var pendingImport = [];
+  var pendingImport = [], lastBatchesPromise = Promise.resolve();
   function checkBatches() {
-    api.batches().then(function (rows) {
+    lastBatchesPromise = api.batches().then(function (rows) {
       var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
       pendingImport = rows.filter(function (r) { return r.import_key && !have[r.import_key]; });
       batchRows = rows;
+      drawSmiSync();
       drawNames();
       $("imp").hidden = !pendingImport.length;
       $("imp-text").textContent = pendingImport.length + " new literature entries are ready to add to the queue.";
       updateToolsBadge();
     }, function () { $("imp").hidden = true; updateToolsBadge(); });
+    return lastBatchesPromise;
   }
   $("imp-go").addEventListener("click", function () {
     var rows = toImportRows(pendingImport);
@@ -627,11 +702,12 @@
       if (have[ik] || usedKeys[ik]) { skipped++; continue; }
       usedKeys[ik] = 1;
       var copy = {}; for (var rk in r) copy[rk] = r[rk];
-      copy.import_key = ik; copy.name = name.slice(0, 200); copy.smiles = smi;
-      copy.doi = doi; copy.cas = cas;
+      copy.import_key = ik; copy.name = name.slice(0, 200);
+      copy.commercial_name = r.commercial_name ? String(r.commercial_name).trim().slice(0, 200) || null : null;
+      copy.smiles = smi; copy.doi = doi; copy.cas = cas;
       if (copy.score == null) {
         var norm = EntScore.normalize({
-          name: copy.name, cas: cas || "", cls: copy.cls || "", smiles: smi, role: copy.role,
+          name: copy.name, commercial_name: copy.commercial_name || "", cas: cas || "", cls: copy.cls || "", smiles: smi, role: copy.role,
           et: et, unit: "kcal", unc: copy.et_unc, origin: copy.origin, kind: copy.et_type,
           tech: copy.origin === "calc" ? "" : (copy.method || ""), solvent: copy.conditions || "",
           cite: copy.citation || "", doi: doi || "", loc: copy.location || "", quote: copy.quote || "",
@@ -712,16 +788,493 @@
   function scopedDocs() {
     return $("enrich-scope").value === "pending" ? pendingDocs() : state.docs;
   }
-  $("enrich-scope").addEventListener("change", function () { drawNames(); drawCas(); });
+  $("enrich-scope").addEventListener("change", function () { drawSmiSync(); drawNames(); drawCas(); });
 
-  var nameMap = {}, batchRows = [], nameRun = null, nameTried = {};
-  function buildNames() { nameMap = {}; batchRows.forEach(function (r) { if (r.smiles && r.name) nameMap[nameKey(r.smiles)] = r.name; }); }
+  var STATUS_LABEL = { pending: "Queue", approved: "Approved", rejected: "Rejected" };
+  var enrichIssues = [], eiModalFilter = "all", eiModalTool = "", eiModalQuery = "", eiReturn = null;
+  function errText(err, fallback) {
+    var msg = err && err.message ? String(err.message) : "";
+    return msg || fallback;
+  }
+  function groupDocsByMol(docs) {
+    var map = {}, order = [];
+    docs.forEach(function (d) {
+      var key = nameKey(d.smiles) || ("id:" + d.id);
+      if (!map[key]) { map[key] = { key: key, smiles: d.smiles || "", docs: [] }; order.push(map[key]); }
+      map[key].docs.push(d);
+    });
+    return order;
+  }
+  function issueGroup(docs, tool, kind, reason, molKey) {
+    var d0 = docs[0] || {};
+    var origNames = {};
+    docs.forEach(function (d) { origNames[d.id] = d.name || ""; });
+    return {
+      molKey: molKey || nameKey(d0.smiles) || ("id:" + d0.id),
+      docIds: docs.map(function (d) { return d.id; }),
+      origNames: origNames,
+      name: d0.name || "(unnamed)",
+      commercialName: d0.commercial_name ? String(d0.commercial_name).trim() : "",
+      smiles: d0.smiles || "",
+      tool: tool,
+      kind: kind,
+      reason: reason,
+      draftFix: null,
+      draftQuery: (d0.commercial_name && String(d0.commercial_name).trim()) || d0.name || "",
+      candidates: [],
+      note: "",
+      busy: false
+    };
+  }
+  function pruneResolvedIssues() {
+    var byId = docsById();
+    enrichIssues = enrichIssues.filter(function (it) {
+      var liveDocs = [];
+      it.docIds.forEach(function (id) {
+        var live = byId[id];
+        if (!live) return;
+        if (it.tool === "CAS" && live.cas) return;
+        if (it.tool === "Batch IUPAC" && (!nameOf(live) || live.name === nameOf(live))) return;
+        if (it.tool === "IUPAC" && live.name !== it.origNames[id]) return;
+        liveDocs.push(live);
+      });
+      if (!liveDocs.length) return false;
+      it.docIds = liveDocs.map(function (d) { return d.id; });
+      it.name = liveDocs[0].name || "(unnamed)";
+      it.commercialName = liveDocs[0].commercial_name ? String(liveDocs[0].commercial_name).trim() : "";
+      it.smiles = liveDocs[0].smiles || "";
+      if (!it.draftQuery) it.draftQuery = it.commercialName || it.name;
+      return true;
+    });
+  }
+  function mergeToolIssues(tool, attemptedIds, newGroups) {
+    var remaining = [];
+    enrichIssues.forEach(function (it) {
+      if (it.tool !== tool) { remaining.push(it); return; }
+      var leftIds = it.docIds.filter(function (id) { return !attemptedIds[id]; });
+      if (leftIds.length) {
+        it.docIds = leftIds;
+        remaining.push(it);
+      }
+    });
+    var byMol = {};
+    remaining.forEach(function (it) { if (it.tool === tool) byMol[it.molKey] = it; });
+    var fresh = [];
+    newGroups.forEach(function (g) {
+      var ex = byMol[g.molKey];
+      if (ex) {
+        var seen = {}; ex.docIds.forEach(function (id) { seen[id] = 1; });
+        g.docIds.forEach(function (id) { if (!seen[id]) { ex.docIds.push(id); ex.origNames[id] = g.origNames[id]; } });
+        ex.kind = g.kind; ex.reason = g.reason; ex.note = "";
+      } else {
+        fresh.push(g);
+      }
+    });
+    var sorted = fresh.sort(function (a, b) {
+      return (a.kind === "fail" ? 0 : 1) - (b.kind === "fail" ? 0 : 1);
+    });
+    enrichIssues = sorted.concat(remaining);
+    render();
+    drawEnrichIssues();
+  }
+  function patchGroupDocs(ids, patch) {
+    return api.adminPatchManyRows(ids, patch).then(function (rows) {
+      var byUp = applyUpdatedRows(rows);
+      if ("smiles" in patch) {
+        Object.keys(byUp).forEach(function (id) { delete casMiss[id]; delete nameTried[id]; });
+      }
+      render(); drawCas(); drawSmiSync(); drawNames(); drawEnrichIssues();
+      return rows;
+    }, function (err) {
+      if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
+      throw err;
+    });
+  }
+  function openEnrichModal() {
+    if (!enrichIssues.length) return;
+    eiReturn = document.activeElement;
+    $("ei-modal").hidden = false;
+    Ent.syncModalOpen();
+    drawEnrichModal();
+    $("ei-modal-q").focus();
+  }
+  function closeEnrichModal() {
+    var m = $("ei-modal");
+    if (!m || m.hidden) return;
+    m.hidden = true;
+    Ent.syncModalOpen();
+    if (eiReturn && eiReturn.focus) eiReturn.focus();
+    eiReturn = null;
+  }
+  function drawEnrichIssues() {
+    pruneResolvedIssues();
+    var bar = $("enrich-issues-bar");
+    var nFail = 0, nMiss = 0, totalEntries = 0;
+    enrichIssues.forEach(function (it) {
+      if (it.kind === "fail") nFail++; else nMiss++;
+      totalEntries += it.docIds.length;
+    });
+    bar.hidden = !enrichIssues.length;
+    $("enrich-issues-count").textContent = enrichIssues.length;
+    var parts = [];
+    if (nFail) parts.push(nFail + " failed");
+    if (nMiss) parts.push(nMiss + " not found on PubChem");
+    $("enrich-issues-summary").textContent = parts.join(" · ") +
+      (totalEntries > enrichIssues.length ? " (" + totalEntries + " entries)" : (totalEntries === 1 ? " (1 entry)" : " (" + totalEntries + " entries)"));
+    syncEnrichEmpty();
+    if (!$("ei-modal").hidden) {
+      if (!enrichIssues.length) closeEnrichModal();
+      else drawEnrichModal();
+    }
+  }
+  function buildIssueCard(it) {
+    var byId = docsById();
+    var liveDocs = it.docIds.map(function (id) { return byId[id]; }).filter(Boolean);
+    var d0 = liveDocs[0] || { id: it.docIds[0], name: it.name, smiles: it.smiles, status: "pending" };
+    var li = el("li", "ei-card " + (it.kind === "fail" ? "ei-fail" : "ei-miss"));
+
+    /* Left column: structure preview, name, badges, reason & copyable SMILES */
+    var infoCol = el("div", "ei-col-info");
+    var thumb = el("div", "ei-thumb");
+    var minfo = it.smiles ? Ent.molInfo(it.smiles) : null;
+    if (minfo) thumb.innerHTML = minfo.svg;
+    else thumb.textContent = window.OCL ? "Invalid SMILES" : "No preview";
+    infoCol.appendChild(thumb);
+
+    var meta = el("div", "ei-meta");
+    var head = el("div", "ei-head");
+    var titleBox = el("div", "card-title");
+    var dispTitle = it.commercialName || it.name;
+    var nm = el("strong", "ei-name", dispTitle); nm.title = dispTitle;
+    titleBox.appendChild(nm);
+    if (it.commercialName && it.name) {
+      var subIupac = el("p", "iupac-sub", it.name); subIupac.title = "IUPAC name";
+      titleBox.appendChild(subIupac);
+    }
+    head.appendChild(titleBox);
+    var badges = el("span", "ei-badges");
+    badges.appendChild(el("span", "ei-badge " + (it.kind === "fail" ? "fail" : "miss"), it.kind === "fail" ? "Failed" : "Not found"));
+    badges.appendChild(el("span", "ei-tool", it.tool));
+    if (liveDocs.length > 1) badges.appendChild(el("span", "ei-status", liveDocs.length + " entries"));
+    var stSeen = {};
+    liveDocs.forEach(function (d) { stSeen[d.status] = (stSeen[d.status] || 0) + 1; });
+    Object.keys(stSeen).forEach(function (s) {
+      var lbl = (STATUS_LABEL[s] || s) + (liveDocs.length > 1 && Object.keys(stSeen).length > 1 ? " ×" + stSeen[s] : "");
+      badges.appendChild(el("span", "ei-status", lbl));
+    });
+    head.appendChild(badges);
+    meta.appendChild(head);
+    meta.appendChild(el("div", "ei-reason", it.reason));
+
+    var smiRow = el("div", "copy-row ei-smiles-row");
+    var smiCode = el("code", "smiles", it.smiles || "—");
+    if (it.smiles) smiCode.title = it.smiles;
+    smiRow.appendChild(smiCode);
+    if (it.smiles) {
+      var copySmi = el("button", "btn tiny", "Copy"); copySmi.type = "button";
+      copySmi.setAttribute("aria-label", "Copy SMILES");
+      copySmi.addEventListener("click", function () { Ent.copyText(it.smiles, copySmi); });
+      smiRow.appendChild(copySmi);
+    }
+    meta.appendChild(smiRow);
+    infoCol.appendChild(meta);
+    li.appendChild(infoCol);
+
+    /* Right column: inline fix + PubChem lookup helpers + structure/card links */
+    var fixCol = el("div", "ei-col-fix");
+    var isCas = it.tool === "CAS";
+    var suggestedBatch = it.tool === "Batch IUPAC" ? (nameOf(d0) || "") : "";
+    var fixRow = el("div", "ei-fix-row");
+    var fixInp = el("input");
+    fixInp.type = "text";
+    fixInp.className = isCas ? "mono grow" : "grow";
+    fixInp.placeholder = isCas ? "Enter CAS (e.g. 100-42-5)" : "Enter IUPAC name";
+    fixInp.setAttribute("aria-label", isCas ? "CAS number for " + it.name : "IUPAC name for " + it.name);
+    fixInp.value = it.draftFix != null ? it.draftFix : (suggestedBatch || (isCas ? "" : it.name));
+    fixInp.disabled = it.busy;
+    fixInp.addEventListener("input", function () { it.draftFix = fixInp.value; });
+
+    var saveLabel = liveDocs.length > 1 ? ("Save (" + liveDocs.length + ")") : "Save";
+    var saveBtn = el("button", "btn small primary", saveLabel);
+    saveBtn.type = "button"; saveBtn.disabled = it.busy;
+    fixRow.appendChild(fixInp); fixRow.appendChild(saveBtn);
+    fixCol.appendChild(fixRow);
+
+    var lookupRow = el("div", "ei-lookup-row");
+    var qInp = el("input");
+    qInp.type = "text"; qInp.className = "grow";
+    qInp.placeholder = "Compound name for PubChem…";
+    qInp.setAttribute("aria-label", "Name to search on PubChem for " + it.name);
+    qInp.value = it.draftQuery; qInp.disabled = it.busy;
+    qInp.addEventListener("input", function () { it.draftQuery = qInp.value; });
+
+    var byNameBtn = el("button", "btn small", "By name"); byNameBtn.type = "button"; byNameBtn.disabled = it.busy;
+    lookupRow.appendChild(qInp); lookupRow.appendChild(byNameBtn);
+    var retryBtn = null;
+    if (it.smiles) {
+      retryBtn = el("button", "btn small", "Retry SMILES"); retryBtn.type = "button"; retryBtn.disabled = it.busy;
+      lookupRow.appendChild(retryBtn);
+    }
+    fixCol.appendChild(lookupRow);
+
+    if (isCas && it.candidates && it.candidates.length > 1) {
+      var candRow = el("div", "ei-candidates");
+      candRow.appendChild(el("span", "hint", "Matches:"));
+      it.candidates.forEach(function (casVal) {
+        var cb = el("button", "btn tiny", casVal); cb.type = "button"; cb.disabled = it.busy;
+        cb.addEventListener("click", function () { it.draftFix = casVal; fixInp.value = casVal; fixInp.focus(); });
+        candRow.appendChild(cb);
+      });
+      fixCol.appendChild(candRow);
+    }
+
+    var noteEl = el("div", "ei-note" + (it.noteIsErr ? " err" : " hint"), it.note || "");
+    noteEl.hidden = !it.note;
+    fixCol.appendChild(noteEl);
+
+    var linksRow = el("div", "ei-card-links");
+    var fixSmiBtn = el("button", "btn tiny", "Fix SMILES" + (liveDocs.length > 1 ? " (" + liveDocs.length + ")" : ""));
+    fixSmiBtn.type = "button"; fixSmiBtn.disabled = it.busy;
+    fixSmiBtn.addEventListener("click", function () {
+      Ent.sketcher.open({
+        title: "Sketcher · " + it.name + (liveDocs.length > 1 ? " (" + liveDocs.length + " entries)" : ""),
+        smiles: it.smiles || "",
+        saveLabel: liveDocs.length > 1 ? ("Save to " + liveDocs.length + " entries") : "Save structure",
+        hint: "Edit the drawing or SMILES, then save. Saving marks the structure as verified.",
+        onSave: function (newSmi) {
+          var ids = liveDocs.map(function (d) { return d.id; });
+          return patchGroupDocs(ids, { smiles: newSmi, idcode: Ent.idCode(newSmi), smiles_checked: true }).then(function (rows) {
+            if (!rows || !rows.length) return false;
+            it.smiles = newSmi; it.molKey = nameKey(newSmi) || it.molKey;
+            it.note = "Structure updated — click Retry SMILES to query PubChem again."; it.noteIsErr = false;
+            drawEnrichIssues();
+            return true;
+          }, function () { return false; });
+        }
+      });
+    });
+
+    var edBtn = el("button", "btn tiny", "Full editor"); edBtn.type = "button"; edBtn.disabled = it.busy;
+    edBtn.addEventListener("click", function () {
+      var cur = docsById()[d0.id];
+      if (!cur) { toast("This entry is no longer in the database."); drawEnrichIssues(); return; }
+      Ent.editor.open(cur, function (patch) { return onPatch(cur.id, patch); });
+    });
+
+    var showBtn = el("button", "btn tiny", "Show card"); showBtn.type = "button"; showBtn.disabled = it.busy;
+    showBtn.addEventListener("click", function () { closeEnrichModal(); focusIssueCard(d0.id); });
+
+    linksRow.appendChild(fixSmiBtn); linksRow.appendChild(edBtn); linksRow.appendChild(showBtn);
+    fixCol.appendChild(linksRow);
+    li.appendChild(fixCol);
+
+    function rerenderThisCard() {
+      var fresh = buildIssueCard(it);
+      if (li.parentNode) {
+        li.parentNode.replaceChild(fresh, li);
+        li = fresh;
+      }
+    }
+
+    function runLookup(promise, sourceLabel) {
+      it.busy = true; it.note = "Asking PubChem…"; it.noteIsErr = false;
+      rerenderThisCard();
+      promise.then(function (res) {
+        it.busy = false;
+        if (isCas) {
+          if (res.values && res.values.length) {
+            it.draftFix = res.values[0];
+            it.candidates = res.values.slice(0, 5);
+            it.note = "Found via " + sourceLabel + " — verify CAS before saving.";
+            it.noteIsErr = false;
+          } else {
+            it.candidates = [];
+            it.note = res.reason || "Not found on PubChem.";
+            it.noteIsErr = res.code === "bad_input";
+            if (sourceLabel === "SMILES") { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
+          }
+        } else {
+          if (res.value) {
+            it.draftFix = res.value;
+            it.note = "Found via " + sourceLabel + " — verify before saving.";
+            it.noteIsErr = false;
+          } else {
+            it.note = res.reason || "Not found on PubChem.";
+            it.noteIsErr = res.code === "bad_input";
+            if (sourceLabel === "SMILES") { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
+          }
+        }
+        if (sourceLabel === "SMILES") drawEnrichIssues();
+        else rerenderThisCard();
+      }, function (err) {
+        it.busy = false;
+        it.note = errText(err, "PubChem could not be reached."); it.noteIsErr = true;
+        rerenderThisCard();
+      });
+    }
+
+    byNameBtn.addEventListener("click", function () {
+      var q = qInp.value.trim();
+      it.draftQuery = q;
+      if (!q) { it.note = "Enter a compound name to search."; it.noteIsErr = true; rerenderThisCard(); return; }
+      runLookup(isCas ? Ent.lookupCasByName(q) : Ent.lookupIupacByName(q), "name");
+    });
+    if (retryBtn) {
+      retryBtn.addEventListener("click", function () {
+        runLookup(isCas ? Ent.lookupCasDetailed(it.smiles) : Ent.lookupIupacDetailed(it.smiles), "SMILES");
+      });
+    }
+
+    saveBtn.addEventListener("click", function () {
+      var raw = fixInp.value.trim(), patch;
+      if (isCas) {
+        var cleaned = EntScore.cleanCas(raw);
+        if (!cleaned) { it.note = "Enter a CAS number first."; it.noteIsErr = true; rerenderThisCard(); return; }
+        if (!EntScore.casValid(cleaned)) { it.note = "“" + cleaned + "” is not a valid CAS number."; it.noteIsErr = true; rerenderThisCard(); return; }
+        patch = { cas: cleaned };
+      } else {
+        if (!raw) { it.note = "The IUPAC name cannot be empty."; it.noteIsErr = true; rerenderThisCard(); return; }
+        patch = { name: raw };
+      }
+      it.busy = true; it.note = "Saving…"; it.noteIsErr = false;
+      rerenderThisCard();
+      var ids = liveDocs.map(function (d) { return d.id; });
+      patchGroupDocs(ids, patch).then(function (rows) {
+        it.busy = false;
+        if (!rows || !rows.length) { it.note = "Database did not save the update."; it.noteIsErr = true; rerenderThisCard(); return; }
+        toast("Updated " + rows.length + (rows.length === 1 ? " entry" : " entries") + " for “" + it.name + "”.");
+      }, function (err) {
+        it.busy = false;
+        it.note = errText(err, "Could not save. Try again."); it.noteIsErr = true;
+        rerenderThisCard();
+      });
+    });
+
+    fixInp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); } });
+    qInp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); byNameBtn.click(); } });
+
+    return li;
+  }
+  function drawEnrichModalList() {
+    var ul = $("ei-modal-list"), empty = $("ei-modal-empty");
+    var q = eiModalQuery.trim().toLowerCase();
+    var shown = enrichIssues.filter(function (it) {
+      if (eiModalFilter !== "all" && it.kind !== eiModalFilter) return false;
+      if (eiModalTool && it.tool !== eiModalTool) return false;
+      if (q) {
+        var hay = [it.name, it.commercialName, it.smiles, it.reason, it.tool].join(" ").toLowerCase();
+        if (hay.indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+    empty.hidden = shown.length > 0;
+    ul.replaceChildren.apply(ul, shown.map(buildIssueCard));
+  }
+  function drawEnrichModal() {
+    var nFail = 0, nMiss = 0, totalEntries = 0, tools = {};
+    enrichIssues.forEach(function (it) {
+      if (it.kind === "fail") nFail++; else nMiss++;
+      totalEntries += it.docIds.length;
+      tools[it.tool] = 1;
+    });
+    if ((eiModalFilter === "fail" && !nFail) || (eiModalFilter === "miss" && !nMiss)) eiModalFilter = "all";
+    var toolKeys = Object.keys(tools);
+    if (eiModalTool && !tools[eiModalTool]) eiModalTool = "";
+    $("ei-modal-meta").textContent = enrichIssues.length + (enrichIssues.length === 1 ? " molecule" : " molecules") +
+      " · " + totalEntries + (totalEntries === 1 ? " entry" : " entries");
+    var filtersBox = $("ei-modal-filters");
+    Array.prototype.forEach.call(filtersBox.querySelectorAll("button"), function (b) {
+      var k = b.getAttribute("data-ei-filter");
+      var cnt = k === "all" ? enrichIssues.length : k === "fail" ? nFail : nMiss;
+      b.textContent = (k === "all" ? "All" : k === "fail" ? "Failed" : "Not found") + " (" + cnt + ")";
+      b.hidden = k !== "all" && cnt === 0;
+      b.setAttribute("aria-pressed", String(k === eiModalFilter));
+    });
+    var toolSel = $("ei-modal-tool");
+    toolSel.hidden = toolKeys.length <= 1;
+    toolSel.value = eiModalTool;
+    drawEnrichModalList();
+  }
+  $("enrich-review-open").addEventListener("click", openEnrichModal);
+  $("ei-modal-close").addEventListener("click", closeEnrichModal);
+  $("ei-modal").addEventListener("click", function (e) { if (e.target === $("ei-modal")) closeEnrichModal(); });
+  $("ei-modal-q").addEventListener("input", function (e) { eiModalQuery = e.target.value; drawEnrichModalList(); });
+  $("ei-modal-filters").addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest("button[data-ei-filter]") : null;
+    if (!btn) return;
+    eiModalFilter = btn.getAttribute("data-ei-filter") || "all";
+    drawEnrichModal();
+  });
+  $("ei-modal-tool").addEventListener("change", function (e) { eiModalTool = e.target.value; drawEnrichModalList(); });
+  function clearEnrichIssues() {
+    enrichIssues = []; eiModalFilter = "all"; eiModalTool = ""; eiModalQuery = "";
+    $("ei-modal-q").value = "";
+    closeEnrichModal();
+    render();
+    drawEnrichIssues();
+  }
+  $("enrich-issues-clear").addEventListener("click", clearEnrichIssues);
+  $("ei-modal-clear").addEventListener("click", clearEnrichIssues);
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    if (ei && !ei.hidden) closeEnrichModal();
+  });
+
+  var batchByKey = {}, nameMap = {}, batchRows = [], nameRun = null, nameTried = {};
+  function buildNames() {
+    batchByKey = {}; nameMap = {};
+    batchRows.forEach(function (r) {
+      if (r.import_key) batchByKey[r.import_key] = r;
+      if (r.smiles && r.name) nameMap[nameKey(r.smiles)] = r.name;
+    });
+  }
+  function smiFix() {
+    buildNames();
+    return scopedDocs().filter(function (d) {
+      var br = d.import_key && batchByKey[d.import_key];
+      return br && br.smiles && d.smiles !== br.smiles;
+    });
+  }
+  function drawSmiSync(msg) {
+    var todo = smiFix(), box = $("smi-sync");
+    if (!box) return;
+    box.hidden = !todo.length && !msg;
+    $("smi-sync-go").hidden = !todo.length;
+    $("smi-sync-text").textContent = (msg ? msg + " " : "") +
+      (todo.length ? todo.length + (todo.length === 1 ? " entry has" : " entries have") + " updated SMILES (coordinated metal complexes) in the literature batch." : "");
+    syncEnrichEmpty();
+  }
+  $("smi-sync-go").addEventListener("click", function () {
+    var todo = smiFix(); if (!todo.length) return;
+    $("smi-sync-go").disabled = true;
+    $("smi-sync-text").textContent = "Updating " + todo.length + " structures…";
+    var okN = 0, failN = 0;
+    todo.reduce(function (p, d) {
+      return p.then(function () {
+        var br = batchByKey[d.import_key];
+        var patch = { smiles: br.smiles, idcode: Ent.idCode(br.smiles) || br.idcode || null };
+        if (br.structure_note) patch.structure_note = br.structure_note;
+        return api.adminPatch(d.id, patch).then(function (rows) {
+          if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); okN++; }
+          else failN++;
+        }, function (e) { if (e && e.status === 401) throw e; failN++; });
+      });
+    }, Promise.resolve()).then(function () {
+      $("smi-sync-go").disabled = false; dupCache = {}; render();
+      var summary = "Updated " + okN + " SMILES" + (failN ? ", " + failN + " failed" : "") + ".";
+      addToolLog("Batch SMILES sync: " + summary);
+      toast(summary);
+      drawSmiSync(summary);
+    }, function () { $("smi-sync-go").disabled = false; signedOut("Your session ended. Sign in again."); });
+  });
   function nameKey(smi) { return (window.OCL && Ent.idCode(smi)) || smi; }
   function nameOf(d) { return d.smiles ? nameMap[nameKey(d.smiles)] : ""; }
   function nameFix() { return scopedDocs().filter(function (d) { var n = nameOf(d); return n && d.name !== n; }); }
   function namePc() { return scopedDocs().filter(function (d) { return d.smiles && !nameOf(d) && !nameTried[d.id]; }); }
   function syncEnrichEmpty() {
-    $("enrich-empty").hidden = !$("iupac").hidden || !$("cas").hidden;
+    $("enrich-empty").hidden = !$("smi-sync").hidden || !$("iupac").hidden || !$("cas").hidden || enrichIssues.length > 0;
     updateToolsBadge();
   }
   function drawNames(msg) {
@@ -737,50 +1290,133 @@
     syncEnrichEmpty();
   }
   $("iupac-go").addEventListener("click", function () {
-    var byName = {}; nameFix().forEach(function (d) { var n = nameOf(d); (byName[n] = byName[n] || []).push(d.id); });
-    var names = Object.keys(byName), done = 0, fail = 0;
+    var byDocs = {}; nameFix().forEach(function (d) { var n = nameOf(d); (byDocs[n] = byDocs[n] || []).push(d); });
+    var names = Object.keys(byDocs), done = 0, fail = 0;
+    var attemptedIds = {}, partialTarget = {}, failedDocs = [], failReasons = {};
     $("iupac-go").disabled = true; nameRun = {};
     var prog = $("iupac-prog"); prog.max = Math.max(1, names.length); prog.value = 0; prog.hidden = false;
     names.reduce(function (p, n) {
       return p.then(function () {
         $("iupac-text").textContent = "Renaming… " + done + " / " + names.length + " structures";
-        return api.adminPatchMany(byName[n], { name: n }).then(function () { done++; prog.value = done + fail; }, function (e) { fail++; prog.value = done + fail; if (e && e.status === 401) throw e; });
+        var docs = byDocs[n];
+        docs.forEach(function (d) { attemptedIds[d.id] = 1; });
+        return api.adminPatchMany(docs.map(function (d) { return d.id; }), { name: n }).then(function (updated) {
+          if (updated === 0) {
+            fail++;
+            docs.forEach(function (d) { failedDocs.push(d); failReasons[d.id] = "Database did not update this entry"; });
+          } else if (updated < docs.length) {
+            fail++;
+            docs.forEach(function (d) { partialTarget[d.id] = n; });
+          } else done++;
+          prog.value = done + fail;
+        }, function (e) {
+          if (e && e.status === 401) throw e;
+          fail++; prog.value = done + fail;
+          var msg = errText(e, "Database update failed");
+          docs.forEach(function (d) { failedDocs.push(d); failReasons[d.id] = msg; });
+        });
       });
     }, Promise.resolve()).then(function () {
       nameRun = null; $("iupac-go").disabled = false; prog.hidden = true;
-      addToolLog("Batch IUPAC rename: " + done + " structures updated" + (fail ? ", " + fail + " failed" : "") + ".");
-      load({ silent: true }).then(function () { drawNames(fail ? fail + " structures could not be renamed; try again." : "Names updated."); });
+      load({ silent: true }).then(function () { return lastBatchesPromise; }).then(function () {
+        var byId = docsById(), seenFail = {};
+        failedDocs.forEach(function (d) { seenFail[d.id] = 1; });
+        Object.keys(partialTarget).forEach(function (id) {
+          var live = byId[id];
+          if (live && live.name !== partialTarget[id] && !seenFail[id]) {
+            failedDocs.push(live); failReasons[id] = "Database did not update this entry";
+          }
+        });
+        var issues = groupDocsByMol(failedDocs).map(function (g) {
+          return issueGroup(g.docs, "Batch IUPAC", "fail", failReasons[g.docs[0].id] || "Database update failed", g.key);
+        });
+        mergeToolIssues("Batch IUPAC", attemptedIds, issues);
+        addToolLog("Batch IUPAC rename: " + done + " structures updated" + (fail ? ", " + fail + " failed" : "") + ".");
+        drawNames(fail ? fail + " structures could not be renamed; review in Needs attention below." : "Names updated.");
+        if (issues.length) toast(issues.length + (issues.length === 1 ? " molecule" : " molecules") + " could not be renamed.", { actionLabel: "Review & fix", onAction: openEnrichModal });
+      });
     }, function () { nameRun = null; $("iupac-go").disabled = false; prog.hidden = true; signedOut("Your session ended. Sign in again."); });
   });
-  $("iupac-pc").addEventListener("click", function () {
-    var todo = namePc(), run = nameRun = { stop: false, set: 0, same: 0, miss: 0, fail: 0, inRow: 0 };
-    $("iupac-go").hidden = $("iupac-pc").hidden = true; $("iupac-stop").hidden = false; $("iupac-stop").disabled = false;
-    var prog = $("iupac-prog"); prog.max = Math.max(1, todo.length); prog.value = 0; prog.hidden = false;
+
+  function runPubchemEnrich(cfg) {
+    var groups = groupDocsByMol(cfg.todo);
+    var run = { stop: false, out: false, okEntries: 0, sameEntries: 0, missMol: 0, failMol: 0, inRow: 0, issues: [], attemptedIds: {} };
+    cfg.setRun(run);
+    cfg.onStart(groups);
     function finish(why) {
-      nameRun = null; prog.hidden = true; render();
-      var summary = why + " Renamed " + run.set + ", already IUPAC " + run.same + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + ".";
-      addToolLog("PubChem IUPAC: " + summary);
-      drawNames(summary + (run.miss ? " Entries PubChem does not know need their IUPAC name written in the editor." : ""));
+      cfg.setRun(null);
+      if (run.out) return;
+      cfg.onFinish(why, run, groups);
     }
     (function step(i) {
       if (run.stop) return finish("Stopped.");
-      if (i >= todo.length) return finish("Done.");
+      if (i >= groups.length) return finish("Done.");
       if (run.inRow >= 5) return finish("Stopped after five errors in a row.");
-      prog.value = i;
-      $("iupac-text").textContent = "Checking " + (i + 1) + " / " + todo.length + " on PubChem…";
-      var d = todo[i], wait = 250;
-      Ent.lookupIupac(d.smiles).then(function (n) {
-        run.inRow = 0; nameTried[d.id] = 1;
-        if (!n) { run.miss++; return; }
-        if (n === d.name) { run.same++; return; }
-        return api.adminPatch(d.id, { name: n }).then(function (rows) {
-          if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); run.set++; } else run.fail++;
-        });
+      cfg.onStep(i, groups.length, run);
+      var g = groups[i], wait = 250;
+      g.docs.forEach(function (d) { run.attemptedIds[d.id] = 1; });
+      cfg.lookup(g.smiles).then(function (res) {
+        return cfg.handleResult(g, res, run);
       }).catch(function (err) {
-        if (err && err.status === 401) { run.stop = true; signedOut("Your session ended. Sign in again."); return; }
-        run.fail++; run.inRow++; wait = 2000;
+        if (err && err.status === 401) { run.stop = run.out = true; signedOut("Your session ended. Sign in again."); return; }
+        run.failMol++; run.inRow++; wait = 2000;
+        run.issues.push(issueGroup(g.docs, cfg.tool, "fail", errText(err, "PubChem or database error"), g.key));
       }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
     })(0);
+  }
+
+  $("iupac-pc").addEventListener("click", function () {
+    runPubchemEnrich({
+      tool: "IUPAC",
+      todo: namePc(),
+      setRun: function (r) { nameRun = r; },
+      onStart: function (groups) {
+        $("iupac-go").hidden = $("iupac-pc").hidden = true; $("iupac-stop").hidden = false; $("iupac-stop").disabled = false;
+        var prog = $("iupac-prog"); prog.max = Math.max(1, groups.length); prog.value = 0; prog.hidden = false;
+      },
+      onStep: function (i, total, run) {
+        $("iupac-prog").value = i;
+        $("iupac-text").textContent = "Checking " + (i + 1) + " / " + total + " molecules · renamed " + run.okEntries + " · not on PubChem " + run.missMol + (run.failMol ? " · failed " + run.failMol : "");
+      },
+      lookup: function (smi) { return Ent.lookupIupacDetailed(smi); },
+      handleResult: function (g, res, run) {
+        if (res.code === "bad_input" || res.code === "no_smiles") {
+          run.inRow = 0; g.docs.forEach(function (d) { nameTried[d.id] = 1; }); run.failMol++;
+          run.issues.push(issueGroup(g.docs, "IUPAC", "fail", res.reason, g.key));
+          return;
+        }
+        if (!res.value) {
+          run.inRow = 0; g.docs.forEach(function (d) { nameTried[d.id] = 1; }); run.missMol++;
+          run.issues.push(issueGroup(g.docs, "IUPAC", "miss", res.reason, g.key));
+          return;
+        }
+        var same = g.docs.filter(function (d) { return d.name === res.value; });
+        var need = g.docs.filter(function (d) { return d.name !== res.value; });
+        same.forEach(function (d) { nameTried[d.id] = 1; });
+        run.sameEntries += same.length;
+        if (!need.length) { run.inRow = 0; return; }
+        return api.adminPatchManyRows(need.map(function (d) { return d.id; }), { name: res.value }).then(function (rows) {
+          var byUp = applyUpdatedRows(rows);
+          var missed = [];
+          need.forEach(function (d) {
+            if (byUp[d.id]) { nameTried[d.id] = 1; run.okEntries++; }
+            else missed.push(d);
+          });
+          if (missed.length) {
+            run.failMol++; run.inRow++;
+            run.issues.push(issueGroup(missed, "IUPAC", "fail", "Database did not save the updated name", g.key));
+          } else run.inRow = 0;
+        });
+      },
+      onFinish: function (why, run) {
+        $("iupac-prog").hidden = true;
+        mergeToolIssues("IUPAC", run.attemptedIds, run.issues);
+        var summary = why + " Renamed " + run.okEntries + ", already IUPAC " + run.sameEntries + ", not on PubChem " + run.missMol + (run.failMol ? ", failed " + run.failMol : "") + ".";
+        addToolLog("PubChem IUPAC: " + summary);
+        drawNames(summary + (run.issues.length ? " Review them in Needs attention below." : ""));
+        if (run.issues.length) toast(run.issues.length + (run.issues.length === 1 ? " molecule" : " molecules") + " need manual IUPAC review.", { actionLabel: "Review & fix", onAction: openEnrichModal });
+      }
+    });
   });
   $("iupac-stop").addEventListener("click", function () { if (nameRun) { nameRun.stop = true; $("iupac-stop").disabled = true; } });
 
@@ -795,39 +1431,57 @@
     syncEnrichEmpty();
   }
   $("cas-go").addEventListener("click", function () {
-    var todo = casTodo(), run = casRun = { stop: false, out: false, found: 0, miss: 0, fail: 0, inRow: 0 };
-    $("cas-go").hidden = true; $("cas-stop").hidden = false; $("cas-stop").disabled = false;
-    var prog = $("cas-prog"); prog.max = Math.max(1, todo.length); prog.value = 0; prog.hidden = false;
-    function finish(why) {
-      casRun = null; prog.hidden = true;
-      if (run.out) return;
-      dupCache = {}; render(); drawCas();
-      var left = casTodo().length;
-      var summary = why + " Filled " + run.found + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + ".";
-      addToolLog("PubChem CAS: " + summary);
-      $("cas").hidden = false; $("cas-go").hidden = !left;
-      $("cas-text").textContent = summary + (left ? " " + left + " can still be tried." : "");
-      syncEnrichEmpty();
-    }
-    (function step(i) {
-      if (run.stop) return finish("Stopped.");
-      if (i >= todo.length) return finish("Done.");
-      if (run.inRow >= 5) return finish("Stopped after five errors in a row (PubChem or the database did not answer).");
-      prog.value = i;
-      $("cas-text").textContent = "Looking up " + (i + 1) + " / " + todo.length + " · filled " + run.found + " · not on PubChem " + run.miss + (run.fail ? " · failed " + run.fail : "");
-      var d = todo[i], wait = 250;
-      Ent.lookupCas(d.smiles).then(function (list) {
-        run.inRow = 0;
-        if (!list.length) { casMiss[d.id] = 1; run.miss++; return; }
-        return api.adminPatch(d.id, { cas: list[0] }).then(function (rows) {
-          if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); run.found++; }
-          else run.fail++;
+    runPubchemEnrich({
+      tool: "CAS",
+      todo: casTodo(),
+      setRun: function (r) { casRun = r; },
+      onStart: function (groups) {
+        $("cas-go").hidden = true; $("cas-stop").hidden = false; $("cas-stop").disabled = false;
+        var prog = $("cas-prog"); prog.max = Math.max(1, groups.length); prog.value = 0; prog.hidden = false;
+      },
+      onStep: function (i, total, run) {
+        $("cas-prog").value = i;
+        $("cas-text").textContent = "Looking up " + (i + 1) + " / " + total + " molecules · filled " + run.okEntries + " · not on PubChem " + run.missMol + (run.failMol ? " · failed " + run.failMol : "");
+      },
+      lookup: function (smi) { return Ent.lookupCasDetailed(smi); },
+      handleResult: function (g, res, run) {
+        if (res.code === "bad_input" || res.code === "no_smiles") {
+          run.inRow = 0; g.docs.forEach(function (d) { casMiss[d.id] = 1; }); run.failMol++;
+          run.issues.push(issueGroup(g.docs, "CAS", "fail", res.reason, g.key));
+          return;
+        }
+        if (!res.values.length) {
+          run.inRow = 0; g.docs.forEach(function (d) { casMiss[d.id] = 1; }); run.missMol++;
+          run.issues.push(issueGroup(g.docs, "CAS", "miss", res.reason, g.key));
+          return;
+        }
+        return api.adminPatchManyRows(g.docs.map(function (d) { return d.id; }), { cas: res.values[0] }).then(function (rows) {
+          var byUp = applyUpdatedRows(rows);
+          var missed = [];
+          g.docs.forEach(function (d) {
+            if (byUp[d.id]) run.okEntries++;
+            else missed.push(d);
+          });
+          if (missed.length) {
+            run.failMol++; run.inRow++;
+            run.issues.push(issueGroup(missed, "CAS", "fail", "Database did not save the CAS number", g.key));
+          } else run.inRow = 0;
         });
-      }).catch(function (err) {
-        if (err && err.status === 401) { run.stop = run.out = true; signedOut("Your session ended. Sign in again."); return; }
-        run.fail++; run.inRow++; wait = 2000;
-      }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
-    })(0);
+      },
+      onFinish: function (why, run) {
+        $("cas-prog").hidden = true;
+        dupCache = {};
+        mergeToolIssues("CAS", run.attemptedIds, run.issues);
+        drawCas();
+        var left = casTodo().length;
+        var summary = why + " Filled " + run.okEntries + " entries, not on PubChem " + run.missMol + (run.failMol ? ", failed " + run.failMol : "") + " molecules.";
+        addToolLog("PubChem CAS: " + summary);
+        $("cas").hidden = false; $("cas-go").hidden = !left;
+        $("cas-text").textContent = summary + (left ? " " + left + " can still be tried." : "");
+        syncEnrichEmpty();
+        if (run.issues.length) toast(run.issues.length + (run.issues.length === 1 ? " molecule" : " molecules") + " failed or not on PubChem.", { actionLabel: "Review & fix", onAction: openEnrichModal });
+      }
+    });
   });
   $("cas-stop").addEventListener("click", function () { if (casRun) { casRun.stop = true; $("cas-stop").disabled = true; } });
 
@@ -841,7 +1495,7 @@
     return Promise.all([api.adminList(), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
       state.docs = r[0] || []; state.sugg = r[1] || [];
       dupCache = {}; state.loaded = true; state.refreshing = false; state.lastSync = new Date();
-      render(); backfill(); checkBatches(); drawCas();
+      render(); backfill(); checkBatches(); drawCas(); drawEnrichIssues();
     }, function (err) {
       state.refreshing = false;
       if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
@@ -855,7 +1509,10 @@
   function signedOut(msg) {
     if (casRun) casRun.stop = casRun.out = true;
     if (nameRun) nameRun.stop = true;
-    $("cas").hidden = true; $("iupac").hidden = true; $("imp").hidden = true;
+    enrichIssues = []; eiModalFilter = "all"; eiModalTool = ""; eiModalQuery = "";
+    nameTried = {}; casMiss = {}; toolLogs = [];
+    closeEnrichModal(); drawEnrichIssues(); drawToolLog();
+    $("cas").hidden = true; $("iupac").hidden = true; $("smi-sync").hidden = true; $("imp").hidden = true;
     $("tools-aside").classList.remove("open");
     $("toggle-tools").setAttribute("aria-expanded", "false");
     state.activeId = ""; state.triage = "";
@@ -931,8 +1588,8 @@
   document.addEventListener("keydown", function (e) {
     if ($("panel").hidden || !state.loaded) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    var ed = $("ed"), sk = $("sk");
-    if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden)) return;
     var tag = document.activeElement && document.activeElement.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (document.activeElement && document.activeElement.isContentEditable)) return;
 
@@ -968,6 +1625,6 @@
   $("f-reset").addEventListener("click", function () { state.triage = ""; });
   Ent.bindSearch(state.search, function () { render(); });
   Ent.sketcher.bind();
-  Ent.loadOCL(function () { dupCache = {}; if (state.loaded) { render(); drawNames(); } backfill(); });
+  Ent.loadOCL(function () { dupCache = {}; if (state.loaded) { render(); drawSmiSync(); drawNames(); } backfill(); });
   start();
 })();

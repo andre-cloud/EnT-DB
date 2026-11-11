@@ -23,7 +23,16 @@ def _expand_inputs(inputs: list[str], *, allow_markdown: bool = False) -> list[P
         if p.is_dir():
             pdfs = sorted(p.glob("*.pdf"))
             if pdfs or not allow_markdown:
-                found.extend(pdfs)
+                stems = {x.stem.lower() for x in pdfs}
+                filtered = [
+                    x
+                    for x in pdfs
+                    if not any(
+                        x.stem.lower().endswith(suf) and x.stem.lower()[: -len(suf)] in stems
+                        for suf in ("_si", "-si", "_supp", "-supp", "_supporting", "-supporting", "_esi", "-esi")
+                    )
+                ]
+                found.extend(filtered)
             else:
                 found.extend(sorted(p.glob("*.md")))
                 found.extend(sorted(p.glob("*.markdown")))
@@ -65,10 +74,13 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
     p_ext.add_argument("--dedup-db", action="store_true", help="Also query the public TrEnDB DB for deduplication.")
     p_ext.add_argument("--offline", action="store_true", help="Disable OPSIN/PubChem/Crossref/doi.org HTTP requests.")
     p_ext.add_argument("--no-ocr", action="store_true", help="Disable Tesseract OCR fallback on scanned PDF pages.")
+    p_ext.add_argument("--si", nargs="+", default=None, help="Explicit local Supporting Information file(s) (.pdf/.docx/.md/.txt/.csv).")
+    p_ext.add_argument("--no-si", action="store_true", help="Disable automatic DOI-based Supporting Information download.")
     p_ext.add_argument("--save-markdown", action="store_true", help="Save extracted Markdown into <out-dir>/markdown/.")
     p_ext.add_argument("--decimer", action="store_true", help="Crop figures and run DECIMER-Image_Transformer for unresolved structures.")
     p_ext.add_argument("--write-batch", action="store_true", help="Write docs/batches/batch-NNN.json and update index.json.")
     p_ext.add_argument("--batch-file", default=None, help="Explicit target batch JSON file when --write-batch is set.")
+    p_ext.add_argument("--overwrite", action="store_true", help="Overwrite existing output JSONs instead of appending.")
 
     p_md = sub.add_parser("to-md", help="Convert PDF papers into clean Markdown (with Tesseract OCR on scanned pages).")
     p_md.add_argument("pdfs", nargs="+", help="PDF files, directories, or glob patterns.")
@@ -89,6 +101,7 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
     p_bld.add_argument("--offline", action="store_true", help="Disable OPSIN/PubChem/doi.org HTTP requests.")
     p_bld.add_argument("--write-batch", action="store_true", help="Write docs/batches/batch-NNN.json and update index.json.")
     p_bld.add_argument("--batch-file", default=None, help="Explicit target batch JSON file when --write-batch is set.")
+    p_bld.add_argument("--overwrite", action="store_true", help="Overwrite existing output JSONs instead of appending.")
 
     args = parser.parse_args(argv)
     if args.cmd == "to-md":
@@ -150,6 +163,11 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                 all_candidates = []
                 for p in input_paths:
                     meta = manifest.get(p.name, {})
+                    si_list = list(args.si or [])
+                    if isinstance(meta.get("si"), list):
+                        si_list.extend(meta["si"])
+                    elif isinstance(meta.get("si"), str):
+                        si_list.append(meta["si"])
                     if p.suffix.lower() in (".md", ".markdown"):
                         cands = extract_markdown(
                             p,
@@ -158,6 +176,9 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                             citation_override=meta.get("citation"),
                             default_role=meta.get("role", args.role),
                             default_cls=meta.get("cls", args.cls_name),
+                            enable_ocr=not args.no_ocr,
+                            fetch_si=not args.no_si,
+                            si_paths=si_list or None,
                         )
                     else:
                         cands = extract_pdf(
@@ -171,6 +192,8 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                             save_markdown_dir=md_dir,
                             use_decimer=args.decimer,
                             figures_dir=fig_dir,
+                            fetch_si=not args.no_si,
+                            si_paths=si_list or None,
                         )
                     all_candidates.extend(cands)
 
@@ -183,6 +206,7 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                     write_batch=args.write_batch,
                     batch_file=args.batch_file,
                     out_dir=args.out_dir,
+                    append=not args.overwrite,
                 )
             else:
                 res = build_batch_from_review(
@@ -194,6 +218,7 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                     write_batch=args.write_batch,
                     batch_file=args.batch_file,
                     out_dir=args.out_dir,
+                    append=not args.overwrite,
                 )
     finally:
         if db_client is not None:

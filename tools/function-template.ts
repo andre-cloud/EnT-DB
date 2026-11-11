@@ -92,9 +92,10 @@ async function notify(row) {
   const site = (Deno.env.get("SITE_URL") || "").replace(/\/+$/, "");
   const reviewUrl = site ? `${site}/admin.html` : "";
   const grade = EntScore.gradeOf(row.score).label;
-  const subject = `TrEnDB: new submission, ${row.name} (${row.score}/100, ${grade})`;
+  const titleName = row.commercial_name || row.name;
+  const subject = `TrEnDB: new submission, ${titleName} (${row.score}/100, ${grade})`;
   const lines = [
-    ["Molecule", row.name], ["CAS", row.cas], ["SMILES", row.smiles], ["ET", `${row.et_kcal} kcal/mol (reported: ${row.et_reported})`],
+    ["Molecule", titleName], ["IUPAC name", row.commercial_name ? row.name : ""], ["CAS", row.cas], ["SMILES", row.smiles], ["ET", `${row.et_kcal} kcal/mol (reported: ${row.et_reported})`],
     ["Value type", row.et_type], ["Method", row.method], ["Conditions", row.conditions],
     ["Source", row.citation], ["DOI", row.doi], ["Where", row.location], ["Submitted by", row.submitted_by],
   ].filter((l) => l[1]);
@@ -103,7 +104,7 @@ async function notify(row) {
 
   const key = Deno.env.get("RESEND_API_KEY"), to = (Deno.env.get("NOTIFY_EMAIL") || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (key && to.length) {
-    const html = `<h2 style="font-family:sans-serif">New submission: ${esc(row.name)}</h2>
+    const html = `<h2 style="font-family:sans-serif">New submission: ${esc(titleName)}</h2>
 <p style="font-family:sans-serif"><b>Score ${row.score}/100 (${grade})</b>${lost.length ? "<br>Points lost on: " + esc(lost.join("; ")) : ""}</p>
 <table style="font-family:sans-serif;border-collapse:collapse">${lines.map((l) => `<tr><td style="padding:2px 12px 2px 0;color:#666">${esc(l[0])}</td><td>${esc(l[1])}</td></tr>`).join("")}</table>
 ${reviewUrl ? `<p style="font-family:sans-serif"><a href="${esc(reviewUrl)}">Open the review queue</a> to approve or reject it.</p>` : ""}`;
@@ -121,7 +122,7 @@ ${reviewUrl ? `<p style="font-family:sans-serif"><a href="${esc(reviewUrl)}">Ope
     if (reviewUrl) headers.Click = reviewUrl;
     jobs.push(fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
       method: "POST", headers,
-      body: `${row.name}: ${row.et_kcal} kcal/mol, score ${row.score}/100 (${grade})`,
+      body: `${titleName}: ${row.et_kcal} kcal/mol, score ${row.score}/100 (${grade})`,
       signal: AbortSignal.timeout(8000),
     }).then((r) => { if (!r.ok) console.error("ntfy failed", r.status); }));
   }

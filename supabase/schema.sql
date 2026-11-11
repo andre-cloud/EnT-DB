@@ -16,6 +16,7 @@ create table if not exists public.entries (
   decided_at     timestamptz,
   -- molecule
   name           text not null,
+  commercial_name text,
   smiles         text not null,
   idcode         text,                       -- OpenChemLib canonical code, used to find the same structure
   smiles_checked boolean not null default false,
@@ -64,6 +65,8 @@ create unique index if not exists entries_import_key_idx on public.entries (impo
 alter table public.entries add column if not exists uses jsonb;
 -- CAS registry number, the first key used to recognise the same molecule.
 alter table public.entries add column if not exists cas text;
+-- Commercial or common name (optional; displayed as main title with IUPAC name underneath when set).
+alter table public.entries add column if not exists commercial_name text;
 -- Structured UV-vis columns (replacing legacy free-text uv).
 alter table public.entries add column if not exists uv_lmax int;
 alter table public.entries add column if not exists uv_eps int;
@@ -222,7 +225,7 @@ grant select, update, delete on public.suggestions to authenticated;
 -- "security definer view"; here it is the intended design.)
 -- (Dropped and recreated, together with list_entries below, because its columns change.)
 create view public.public_entries as
-select id, created_at, name, cas, smiles, idcode, structure_note, cls, role,
+select id, created_at, name, commercial_name, cas, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
        citation, doi, location, quote, evidence,
        uv_lmax, uv_eps, uv_cond, direct_exc, score, uses

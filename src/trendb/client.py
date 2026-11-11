@@ -16,11 +16,12 @@ from .query import QueryBuilder, SearchResult, filter_entries, group_by_molecule
 PAGE_SIZE = 1000
 # Exact columns exposed by public.public_entries in supabase/schema.sql (curators' working notes stay private).
 PUBLIC_ENTRY_COLUMNS = (
-    "id,created_at,name,cas,smiles,idcode,structure_note,cls,role,"
+    "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,role,"
     "origin,et_kcal,et_unc,et_reported,et_type,method,conditions,"
     "citation,doi,location,quote,evidence,"
     "uv_lmax,uv_eps,uv_cond,direct_exc,score,uses"
 )
+LEGACY_PUBLIC_ENTRY_COLUMNS = PUBLIC_ENTRY_COLUMNS.replace(",commercial_name,", ",")
 
 
 class TrEnDBError(RuntimeError):
@@ -206,15 +207,19 @@ class TrEnDBClient:
                 "Public database is gated by site_access, and the signed-in account is not listed as a curator in public.admins."
             )
 
+        cols = PUBLIC_ENTRY_COLUMNS
         entries: list[Entry] = []
         offset = 0
         while True:
             url = (
                 f"{self.config.supabase_url}/rest/v1/entries"
-                f"?select={PUBLIC_ENTRY_COLUMNS}&status=eq.approved"
+                f"?select={cols}&status=eq.approved"
                 f"&order=created_at.asc,id.asc&limit={PAGE_SIZE}&offset={offset}"
             )
             resp = self._http.get(url, headers=auth_headers)
+            if resp.status_code == 400 and cols != LEGACY_PUBLIC_ENTRY_COLUMNS and "commercial_name" in resp.text:
+                cols = LEGACY_PUBLIC_ENTRY_COLUMNS
+                continue
             if resp.status_code == 401:
                 raise TrEnDBError("Curator session rejected (401) while fetching entries.")
             if not resp.is_success:

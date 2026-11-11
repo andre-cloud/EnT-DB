@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from . import clean_fields, scoring
 from .models import KCAL_PER_EV, KJ_PER_KCAL
@@ -593,7 +593,7 @@ def _extract_from_tables(
 ) -> list[ExtractedCandidate]:
     results: list[ExtractedCandidate] = []
     for page in doc.pages:
-        captions = [m.group(1).strip() for m in re.finditer(r"(Table\s+(?:S?\d+|[IVX]+)\b[^\n]*)", page.text, re.IGNORECASE)]
+        caption_matches = list(re.finditer(r"(Table\s+(?:S?\d+|[IVX]+)\b[^\n]*)", page.text, re.IGNORECASE))
         # Capture table footnotes mentioning measurement details (e.g. "0-0 band in phosphorescence spectra at 77 K")
         foot_chunks = [
             m.group(0).strip()
@@ -608,8 +608,10 @@ def _extract_from_tables(
             if data_start >= len(tb):
                 continue
 
-            table_label = captions[min(tb_idx, len(captions) - 1)][:80] if captions else f"p. {page.page_num}"
-            page_ctx = " ".join(x for x in (captions[min(tb_idx, len(captions) - 1)] if captions else page.text[:500], foot_ctx) if x)
+            cap_match = caption_matches[min(tb_idx, len(caption_matches) - 1)] if caption_matches else None
+            table_label = cap_match.group(1).strip()[:80] if cap_match else f"p. {page.page_num}"
+            page_ctx = " ".join(x for x in (cap_match.group(1).strip() if cap_match else page.text[:500], foot_ctx) if x)
+            preceding_txt = page.text[max(0, cap_match.start() - 500) : cap_match.start()] if cap_match else ""
 
             name_col: int | None = None
             cas_col: int | None = None
@@ -694,7 +696,12 @@ def _extract_from_tables(
                             " ".join(cond_parts),
                         ]
                     )
-                    origin = origin_hint or _classify_origin(ctx_blob, default="exp")
+                    if origin_hint:
+                        origin = origin_hint
+                    elif _CALC_HINT_RE.search(ctx_blob) or _EXP_HINT_RE.search(ctx_blob):
+                        origin = _classify_origin(ctx_blob, default="exp")
+                    else:
+                        origin = _classify_origin(preceding_txt, default="exp")
                     et_type, method, conditions, f_or_solv, b_or_temp, solv_model = _extract_method_and_conditions(ctx_blob, origin)
                     if method_col is not None and method_col < len(row) and row[method_col].strip():
                         method = _strip_urls(row[method_col].strip()) or method
@@ -1060,6 +1067,11 @@ def extract_from_document(
     citation_override: str | None = None,
     default_role: str = "acceptor",
     default_cls: str | None = None,
+    enable_ocr: bool = True,
+    use_si: bool = True,
+    fetch_si: bool = True,
+    si_paths: Sequence[str | Path] | None = None,
+    si_cache_dir: str | Path | None = ".cache/trendb_si",
 ) -> list[ExtractedCandidate]:
     """Extract candidate TrEnDB entries from an already-parsed PdfDocument."""
     doi = scoring.clean_doi(doi_override) if doi_override else detect_doi(doc)
@@ -1101,6 +1113,23 @@ def extract_from_document(
         if key not in seen:
             seen.add(key)
             combined.append(p)
+
+    if use_si:
+        from .si import enrich_with_si
+
+        combined = enrich_with_si(
+            doc,
+            combined,
+            resolver=resolver,
+            doi=doi,
+            citation=citation,
+            default_role=default_role,
+            default_cls=default_cls,
+            enable_ocr=enable_ocr,
+            fetch_si=fetch_si,
+            si_paths=si_paths,
+            si_cache_dir=si_cache_dir,
+        )
     return combined
 
 
@@ -1112,6 +1141,10 @@ def extract_markdown(
     citation_override: str | None = None,
     default_role: str = "acceptor",
     default_cls: str | None = None,
+    enable_ocr: bool = True,
+    fetch_si: bool = True,
+    si_paths: Sequence[str | Path] | None = None,
+    si_cache_dir: str | Path | None = ".cache/trendb_si",
 ) -> list[ExtractedCandidate]:
     """Extract candidate TrEnDB entries from a Markdown document without an LLM."""
     doc = read_markdown(md_path)
@@ -1122,6 +1155,10 @@ def extract_markdown(
         citation_override=citation_override,
         default_role=default_role,
         default_cls=default_cls,
+        enable_ocr=enable_ocr,
+        fetch_si=fetch_si,
+        si_paths=si_paths,
+        si_cache_dir=si_cache_dir,
     )
 
 
@@ -1138,6 +1175,9 @@ def extract_pdf(
     use_decimer: bool = False,
     figures_dir: str | Path | None = None,
     ocsr_predictor: Any = None,
+    fetch_si: bool = True,
+    si_paths: Sequence[str | Path] | None = None,
+    si_cache_dir: str | Path | None = ".cache/trendb_si",
 ) -> list[ExtractedCandidate]:
     """Extract candidate TrEnDB entries from a single PDF without an LLM."""
     from .ocsr import decimer_available, run_ocsr_on_pdf
@@ -1154,6 +1194,10 @@ def extract_pdf(
         citation_override=citation_override,
         default_role=default_role,
         default_cls=default_cls,
+        enable_ocr=enable_ocr,
+        fetch_si=fetch_si,
+        si_paths=si_paths,
+        si_cache_dir=si_cache_dir,
     )
 
     # Optional OCSR via DECIMER-Image_Transformer for unresolved structures

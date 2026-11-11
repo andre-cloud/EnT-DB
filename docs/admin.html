@@ -56,6 +56,7 @@
         <button class="btn small" id="sel-all" type="button">Select all listed</button>
         <button class="btn small" id="sel-none" type="button" hidden>Clear selection</button>
         <span class="grow"></span>
+        <button class="btn small" id="sel-slide" type="button" hidden>Build slide</button>
         <button class="btn small primary" id="sel-approve" type="button" hidden>Approve selected</button>
         <button class="btn small reject" id="sel-reject" type="button" hidden>Reject selected</button>
         <button class="btn small" id="sel-queue" type="button" hidden>Back to queue</button>
@@ -76,6 +77,7 @@
           <button class="pill pill-warn" type="button" data-triage="verify" aria-pressed="false" hidden>Source to verify<span class="n" id="tr-verify">0</span></button>
           <button class="pill" type="button" data-triage="form" aria-pressed="false" hidden>Form submissions<span class="n" id="tr-form">0</span></button>
           <button class="pill pill-bad" type="button" data-triage="low" aria-pressed="false" hidden>Score &lt; 50<span class="n" id="tr-low">0</span></button>
+          <button class="pill pill-warn" type="button" data-triage="enrich" aria-pressed="false" hidden>Enrichment issues<span class="n" id="tr-enrich">0</span></button>
         </div>
 
         <section class="filter-panel" aria-label="Search and filters">
@@ -169,6 +171,13 @@
             </select>
           </div>
 
+          <div class="tool-sub" id="smi-sync" hidden>
+            <p class="hint" id="smi-sync-text" aria-live="polite"></p>
+            <div class="actions">
+              <button class="btn small primary" id="smi-sync-go" type="button">Sync batch SMILES</button>
+            </div>
+          </div>
+
           <div class="tool-sub" id="iupac" hidden>
             <p class="hint" id="iupac-text" aria-live="polite"></p>
             <progress id="iupac-prog" class="tool-prog" value="0" max="1" hidden></progress>
@@ -189,6 +198,18 @@
           </div>
 
           <p class="hint" id="enrich-empty" hidden>All entries in this scope have checked IUPAC names and CAS numbers.</p>
+
+          <div class="tool-sub ei-summary-box" id="enrich-issues-bar" hidden>
+            <div class="ei-summary-head">
+              <strong>Needs attention</strong>
+              <span class="n" id="enrich-issues-count">0</span>
+            </div>
+            <p class="hint" id="enrich-issues-summary" aria-live="polite"></p>
+            <div class="actions">
+              <button class="btn small primary" id="enrich-review-open" type="button">Review &amp; fix…</button>
+              <button class="btn small" id="enrich-issues-clear" type="button">Clear</button>
+            </div>
+          </div>
 
           <details id="tool-log-wrap" class="tool-log-wrap" hidden>
             <summary>Last run log <span class="n" id="tool-log-count">0</span></summary>
@@ -216,6 +237,38 @@
 </div>
 
 <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+<div class="sk ei-overlay" id="ei-modal" hidden>
+  <div class="sk-box ed-box ei-box" role="dialog" aria-modal="true" aria-labelledby="ei-modal-title">
+    <div class="ed-head">
+      <div class="ei-modal-title-wrap">
+        <h2 id="ei-modal-title">Enrichment · Failed &amp; not found</h2>
+        <span class="hint" id="ei-modal-meta"></span>
+      </div>
+      <div class="ed-head-actions">
+        <button class="btn small" id="ei-modal-clear" type="button">Clear list</button>
+        <button class="btn small" id="ei-modal-close" type="button">Close</button>
+      </div>
+    </div>
+    <div class="ei-modal-bar">
+      <input id="ei-modal-q" class="grow" type="search" placeholder="Filter by molecule name, SMILES or reason…" aria-label="Filter enrichment issues">
+      <div class="ei-filters" id="ei-modal-filters">
+        <button class="btn small" type="button" data-ei-filter="all" aria-pressed="true">All</button>
+        <button class="btn small" type="button" data-ei-filter="fail" aria-pressed="false">Failed</button>
+        <button class="btn small" type="button" data-ei-filter="miss" aria-pressed="false">Not found</button>
+      </div>
+      <select id="ei-modal-tool" class="compact-select" aria-label="Filter by tool" hidden>
+        <option value="">All tools</option>
+        <option value="CAS">CAS</option>
+        <option value="IUPAC">IUPAC</option>
+        <option value="Batch IUPAC">Batch IUPAC</option>
+      </select>
+    </div>
+    <div class="ed-body ei-modal-body">
+      <p class="hint" id="ei-modal-empty" hidden>No molecules match the current filter.</p>
+      <ul id="ei-modal-list" class="ei-modal-list"></ul>
+    </div>
+  </div>
+</div>
 <div class="sk" id="ed" hidden></div>
 
 <div class="sk" id="sk" hidden>
@@ -237,6 +290,7 @@
 </div>
 <script src="assets/config.js"></script>
 <script src="assets/score.js"></script>
+<script src="assets/chem-render.js"></script>
 <script src="assets/common.js"></script>
 <script src="assets/admin.js"></script>
 </body>

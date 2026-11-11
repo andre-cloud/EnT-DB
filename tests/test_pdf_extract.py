@@ -304,3 +304,37 @@ That these triplet energies are reasonably accurate is demonstrated by the fact 
     assert validate_batch_rows(rows) == []
     assert json.loads((batches_dir / "index.json").read_text(encoding="utf-8"))["files"] == ["batch-001.json", "batch-002.json"]
 
+
+def test_preview_json_appends_by_default_and_overwrite_flag(tmp_path: Path) -> None:
+    p1 = tmp_path / "p1.md"
+    p1.write_text("DOI: 10.1021/p1.2026\n\nThioxanthone has a triplet energy of 65.5 kcal/mol.\n", encoding="utf-8")
+    p2 = tmp_path / "p2.md"
+    p2.write_text("DOI: 10.1021/p2.2026\n\nBenzophenone has a triplet energy of 68.5 kcal/mol.\n", encoding="utf-8")
+
+    batches_dir = tmp_path / "batches"
+    batches_dir.mkdir()
+    (batches_dir / "index.json").write_text('{"files": []}\n', encoding="utf-8")
+    out_dir = tmp_path / "stage"
+
+    assert main_extract(["extract", str(p1), "--batches-dir", str(batches_dir), "--out-dir", str(out_dir), "--offline"]) == 0
+    preview = out_dir / "batch-preview.json"
+    assert len(json.loads(preview.read_text(encoding="utf-8"))) == 1
+
+    # Second extract appends p2 to batch-preview.json without overwriting p1
+    assert main_extract(["extract", str(p2), "--batches-dir", str(batches_dir), "--out-dir", str(out_dir), "--offline"]) == 0
+    rows = json.loads(preview.read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert {r["doi"] for r in rows} == {"10.1021/p1.2026", "10.1021/p2.2026"}
+    assert validate_batch_rows(rows) == []
+
+    # Re-running p2 does not duplicate existing preview entries
+    assert main_extract(["extract", str(p2), "--batches-dir", str(batches_dir), "--out-dir", str(out_dir), "--offline"]) == 0
+    assert len(json.loads(preview.read_text(encoding="utf-8"))) == 2
+
+    # --overwrite replaces batch-preview.json with only the current run
+    assert main_extract(["extract", str(p2), "--batches-dir", str(batches_dir), "--out-dir", str(out_dir), "--offline", "--overwrite"]) == 0
+    rows_ow = json.loads(preview.read_text(encoding="utf-8"))
+    assert len(rows_ow) == 1
+    assert rows_ow[0]["doi"] == "10.1021/p2.2026"
+
+

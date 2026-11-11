@@ -185,6 +185,56 @@ def _candidate_to_review_dict(c: ExtractedCandidate, reason: str, score: int | N
     return d
 
 
+def _load_json_list(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _merge_batch_json(target: Path, new_rows: list[dict[str, Any]], *, append: bool) -> list[dict[str, Any]]:
+    """Merge new uniform rows into target (when append=True and target exists) and write JSON."""
+    merged: list[dict[str, Any]] = []
+    if append and target.is_file():
+        existing_target = _load_json_list(target)
+        seen_ik = {r.get("import_key") for r in existing_target if r.get("import_key")}
+        for old in existing_target:
+            for k in BATCH_ROW_KEYS:
+                old.setdefault(k, None)
+            merged.append({k: old[k] for k in BATCH_ROW_KEYS})
+        for r in new_rows:
+            if r["import_key"] not in seen_ik:
+                seen_ik.add(r["import_key"])
+                merged.append(r)
+    else:
+        merged = list(new_rows)
+
+    if merged:
+        problems = validate_batch_rows(merged)
+        if problems:
+            raise ValueError("Merged batch failed validation:\n" + "\n".join(problems))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(merged, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return merged
+
+
+def _review_dedup_key(item: dict[str, Any]) -> tuple[str, str, float, str, str]:
+    try:
+        et = round(float(item.get("et_kcal") or 0.0), 1)
+    except (TypeError, ValueError):
+        et = 0.0
+    return (
+        str(item.get("name") or "").strip().lower(),
+        str(item.get("origin") or "exp"),
+        et,
+        str(item.get("pdf_file") or ""),
+        str(item.get("location") or ""),
+    )
+
+
 def build_batch(
     candidates: Iterable[ExtractedCandidate],
     *,
@@ -195,13 +245,25 @@ def build_batch(
     write_batch: bool = False,
     batch_file: str | Path | None = None,
     out_dir: str | Path = "extracted",
+    append: bool = True,
+    merge_review: bool = True,
 ) -> BatchBuildResult:
     """Validate, score, deduplicate, and package extracted candidates into batch/review files."""
     bdir = Path(batches_dir)
+    out_path = Path(out_dir)
     existing_batch_rows = _load_existing_batch_rows(bdir)
-    used_import_keys = {str(r.get("import_key")) for r in existing_batch_rows if r.get("import_key")}
-
     reference_entries: list[dict[str, Any]] = list(existing_batch_rows)
+
+    if append:
+        if not write_batch:
+            reference_entries.extend(_load_json_list(out_path / "batch-preview.json"))
+        elif batch_file:
+            bf_path = Path(batch_file)
+            if bf_path.parent.resolve() != bdir.resolve() or bf_path.name not in {p.name for p in bdir.glob("batch-*.json")}:
+                reference_entries.extend(_load_json_list(bf_path))
+
+    used_import_keys = {str(r.get("import_key")) for r in reference_entries if r.get("import_key")}
+
     if db_client is not None:
         for e in db_client.fetch_entries():
             reference_entries.append(e.to_dict())
@@ -342,26 +404,7 @@ def build_batch(
 
     if write_batch and ready_rows:
         target = Path(batch_file) if batch_file else next_batch_path(bdir)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        merged: list[dict[str, Any]] = []
-        if target.is_file():
-            existing_target = json.loads(target.read_text(encoding="utf-8"))
-            seen_ik = {r.get("import_key") for r in existing_target}
-            # Harmonize uniform keys if appending to a pre-existing file (e.g., batch-001 without "cas")
-            for old in existing_target:
-                for k in BATCH_ROW_KEYS:
-                    old.setdefault(k, None)
-                merged.append({k: old[k] for k in BATCH_ROW_KEYS})
-            for r in ready_rows:
-                if r["import_key"] not in seen_ik:
-                    merged.append(r)
-        else:
-            merged = ready_rows
-
-        problems = validate_batch_rows(merged)
-        if problems:
-            raise ValueError("Merged batch failed validation:\n" + "\n".join(problems))
-        target.write_text(json.dumps(merged, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        _merge_batch_json(target, ready_rows, append=append)
         result.batch_path = target
 
         # Update docs/batches/index.json only when writing inside batches_dir
@@ -376,14 +419,31 @@ def build_batch(
                 files_list.append(target.name)
             idx_data["files"] = files_list
             idx_file.write_text(json.dumps(idx_data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    elif ready_rows:
+    elif not write_batch:
         dry_batch = out_path / "batch-preview.json"
-        dry_batch.write_text(json.dumps(ready_rows, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        result.batch_path = dry_batch
+        if ready_rows:
+            _merge_batch_json(dry_batch, ready_rows, append=append)
+            result.batch_path = dry_batch
+        elif append and dry_batch.is_file():
+            result.batch_path = dry_batch
 
+    rev_file = out_path / "needs_review.json"
     if review_items:
-        rev_file = out_path / "needs_review.json"
-        rev_file.write_text(json.dumps(review_items, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        merged_rev: list[dict[str, Any]] = []
+        if append and merge_review and rev_file.is_file():
+            existing_rev = _load_json_list(rev_file)
+            seen_rev = {_review_dedup_key(it) for it in existing_rev}
+            merged_rev.extend(existing_rev)
+            for it in review_items:
+                k = _review_dedup_key(it)
+                if k not in seen_rev:
+                    seen_rev.add(k)
+                    merged_rev.append(it)
+        else:
+            merged_rev = list(review_items)
+        rev_file.write_text(json.dumps(merged_rev, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        result.review_path = rev_file
+    elif append and merge_review and rev_file.is_file():
         result.review_path = rev_file
 
     report_file = out_path / "report.md"
@@ -402,9 +462,11 @@ def build_batch_from_review(
     write_batch: bool = False,
     batch_file: str | Path | None = None,
     out_dir: str | Path = "extracted",
+    append: bool = True,
 ) -> BatchBuildResult:
     """Promote manually completed items from needs_review.json into a validated batch."""
-    items = json.loads(Path(review_json).read_text(encoding="utf-8"))
+    rev_path = Path(review_json)
+    items = json.loads(rev_path.read_text(encoding="utf-8"))
     allowed_fields = set(ExtractedCandidate.__dataclass_fields__.keys())
     candidates = []
     for item in items:
@@ -412,7 +474,7 @@ def build_batch_from_review(
         if cand.smiles and cand.structure_note and "could not be resolved" in cand.structure_note.lower():
             cand.structure_note = "Structure supplied manually during review."
         candidates.append(cand)
-    return build_batch(
+    res = build_batch(
         candidates,
         resolver=resolver,
         batches_dir=batches_dir,
@@ -421,7 +483,13 @@ def build_batch_from_review(
         write_batch=write_batch,
         batch_file=batch_file,
         out_dir=out_dir,
+        append=append,
+        merge_review=False,
     )
+    out_rev = Path(out_dir) / "needs_review.json"
+    if not res.review_items and out_rev.is_file() and rev_path.resolve() == out_rev.resolve():
+        out_rev.unlink()
+    return res
 
 
 def render_report(res: BatchBuildResult) -> str:

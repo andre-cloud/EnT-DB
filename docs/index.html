@@ -163,11 +163,14 @@
           <fieldset>
             <legend>Molecule</legend>
             <div class="frow">
-              <label class="field">IUPAC name<input id="fm-name" type="text" autocomplete="off" spellcheck="false"></label>
+              <label class="field">IUPAC name (required)<input id="fm-name" type="text" autocomplete="off" spellcheck="false" required></label>
+              <label class="field">Commercial name (optional)<input id="fm-commercial_name" type="text" placeholder="e.g. Styrene, Benzophenone" autocomplete="off"></label>
+            </div>
+            <div id="fm-iupac"></div>
+            <div class="frow">
               <label class="field">CAS number (optional)<input id="fm-cas" class="mono" type="text" placeholder="e.g. 100-42-5" spellcheck="false" autocomplete="off"></label>
               <label class="field">Class (optional)<input id="fm-cls" type="text" placeholder="e.g. Styrenes" autocomplete="off"></label>
             </div>
-            <div id="fm-iupac"></div>
             <label class="field">SMILES<input id="fm-smiles" class="mono" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. C/C=C/c1ccccc1"></label>
             <div class="struct">
               <div class="paper" id="fm-preview">Type a SMILES or draw the structure</div>
@@ -283,6 +286,15 @@
   <footer class="foot">Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/TrEnDB">github.com/nuniwo-source/TrEnDB</a>.</footer>
 </div>
 
+<div class="slide-bar" id="slide-bar" role="region" aria-label="Slide selection" hidden>
+  <span class="slide-count" id="slide-count">0 selected</span>
+  <div class="slide-chips" id="slide-chips"></div>
+  <div class="slide-bar-acts">
+    <button class="btn small primary" id="slide-open" type="button">Build slide</button>
+    <button class="btn small" id="slide-clear" type="button">Clear</button>
+  </div>
+</div>
+
 <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 <div class="sk" id="ed" hidden></div>
 
@@ -305,6 +317,7 @@
 </div>
 <script src="assets/config.js"></script>
 <script src="assets/score.js"></script>
+<script src="assets/chem-render.js"></script>
 <script src="assets/common.js"></script>
 <script src="assets/app.js"></script>
 </body>

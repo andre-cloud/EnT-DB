@@ -129,7 +129,7 @@
     var eps = parseIntRange(p.uv_eps, 0, 100000000);
     var dir = parseDirectExc(p.direct_exc != null ? p.direct_exc : p.direct, p.direct_src, p.direct_nm);
     return {
-      name: str(p.name, 200), cas: cleanCas(p.cas), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
+      name: str(p.name, 200), commercial_name: str(p.commercial_name, 200), cas: cleanCas(p.cas), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
       role: pick(p.role, ["acceptor", "donor", "both"], "acceptor"),
       et: et, unit: unit, unc: unc,
       kcal: isNaN(et) ? NaN : et * k,
@@ -230,6 +230,7 @@
     ctx = ctx || {};
     if (!f.smiles) return "Add the structure as a SMILES or draw it.";
     if (ctx.structureOk === false) return "The SMILES could not be read. Fix it or redraw the structure.";
+    if (!f.name) return "Enter the IUPAC name.";
     if (isNaN(f.kcal)) return "Enter the triplet energy value.";
     if (!(f.kcal > 0 && f.kcal <= ET_MAX)) return "The triplet energy must be above 0 and at most " + ET_MAX + " kcal/mol. Check the value and the unit.";
     if (!f.cite && !f.doi) return "Add a citation or a DOI so the value can be traced.";
@@ -260,7 +261,7 @@
     if (!isNaN(f.uv_lmax)) doc.uv_lmax = f.uv_lmax;
     if (!isNaN(f.uv_eps)) doc.uv_eps = f.uv_eps;
     if (f.direct_exc) doc.direct_exc = f.direct_exc;
-    [["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
+    [["commercial_name", f.commercial_name], ["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv_cond", f.uv_cond], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
     if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
     return doc;
@@ -270,7 +271,7 @@
      Fields a reader may propose a new value for, with how the value is checked. "uses_add"
      adds a paper (DOI + note) in which the molecule was used. Shared with the server. */
   var SUGGEST_FIELDS = [
-    ["name", "IUPAC name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
+    ["name", "IUPAC name", "text"], ["commercial_name", "Commercial name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
     ["cls", "Class", "text"], ["role", "Role", "role"], ["origin", "Origin (experimental or computed)", "origin"],
     ["et_kcal", "E_T (kcal/mol)", "et"], ["et_unc", "± Uncertainty (kcal/mol)", "unc"],
     ["et_reported", "Value as reported in the paper", "text"], ["et_type", "Value type", "text"],

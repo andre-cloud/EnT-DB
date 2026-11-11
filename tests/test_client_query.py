@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from trendb import TrEnDBClient, TrEnDBError, load_config
+from trendb import Entry, MoleculeGroup, TrEnDBClient, TrEnDBError, filter_entries, group_by_molecule, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -352,3 +352,81 @@ def test_explicit_curator_auth_and_error_cases() -> None:
     )
     with pytest.raises(TrEnDBError, match="site_access"):
         c_bad_pw.fetch_entries()
+
+
+def test_commercial_name_model_grouping_and_filter() -> None:
+    e_with = Entry.from_dict({
+        "id": "10",
+        "name": "thioxanthen-9-one",
+        "commercial_name": "Thioxanthone",
+        "smiles": "O=c1c2ccccc2sc2ccccc12",
+        "idcode": "id_tx",
+        "et_kcal": 65.5,
+        "origin": "exp",
+        "role": "donor",
+    })
+    e_no_comm = Entry.from_dict({
+        "id": "11",
+        "name": "thioxanthen-9-one",
+        "smiles": "O=c1c2ccccc2sc2ccccc12",
+        "idcode": "id_tx",
+        "et_kcal": 64.1,
+        "origin": "calc",
+        "role": "donor",
+    })
+    e_other = Entry.from_dict({
+        "id": "12",
+        "name": "diphenylmethanone",
+        "smiles": "O=C(c1ccccc1)c1ccccc1",
+        "idcode": "id_bp",
+        "et_kcal": 68.5,
+        "origin": "exp",
+        "role": "donor",
+    })
+
+    assert e_with.display_name == "Thioxanthone"
+    assert e_no_comm.display_name == "thioxanthen-9-one"
+    assert e_other.commercial_name is None
+
+    groups = group_by_molecule([e_no_comm, e_with, e_other])
+    tx_group = next(g for g in groups if g.name == "thioxanthen-9-one")
+    bp_group = next(g for g in groups if g.name == "diphenylmethanone")
+    assert isinstance(tx_group, MoleculeGroup)
+    assert tx_group.commercial_name == "Thioxanthone"
+    assert tx_group.display_name == "Thioxanthone"
+    assert bp_group.commercial_name is None
+    assert bp_group.display_name == "diphenylmethanone"
+
+    assert [e.id for e in filter_entries([e_with, e_other], q="Thioxanthone")] == ["10"]
+    assert [e.id for e in filter_entries([e_with, e_no_comm, e_other], q="thioxanthen")] == ["10", "11"]
+
+
+def test_curator_fetch_falls_back_when_commercial_name_missing() -> None:
+    rows = _make_sample_rows()
+    selects: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/v1/token"):
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.path.endswith("/is_admin"):
+            return httpx.Response(200, json=True)
+        if request.url.path.endswith("/rest/v1/entries"):
+            sel = request.url.params.get("select", "")
+            selects.append(sel)
+            if "commercial_name" in sel:
+                return httpx.Response(400, json={"code": "42703", "message": "column entries.commercial_name does not exist"})
+            return httpx.Response(200, json=rows)
+        return httpx.Response(404)
+
+    client = TrEnDBClient(
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="sb_publishable_testkey",
+        curator_email="curator@example.org",
+        curator_pass="pw",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    entries = client.fetch_entries()
+    assert len(entries) == 4
+    assert len(selects) == 2
+    assert "commercial_name" in selects[0]
+    assert "commercial_name" not in selects[1]

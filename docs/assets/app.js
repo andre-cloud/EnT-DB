@@ -3,9 +3,10 @@
   "use strict";
   var $ = Ent.$, el = Ent.el, api = Ent.api;
   var state = {
-    docs: [], view: "db", triage: "", loaded: false, failed: false,
+    docs: [], view: "db", triage: "", loaded: false, failed: false, failDetail: "",
     access: null, isAdmin: false, gated: false, curatorModal: false,
-    search: Ent.newSearch("received-desc")
+    search: Ent.newSearch("received-desc"),
+    slideSel: {}, slideOrder: []
   };
   var ACCESS_KEY = "entdb-access";   /* kept for the browser tab only */
   function readAccess() { try { return JSON.parse(sessionStorage.getItem(ACCESS_KEY) || "null"); } catch (e) { return null; } }
@@ -72,6 +73,54 @@
     render();
   });
 
+  function syncSlideBar() {
+    var bar = $("slide-bar");
+    if (!bar) return;
+    var n = state.slideOrder.length;
+    bar.hidden = state.view === "submit" || !n;
+    if (!n) return;
+    $("slide-count").textContent = n + (n === 1 ? " molecule for slide" : " molecules for slide");
+    var chips = $("slide-chips");
+    chips.replaceChildren();
+    state.slideOrder.forEach(function (key) {
+      var it = state.slideSel[key];
+      if (!it) return;
+      var label = Ent.slideDefaultLabel ? Ent.slideDefaultLabel(it.commercial_name || it.name) : (it.commercial_name || it.name);
+      var chip = el("button", "chip slide-chip", label + " ×");
+      chip.type = "button"; chip.title = "Remove from slide selection";
+      chip.addEventListener("click", function () { toggleSlideItem(it); });
+      chips.appendChild(chip);
+    });
+  }
+  function toggleSlideItem(item) {
+    var k = item.key;
+    if (state.slideSel[k]) {
+      delete state.slideSel[k];
+      state.slideOrder = state.slideOrder.filter(function (x) { return x !== k; });
+    } else {
+      state.slideSel[k] = item;
+      state.slideOrder.push(k);
+    }
+    syncSlideBar();
+    render();
+  }
+  $("slide-open").addEventListener("click", function () {
+    var items = state.slideOrder.map(function (k) { return state.slideSel[k]; }).filter(Boolean);
+    if (items.length && Ent.slideGraphic) {
+      Ent.slideGraphic.open(items, {
+        onRemove: function (it) {
+          delete state.slideSel[it.key];
+          state.slideOrder = state.slideOrder.filter(function (x) { return x !== it.key; });
+          syncSlideBar(); render();
+        }
+      });
+    }
+  });
+  $("slide-clear").addEventListener("click", function () {
+    state.slideSel = {}; state.slideOrder = [];
+    syncSlideBar(); render();
+  });
+
   function render() {
     $("n-db").textContent = state.docs.length;
     Ent.fillClasses(state.docs, state.search);
@@ -81,11 +130,14 @@
     $("db-view").hidden = sub;
     $("pub-toggle-aside").hidden = sub;
     $("form").hidden = !sub;
+    syncSlideBar();
     if (sub) { status.hidden = true; updateForm(); return; }
     if (!state.loaded) {
       updateSummaryAndPills([], {});
       status.hidden = false; list.replaceChildren();
-      status.textContent = state.failed ? "The database could not be loaded. Reload the page to try again." : "Loading the database…";
+      status.textContent = state.failed
+        ? ("The database could not be loaded" + (state.failDetail ? " (" + state.failDetail + "). " : ". ") + "Reload the page to try again.")
+        : "Loading the database…";
       return;
     }
     var multiSet = multiValueSet(state.docs);
@@ -98,7 +150,13 @@
     Ent.searchInfo(res, state.docs.length);
     /* one card per molecule, carrying every value that matches the search */
     Ent.drawList(list, Ent.groupByMolecule(res.rows), function (items) {
-      return Ent.moleculeCard(items, { scores: res.scores, simMode: state.search.ss.mode === "sim", onSuggest: openSuggest });
+      return Ent.moleculeCard(items, {
+        scores: res.scores,
+        simMode: state.search.ss.mode === "sim",
+        onSuggest: openSuggest,
+        isSlidePicked: function (key) { return !!state.slideSel[key]; },
+        onSlideToggle: toggleSlideItem
+      });
     }, state.search.pager, render);
     status.hidden = res.rows.length > 0;
     if (!res.rows.length) {
@@ -108,7 +166,7 @@
   }
 
   /* ---------- submission form ---------- */
-  var FIELDS = ["name", "cas", "cls", "smiles", "role", "et", "unit", "unc", "origin", "kind", "tech", "solvent", "temp",
+  var FIELDS = ["name", "commercial_name", "cas", "cls", "smiles", "role", "et", "unit", "unc", "origin", "kind", "tech", "solvent", "temp",
                 "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv_lmax", "uv_eps", "uv_cond", "direct_src", "direct_nm",
                 "usedoi", "usenote", "by", "website"];
   function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); return p; }
@@ -129,8 +187,8 @@
     if (known && (known.db.length || known.stereo.length)) {
       kn.hidden = false;
       kn.textContent = known.db.length
-        ? "Already in the database: " + known.db.map(function (m) { return m.entry.name + " (" + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol, " + m.why + ")"; }).join("; ") + ". A different value (another paper or method) is welcome: it will appear beside the existing ones on the molecule's card. To fix an existing value, use “Suggest a correction” on its card."
-        : "A different stereoisomer is in the database (" + known.stereo.map(function (e) { return e.name; }).join("; ") + "). Check the E/Z or R/S assignment.";
+        ? "Already in the database: " + known.db.map(function (m) { return Ent.displayName(m.entry) + " (" + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol, " + m.why + ")"; }).join("; ") + ". A different value (another paper or method) is welcome: it will appear beside the existing ones on the molecule's card. To fix an existing value, use “Suggest a correction” on its card."
+        : "A different stereoisomer is in the database (" + known.stereo.map(function (e) { return Ent.displayName(e); }).join("; ") + "). Check the E/Z or R/S assignment.";
     } else kn.hidden = true;
     var sc = EntScore.scoreEntry(f, ctx), g = EntScore.gradeOf(sc.total);
     $("fm-score").textContent = sc.total; $("fm-grade").textContent = g.label; $("fm-grade").className = "chip " + g.cls;
@@ -195,7 +253,7 @@
     return t !== now.trim();
   }
   function openSuggest(d) {
-    Ent.dialog("Suggest a correction · " + (d.name || ""), function (box) {
+    Ent.dialog("Suggest a correction · " + Ent.displayName(d), function (box) {
       box.classList.add("ed-box");
       var oldTitle = box.querySelector("h2");
       var head = el("div", "ed-head"), closeX = el("button", "btn small", "Close");
@@ -230,7 +288,7 @@
         if (type === "doi") inp.placeholder = "10.xxxx/…";
         var was = el("small", "was"); was.hidden = true;
         lab.appendChild(inp); lab.appendChild(was);
-        if (LONG[k] || k === "smiles" || k === "name") lab.classList.add("wide");
+        if (LONG[k] || k === "smiles" || k === "name" || k === "commercial_name") lab.classList.add("wide");
         var sync = function () {
           var ch = differs(type, now, inp.value);
           lab.classList.toggle("changed", ch);
@@ -351,9 +409,12 @@
       Ent.toast("Signed in as curator. You can open the admin page from the top bar.");
       return;
     }
-    state.loaded = false; state.failed = false; render();
+    state.loaded = false; state.failed = false; state.failDetail = ""; render();
     api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; render(); },
-      function () { state.failed = true; render(); });
+      function (err) {
+        if (window.console && console.error) console.error("listPublic failed:", err);
+        state.failed = true; state.failDetail = (err && err.message) || ""; render();
+      });
   }
   function tryAccess(a, fromForm) {
     return api.checkAccess(a).then(function (ok) {
