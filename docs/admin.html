@@ -49,6 +49,7 @@
       <option value="calc">Computed only</option>
     </select>
     <select id="f-sort" aria-label="Sort order">
+      <option value="review">Review order: score, duplicates together</option>
       <option value="added">Order added</option>
       <option value="et-asc">Triplet energy, low to high</option>
       <option value="et-desc">Triplet energy, high to low</option>
@@ -87,6 +88,20 @@
 
   <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
   <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
+
+    <aside class="key" id="key" aria-labelledby="key-title">
+      <details open>
+        <summary id="key-title">Card colours</summary>
+        <ul>
+          <li><span class="sw sugg"></span><span><b>Purple</b> · a reader’s correction to a published entry. Always first in the queue. Approve writes only the changed fields.</span></li>
+          <li><span class="sw dup"></span><span><b>Yellow</b> · possible duplicate: the same value is already in the database or in the queue. Duplicates are listed one after the other. Approve asks which entry to overwrite.</span></li>
+          <li><span class="sw known"></span><span><b>White, “New value for a known molecule”</b> · a different value for a molecule already in the database. Approve adds it to that molecule’s card.</span></li>
+          <li><span class="sw plain"></span><span><b>White</b> · new molecule.</span></li>
+        </ul>
+        <p class="hint">Queue order: corrections, then entries by score (highest first), with duplicates kept together.</p>
+        <p class="hint">Chips: <span class="chip exp">Good</span> score 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> below 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
+      </details>
+    </aside>
 
     <div class="actions" id="bulk">
       <button class="btn" id="bulk-approve" type="button" hidden></button>

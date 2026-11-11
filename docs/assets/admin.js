@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   var $ = Ent.$, api = Ent.api;
-  var state = { docs: [], sugg: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, search: Ent.newSearch() };
+  var state = { docs: [], sugg: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, search: Ent.newSearch("review") };
   var dupCache = {};   /* pending id -> duplicates result, recomputed on every load */
   function approvedDocs() { return state.docs.filter(function (d) { return d.status === "approved"; }); }
   function pendingDocs() { return state.docs.filter(function (d) { return d.status === "pending"; }); }
@@ -41,6 +41,7 @@
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
     Ent.fillClasses(inView, state.search);   /* only the classes present in this tab */
     var res = Ent.filterRows(inView, state.search);
+    if (state.view === "pending" && state.search.sort === "review") res.rows = clusterDuplicates(res.rows);
     Ent.searchInfo(res, inView.length);
     Ent.drawList(list, res.rows, function (d) {
       return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim", dup: dupOf(d),
@@ -58,6 +59,21 @@
       status.textContent = inView.length ? "No entry matches the current search and filters."
         : state.view === "pending" ? "The queue is empty." : state.view === "approved" ? "Nothing approved yet." : "Nothing rejected.";
     }
+  }
+
+  /* Review order: rows arrive sorted by score; entries that duplicate each other (the same value
+     in the queue) are pulled together at the position of the best-scored one, best first. */
+  function clusterDuplicates(rows) {
+    var inList = {}, parent = {};
+    rows.forEach(function (d) { inList[d.id] = 1; parent[d.id] = d.id; });
+    function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+    rows.forEach(function (d) {
+      var dup = dupOf(d); if (!dup) return;
+      dup.queueSame.forEach(function (m) { if (inList[m.entry.id]) { var a = find(d.id), b = find(m.entry.id); if (a !== b) parent[b] = a; } });
+    });
+    var groups = {}, order = [];
+    rows.forEach(function (d) { var r = find(d.id); if (!groups[r]) { groups[r] = []; order.push(r); } groups[r].push(d); });
+    return order.reduce(function (out, r) { return out.concat(groups[r]); }, []);
   }
 
   /* ---------- approving one entry: duplicates must be resolved first ---------- */

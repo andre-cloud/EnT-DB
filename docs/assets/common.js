@@ -99,7 +99,7 @@
   }
 
   /* ---------- search state and controls ---------- */
-  Ent.newSearch = function () { return { q: "", cas: "", origin: "", role: "", cls: "", etmin: NaN, etmax: NaN, sort: "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
+  Ent.newSearch = function (sort) { return { q: "", cas: "", origin: "", role: "", cls: "", etmin: NaN, etmax: NaN, sort: sort || "added", defSort: sort || "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
   Ent.filterRows = function (docs, st) {
     var q = st.q.trim().toLowerCase(), r = structureHits(docs, st.ss), hits = r.hits;
     var rows = docs.filter(function (d) {
@@ -115,6 +115,10 @@
     });
     if (st.sort === "et-asc") rows.sort(function (a, b) { return a.et_kcal - b.et_kcal; });
     else if (st.sort === "et-desc") rows.sort(function (a, b) { return b.et_kcal - a.et_kcal; });
+    else if (st.sort === "review") rows.sort(function (a, b) {
+      var d = (Number(b.score) || 0) - (Number(a.score) || 0);
+      return d || (String(a.created_at || "") < String(b.created_at || "") ? -1 : 1);
+    });
     else if (st.sort === "sim" && hits) rows.sort(function (a, b) { return (hits[b.id] || 0) - (hits[a.id] || 0); });
     else rows.sort(function (a, b) {
       var x = String(a.created_at || ""), y = String(b.created_at || "");
@@ -134,7 +138,7 @@
     $("f-etmin").addEventListener("input", function (e) { st.etmin = parseFloat(e.target.value); render(); });
     $("f-etmax").addEventListener("input", function (e) { st.etmax = parseFloat(e.target.value); render(); });
     $("f-reset").addEventListener("click", function () {
-      var fresh = Ent.newSearch();
+      var fresh = Ent.newSearch(st.defSort);
       ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "sort"].forEach(function (k) { st[k] = fresh[k]; });
       st.ss.smiles = ""; st.ss.mode = fresh.ss.mode; st.ss.thr = fresh.ss.thr;
       ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "ss-smiles"].forEach(function (id) { $(id).value = ""; });

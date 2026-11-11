@@ -172,3 +172,16 @@ sub{font-size:.72em;line-height:0}
 .sugg-grid .was{display:block;color:var(--muted, #777);font-weight:400;text-decoration:line-through;overflow-wrap:anywhere}
 .sugg-use{display:flex;gap:10px;flex-wrap:wrap}.sugg-use .field{flex:1 1 220px;min-width:0}
 @media (max-width:560px){.sugg-grid{grid-template-columns:1fr}}
+/* review page: colour key, beside the list on wide screens, above it otherwise */
+.key{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:.86rem}
+.key summary{font-weight:600;cursor:pointer}
+.key ul{list-style:none;margin:8px 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.key li{display:flex;gap:8px;align-items:flex-start}
+.key .sw{flex:0 0 18px;height:18px;border-radius:5px;border:1px solid var(--line);background:var(--surface);margin-top:2px}
+.key .sw.sugg{border:2px solid var(--sugg);background:var(--sugg-soft)}
+.key .sw.dup{border:2px solid var(--dup);background:var(--dup-soft)}
+.key .sw.known{background:linear-gradient(135deg,var(--surface) 50%,var(--line) 50%)}
+.key p{margin:6px 0 0}.key .chip{font-size:.72rem}
+@media (min-width:1240px){
+  .key{position:fixed;top:24px;left:calc(50% + 396px);width:260px;max-height:calc(100vh - 48px);overflow:auto}
+}
