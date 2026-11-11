@@ -1,4 +1,4 @@
-/* EnT-DB scoring and normalisation.
+/* TrEnDB scoring and normalisation.
  * One file, two homes: the browser loads it for the live preview, and the
  * same text is embedded in supabase/functions/submit/index.ts, where the
  * score that counts is computed. Edit here, then run tools/build-function.mjs. */
@@ -8,11 +8,47 @@
   var KCAL_PER_EV = 23.0605, KJ_PER_KCAL = 4.184;
 
   function str(v, max) { return String(v == null ? "" : v).trim().slice(0, max || 500); }
-  function num(v) { var n = parseFloat(v); return isFinite(n) ? n : NaN; }
+  /* A whole number only: "62abc" is not 62. A decimal comma is accepted ("2,69"). */
+  var NUM_RE = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
+  function num(v) {
+    if (typeof v === "number") return isFinite(v) ? v : NaN;
+    var t = String(v == null ? "" : v).trim();
+    if (t.indexOf(",") >= 0 && t.indexOf(".") < 0) t = t.replace(",", ".");
+    if (!NUM_RE.test(t)) return NaN;
+    var n = parseFloat(t); return isFinite(n) ? n : NaN;
+  }
+  var ET_MAX = 200;   /* kcal/mol; anything above is a typing or unit error, never stored */
+  function round1(x) { return Math.round(x * 10) / 10; }
   function pick(v, allowed, fallback) { return allowed.indexOf(v) >= 0 ? v : fallback; }
 
-  var DOI_RE = /^10\.\d{4,9}\/\S+$/;
-  function cleanDoi(v) { return str(v, 200).replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/^doi:\s*/i, ""); }
+  /* Sources are stored as DOIs only, never as links. A pasted link (doi.org, a publisher page,
+     a library proxy) is reduced to the DOI inside it; a link without a DOI is left as typed, so
+     the DOI check rejects it. */
+  var DOI_RE = /^10\.\d{4,9}\/[^\s"<>]+$/;
+  function cleanDoi(v) {
+    var t = str(v, 300).replace(/^doi:\s*/i, "").replace(/^https?:\/\/(dx\.)?doi\.org\//i, "");
+    if (/^https?:\/\//i.test(t) || /^www\./i.test(t)) {
+      var m = t.match(/10\.\d{4,9}\/[^\s?#"<>]+/);
+      if (m) { t = m[0]; try { t = decodeURIComponent(t); } catch (e) {} }
+    }
+    return t.replace(/[.,;)\]]+$/, "").slice(0, 200);
+  }
+  function isDoi(v) { return DOI_RE.test(String(v || "")); }
+
+  /* CAS registry numbers: 2–7 digits, 2 digits, check digit. "50000" style input without
+     hyphens is accepted and formatted. The check digit is verified. */
+  var CAS_RE = /^(\d{2,7})-(\d{2})-(\d)$/;
+  function cleanCas(v) {
+    var t = str(v, 30).replace(/\s+/g, "").replace(/[‐-―−]/g, "-");
+    if (/^\d{5,10}$/.test(t)) t = t.slice(0, -3) + "-" + t.slice(-3, -1) + "-" + t.slice(-1);
+    return t;
+  }
+  function casValid(v) {
+    var m = CAS_RE.exec(String(v || "")); if (!m) return false;
+    var digits = (m[1] + m[2]).split("").reverse(), sum = 0;
+    digits.forEach(function (d, i) { sum += (i + 1) * Number(d); });
+    return sum % 10 === Number(m[3]);
+  }
 
   /* Raw form payload -> clean, length-capped fields. */
   function normalize(p) {
@@ -22,7 +58,7 @@
     var et = num(p.et), unc = num(p.unc);
     var doi = cleanDoi(p.doi);
     return {
-      name: str(p.name, 200), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
+      name: str(p.name, 200), cas: cleanCas(p.cas), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
       role: pick(p.role, ["acceptor", "donor", "both"], "acceptor"),
       et: et, unit: unit, unc: unc,
       kcal: isNaN(et) ? NaN : et * k,
@@ -51,19 +87,20 @@
     if (ctx.structureOk == null) add("Structure parses", 0, 15, "Not checked: the structure library was unavailable");
     else add("Structure parses", ctx.structureOk ? 15 : 0, 15, ctx.structureOk ? "" : (f.smiles ? "The SMILES could not be read" : "No structure given"));
 
-    add("Name given", f.name ? 3 : 0, 3);
+    add("IUPAC name given", f.name ? 3 : 0, 3);
 
     var okEt = !isNaN(f.kcal) && f.kcal >= 20 && f.kcal <= 120;
     add("E_T in a plausible range", okEt ? 12 : 0, 12, isNaN(f.kcal) ? "No value given" : okEt ? "" : "Outside 20–120 kcal/mol: check the unit");
 
-    add("Value type stated", f.kind && f.kind !== "Other or not stated" ? 8 : 0, 8);
+    var stated = f.kind && f.kind !== "Other or not stated", computedKind = /^Computed/.test(f.kind);
+    if (stated && f.origin !== "calc" && computedKind) add("Value type stated", 5, 8, "A computed value type on a measured value");
+    else add("Value type stated", stated ? 8 : 0, 8);
 
     if (f.origin === "calc") {
       add("Method or functional", f.func ? 8 : 0, 8);
       add("Basis set", f.basis ? 7 : 0, 7);
       add("Solvent model", f.solv ? 5 : 0, 5);
-      var ck = /^Computed/.test(f.kind);
-      add("Value type matches a computation", ck ? 3 : 0, 3, ck ? "" : "Choose adiabatic or vertical");
+      add("Value type matches a computation", computedKind ? 3 : 0, 3, computedKind ? "" : "Choose adiabatic or vertical");
     } else {
       add("Technique", f.tech ? 10 : 0, 10);
       add("Solvent or matrix", f.solvent ? 5 : 0, 5);
@@ -71,7 +108,7 @@
       add("Uncertainty given", !isNaN(f.unc) ? 3 : 0, 3);
     }
 
-    var doiOk = /^10\.\d{4,9}\/\S+$/.test(f.doi);
+    var doiOk = isDoi(f.doi);
     add("DOI well formed", doiOk ? 6 : 0, 6, f.doi && !doiOk ? "This does not look like a DOI" : "");
     if (!doiOk) add("DOI resolves", 0, 6, f.doi ? "" : "No DOI given");
     else if (ctx.doiResolves == null) add("DOI resolves", 0, 6, "Checked when the entry is submitted");
@@ -83,16 +120,22 @@
     var words = f.quote ? f.quote.split(/\s+/).length : 0;
     add("Verbatim line", words > 0 && words <= 25 ? 4 : 0, 4, words > 25 ? "Keep it to one short line (25 words or fewer)" : "");
 
+    /* Measured and computed values of one molecule legitimately differ, so each is
+       compared only with entries of its own origin (entries without an origin count as both). */
     var cons = 0, note = "No structure to compare";
     if (ctx.same && !isNaN(f.kcal)) {
-      var dup = null, best = Infinity;
-      ctx.same.forEach(function (d) {
+      var dup = null, best = Infinity, mine = round1(f.kcal);
+      var peers = ctx.same.filter(function (d) { return !d.origin || d.origin === f.origin; });
+      peers.forEach(function (d) {
         var diff = Math.abs(Number(d.et_kcal) - f.kcal);
         if (diff < best) best = diff;
-        if (f.doi && String(d.doi || "").toLowerCase() === f.doi.toLowerCase() && diff < 0.05) dup = d;
+        /* stored values are rounded to 0.1, so compare rounded values */
+        if (f.doi && String(d.doi || "").toLowerCase() === f.doi.toLowerCase() && Math.abs(round1(Number(d.et_kcal)) - mine) < 0.05) dup = d;
       });
       if (dup) { cons = 0; note = "Looks like a duplicate of “" + dup.name + "” (same structure, DOI and value)"; }
-      else if (!ctx.same.length) { cons = 8; note = "No existing entry for this structure"; }
+      else if (!peers.length) {
+        cons = 8; note = ctx.same.length ? "No existing " + (f.origin === "calc" ? "computed" : "measured") + " value for this structure" : "No existing entry for this structure";
+      }
       else {
         cons = best <= 5 ? 8 : best <= 10 ? 5 : 2;
         note = best <= 5 ? "Within 5 kcal/mol of an existing entry for this structure"
@@ -113,8 +156,11 @@
     if (!f.smiles) return "Add the structure as a SMILES or draw it.";
     if (ctx.structureOk === false) return "The SMILES could not be read. Fix it or redraw the structure.";
     if (isNaN(f.kcal)) return "Enter the triplet energy value.";
+    if (!(f.kcal > 0 && f.kcal <= ET_MAX)) return "The triplet energy must be above 0 and at most " + ET_MAX + " kcal/mol. Check the value and the unit.";
     if (!f.cite && !f.doi) return "Add a citation or a DOI so the value can be traced.";
-    if (f.usedoi && !DOI_RE.test(f.usedoi)) return "The DOI of the paper where the molecule was used does not look like a DOI.";
+    if (f.doi && !isDoi(f.doi)) return "Give the source as a DOI (for example 10.1021/jacs.0c05069), not as a link.";
+    if (f.cas && !casValid(f.cas)) return "The CAS number is not valid: check the digits and the format (for example 100-42-5).";
+    if (f.usedoi && !isDoi(f.usedoi)) return "The DOI of the paper where the molecule was used does not look like a DOI.";
     if (f.usenote && !f.usedoi) return "Add the DOI of the paper the description refers to.";
     return null;
   }
@@ -124,19 +170,68 @@
     var unitLabel = f.unit === "kj" ? "kJ/mol" : f.unit === "ev" ? "eV" : "kcal/mol";
     var doc = {
       name: f.name || "(unnamed)", smiles: f.smiles, role: f.role, origin: f.origin,
-      et_kcal: Math.round(f.kcal * 10) / 10,
+      et_kcal: round1(f.kcal),
       et_reported: f.et + (isNaN(f.unc) ? "" : " ± " + f.unc) + " " + unitLabel,
       et_type: f.kind || "Not stated",
       method: f.origin === "calc" ? ["Computation", f.func, f.basis].filter(Boolean).join(", ") : (f.tech || "Not stated"),
       conditions: f.origin === "calc" ? f.solv : [f.solvent, f.temp].filter(Boolean).join(", "),
       source_kind: "form", score: sc.total, score_items: sc.items
     };
-    if (!isNaN(f.uncKcal)) doc.et_unc = Math.round(f.uncKcal * 10) / 10;
-    [["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
+    /* two decimals: 0.02 eV is 0.46 kcal/mol, and 0.1 kJ/mol must not round to 0 */
+    if (!isNaN(f.uncKcal)) doc.et_unc = Math.round(f.uncKcal * 100) / 100;
+    [["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv", f.uv], ["direct_exc", f.direct], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
     if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
     return doc;
   }
 
-  root.EntScore = { DOI_RE: DOI_RE, cleanDoi: cleanDoi, normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
+  /* ---------- corrections suggested by readers ----------
+     Fields a reader may propose a new value for, with how the value is checked. "uses_add"
+     adds a paper (DOI + note) in which the molecule was used. Shared with the server. */
+  var SUGGEST_FIELDS = [
+    ["name", "IUPAC name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
+    ["cls", "Class", "text"], ["role", "Role", "role"], ["origin", "Origin (experimental or computed)", "origin"],
+    ["et_kcal", "E_T (kcal/mol)", "et"], ["et_unc", "± Uncertainty (kcal/mol)", "unc"],
+    ["et_reported", "Value as reported in the paper", "text"], ["et_type", "Value type", "text"],
+    ["method", "Method", "text"], ["conditions", "Conditions", "text"], ["citation", "Citation", "text"],
+    ["doi", "DOI", "doi"], ["location", "Where in the paper", "text"], ["quote", "Verbatim line", "text"],
+    ["uv", "UV-vis", "text"], ["direct_exc", "Direct excitation", "text"],
+    ["uses_add", "Add a paper where it was used in photocatalysis", "use"]
+  ];
+  var ROLES = ["acceptor", "donor", "both"], ORIGINS = ["exp", "calc"];
+  /* changes: {field: value} -> {clean: {...}, error: string|null}. Structure parsing is checked separately. */
+  function checkSuggestion(changes) {
+    var clean = {}, keys = Object.keys(changes || {}), known = {};
+    SUGGEST_FIELDS.forEach(function (f) { known[f[0]] = f; });
+    if (!keys.length) return { clean: clean, error: "Choose at least one field to correct." };
+    if (keys.length > SUGGEST_FIELDS.length) return { clean: clean, error: "Too many changes in one suggestion." };
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i], f = known[k], v = changes[k];
+      if (!f) return { clean: clean, error: "“" + k + "” cannot be corrected this way." };
+      var type = f[2], label = f[1];
+      if (type === "use") {
+        var doi = cleanDoi(v && v.doi), note = str(v && v.note, 300);
+        if (!isDoi(doi)) return { clean: clean, error: "Give the paper where it was used as a DOI." };
+        clean[k] = { doi: doi, note: note }; continue;
+      }
+      var t = str(v, type === "text" ? 500 : 400);
+      if (type === "et" || type === "unc") {
+        var n = num(t);
+        if (type === "et" && !(n > 0 && n <= ET_MAX)) return { clean: clean, error: label + " must be a number above 0 and at most " + ET_MAX + "." };
+        if (type === "unc" && t !== "" && !(n >= 0)) return { clean: clean, error: label + " must be a positive number." };
+        clean[k] = t === "" ? null : n; continue;
+      }
+      if (type === "doi") { t = cleanDoi(t); if (!isDoi(t)) return { clean: clean, error: "Give the source as a DOI, not as a link." }; }
+      if (type === "cas") { t = cleanCas(t); if (t && !casValid(t)) return { clean: clean, error: "The CAS number is not valid." }; }
+      if (type === "role" && ROLES.indexOf(t) < 0) return { clean: clean, error: "Choose acceptor, donor or both." };
+      if (type === "origin" && ORIGINS.indexOf(t) < 0) return { clean: clean, error: "Choose experimental or computed." };
+      if ((type === "smiles" || k === "name") && !t) return { clean: clean, error: label + " cannot be empty." };
+      clean[k] = t === "" ? null : t;
+    }
+    return { clean: clean, error: null };
+  }
+
+  root.EntScore = { DOI_RE: DOI_RE, ET_MAX: ET_MAX, num: num, cleanDoi: cleanDoi, isDoi: isDoi, cleanCas: cleanCas, casValid: casValid,
+    SUGGEST_FIELDS: SUGGEST_FIELDS, checkSuggestion: checkSuggestion,
+    normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
 })(typeof globalThis !== "undefined" ? globalThis : this);

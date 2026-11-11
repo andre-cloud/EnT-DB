@@ -1,19 +1,40 @@
-# EnT-DB
+# TrEnDB
 
 A curated database of triplet energies for energy-transfer (EnT) donors and acceptors.
 Every entry records the value, how it was determined (experiment or computation, and which),
 the paper it comes from and where in that paper, and the structure.
 
-Site: https://nuniwo-source.github.io/EnT-DB/
+Site: https://nuniwo-source.github.io/TrEnDB/
 
 ## How it works
 
-- **Browse and search.** Text search, plus exact-structure, substructure and similarity search
-  (structures are handled in the browser by [OpenChemLib](https://github.com/cheminfo/openchemlib-js)).
+- **Browse and search.** Text and CAS-number search, filters (role, class, origin, triplet-energy range), and
+  exact-structure, substructure and similarity search (structures are handled in the browser by
+  [OpenChemLib](https://github.com/cheminfo/openchemlib-js)).
 - **Submit.** Anyone can propose an entry. The form scores it from 0 to 100 for completeness and
   consistency; the server recomputes the score, so the browser cannot fake it.
 - **Review.** A submission is stored as *pending* and the curator is notified. It becomes public
   only when a curator approves it on the review page (`admin.html`).
+- **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
+  structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
+- **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both
+  computed, and from the same paper within 1 kcal/mol, or any paper within 0.1 kcal/mol) is marked in yellow; approving
+  it asks which existing entry to overwrite (the old one moves to *Rejected*). A *different* value for a known molecule
+  is not a duplicate: it is approved normally and appears on the same card. Bulk approval skips yellow entries.
+- **IUPAC names only.** Entries are named by their IUPAC name, never by a label from the paper. The literature batches carry
+  checked IUPAC names; on the review page, *Use IUPAC names* renames existing entries to match, and other entries can be checked
+  against PubChem. The editor and the submission form have an *IUPAC name from PubChem* button.
+- **Curator-only notes.** The verification level and note are visible on the review page only; the public view does not include them.
+- **Selection.** On the review page, entries can be selected and approved, rejected or moved back to the queue together;
+  rejected entries can be deleted permanently (after a confirmation).
+- **Corrections.** Readers can suggest corrections to any value in the database, changing any number of fields at
+  once in one form. It reaches the queue as a purple card showing old and new values; approving it writes only the changed fields into the entry.
+- **CAS numbers from PubChem.** A CAS number cannot be derived from a structure, so curators look it up on PubChem
+  from the review page: per entry with *Look up on PubChem* in the editor, or for every entry missing one with the
+  banner at the top. PubChem's CAS numbers come from depositors: some structures list several (the editor shows the
+  others), and new compounds often have none. Since cards and duplicates are keyed on the CAS number first, check doubtful ones.
+- **DOIs only.** Sources are stored and linked as DOIs, never as links (pasted links are reduced to the DOI
+  inside them, and the database refuses link columns). `tools/check-links.mjs` checks the published data.
 
 The score measures whether an entry is complete and consistent (structure parses, plausible value,
 method fully specified, DOI resolves, agreement with existing entries). It does not prove the value is right.
@@ -53,11 +74,13 @@ Repository **Settings → Pages → Build and deployment**: source *Deploy from 
 4. **Authentication → Users → Add user → Create new user**: create one account per curator, with the same
    email as in step 3, a password, and *Auto Confirm User* ticked. Curators sign in on `admin.html` with these.
    (Email sign-in links are not used: Supabase's built-in mailer only delivers to members of the project's team.)
+   Then **Authentication → Sign In / Providers**: switch off *Allow new users to sign up*. Curator rights
+   go only to accounts with a *confirmed* email listed in `admins`, but nobody else needs an account at all.
 5. **Edge Functions → Deploy a new function → Via editor**: name it `submit` and paste the whole of
    `supabase/functions/submit/index.ts`. Switch **Verify JWT off** for this function: visitors are anonymous.
    Access is controlled inside the function (shared site login, rate limit).
-6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/EnT-DB` and `IP_SALT` = any random text,
-   plus the notification secret from step 4 below.
+6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/TrEnDB` and `IP_SALT` = any long random text
+   (required: without it the function refuses submissions), plus the notification secret from step 4 below.
 7. **Project Settings → API**: copy the *Project URL* and the *anon / publishable* key into `docs/assets/config.js`
    and commit. These two values are meant to be public. Never commit the *service role* key.
 
@@ -78,7 +101,7 @@ the check runs in the database, so it cannot be skipped from the browser. To ope
 `delete from public.site_access;`
 
 The login is a single shared secret with no lockout after wrong attempts, so pick a long password
-and treat it as a temporary measure. The review page does not use it: curators sign in by email link.
+and treat it as a temporary measure. The review page does not use it: curators sign in with their own email and password.
 
 ### 4. Notifications
 
@@ -111,10 +134,14 @@ offered for import as *pending*; each carries an `import_key`, so importing twic
 ```
 node tools/test-score.mjs          # scoring rules
 node tools/build-function.mjs      # regenerate the server function after editing score.js or the template
+node tools/check-links.mjs         # published data carries DOIs only
 ```
 
 ## Limits worth knowing
 
-- The submission endpoint has a honeypot field and a limit of 5 submissions per hour per connection, no captcha.
+- The submission endpoint has a honeypot field, a limit of 5 submissions per hour per connection and of 30 per hour
+  from all visitors together, and no captcha. The per-connection limit relies on the address the proxy reports,
+  so a determined sender can get around it; the overall limit still caps the queue and the notifications.
+- Submissions are refused while the server cannot load the structure library, so every stored entry has been checked.
 - Curator accounts are created by hand in the Supabase dashboard; there is no self-service password reset.
 - Values are transcribed from the cited papers. Check the source before relying on one.

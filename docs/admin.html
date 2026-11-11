@@ -3,24 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EnT-DB · Review</title>
-<meta name="description" content="Curator review queue for EnT-DB.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov; object-src 'none'; base-uri 'self'; form-action 'self'">
+<title>TrEnDB · Review</title>
+<meta name="description" content="Curator review queue for TrEnDB.">
 <meta name="robots" content="noindex">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fredoka:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta name="theme-color" content="#12301F">
 </head>
 <body>
 <div class="wrap">
   <header class="topbar">
-    <h1>EnT-DB review</h1>
+    <h1 class="brand"><img src="assets/logo.svg" alt="" width="40" height="40"><span>Tr<span class="en">En</span>DB <span class="sub">review</span></span></h1>
     <span><a href="./">Public site</a> · <a href="#" id="signout" hidden>Sign out</a></span>
   </header>
 
-  <p class="banner" id="adm-msg" hidden></p>
+  <p class="banner" id="adm-msg" role="status" hidden></p>
   <div class="banner" id="imp" hidden>
     <span id="imp-text"></span>
     <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
+  </div>
+  <div class="banner" id="iupac" hidden>
+    <span id="iupac-text" aria-live="polite"></span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn primary" id="iupac-go" type="button">Use IUPAC names</button>
+      <button class="btn" id="iupac-pc" type="button" hidden>Look up the others on PubChem</button>
+      <button class="btn" id="iupac-stop" type="button" hidden>Stop</button>
+    </div>
+  </div>
+  <div class="banner" id="cas" hidden>
+    <span id="cas-text" aria-live="polite"></span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn" id="cas-go" type="button">Fill missing CAS numbers from PubChem</button>
+      <button class="btn" id="cas-stop" type="button" hidden>Stop</button>
+    </div>
   </div>
 
   <form class="login" id="login" hidden novalidate>
@@ -29,7 +48,7 @@
     <label class="field">Email<input id="login-email" type="email" autocomplete="username" required></label>
     <label class="field">Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
     <div class="actions"><button class="btn primary" id="login-send" type="submit">Sign in</button></div>
-    <p class="err" id="login-err" hidden></p>
+    <p class="err" id="login-err" role="alert" hidden></p>
   </form>
 
   <div id="panel" hidden>
@@ -48,20 +67,23 @@
       <option value="calc">Computed only</option>
     </select>
     <select id="f-sort" aria-label="Sort order">
+      <option value="review">Review order: score, duplicates together</option>
       <option value="added">Order added</option>
-      <option value="et-asc">E_T ascending</option>
-      <option value="et-desc">E_T descending</option>
+      <option value="et-asc">Triplet energy, low to high</option>
+      <option value="et-desc">Triplet energy, high to low</option>
       <option value="sim">Similarity to query</option>
     </select>
   </div>
   <div class="tools" id="tools-filter">
+    <input id="f-cas" class="mono cas" type="search" placeholder="CAS number" aria-label="Search by CAS number" spellcheck="false" autocomplete="off">
     <select id="f-role" aria-label="Role">
       <option value="">Donors and acceptors</option>
-      <option value="acceptor">Acceptors only</option>
-      <option value="donor">Donors only</option>
+      <option value="acceptor">Acceptors (with dual-role)</option>
+      <option value="donor">Donors (with dual-role)</option>
+      <option value="both">Dual-role only</option>
     </select>
     <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
-    <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+    <label class="inline"><span>E<sub>T</sub> from</span> <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
     <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
     <button class="btn small" id="f-reset" type="button">Reset filters</button>
   </div>
@@ -79,18 +101,37 @@
       <button class="btn small" id="ss-draw" type="button">Draw query</button>
       <button class="btn small" id="ss-clear" type="button">Clear</button>
     </div>
-    <p class="hint" id="ss-info">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+    <p class="hint" id="ss-info" aria-live="polite">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
   </section>
 
   <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
   <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
 
-    <div class="actions" id="bulk">
-      <button class="btn" id="bulk-approve" type="button" hidden></button>
-      <button class="btn primary" id="bulk-confirm" type="button" hidden></button>
-      <button class="btn" id="bulk-cancel" type="button" hidden>Cancel</button>
+    <aside class="key" id="key" aria-labelledby="key-title">
+      <details open>
+        <summary id="key-title">Card colours</summary>
+        <ul>
+          <li><span class="sw sugg"></span><span><b>Purple</b> · a reader’s correction to a published entry. Always first in the queue. Approve writes only the changed fields.</span></li>
+          <li><span class="sw dup"></span><span><b>Yellow</b> · possible duplicate: the same value is already in the database or in the queue. Duplicates are listed one after the other. Approve asks which entry to overwrite.</span></li>
+          <li><span class="sw known"></span><span><b>White, “New value for a known molecule”</b> · a different value for a molecule already in the database. Approve adds it to that molecule’s card.</span></li>
+          <li><span class="sw plain"></span><span><b>White</b> · new molecule.</span></li>
+        </ul>
+        <p class="hint">Queue order: corrections, then entries by score (highest first), with duplicates kept together.</p>
+        <p class="hint">Chips: <span class="chip exp">Good</span> score 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> below 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
+      </details>
+    </aside>
+
+    <div class="selbar" id="selbar" role="toolbar" aria-label="Selected entries">
+      <span id="sel-n" aria-live="polite">0 selected</span>
+      <button class="btn small" id="sel-all" type="button">Select all listed</button>
+      <button class="btn small" id="sel-none" type="button" hidden>Clear selection</button>
+      <span class="grow"></span>
+      <button class="btn small primary" id="sel-approve" type="button" hidden>Approve selected</button>
+      <button class="btn small reject" id="sel-reject" type="button" hidden>Reject selected</button>
+      <button class="btn small" id="sel-queue" type="button" hidden>Back to queue</button>
+      <button class="btn small danger" id="sel-delete" type="button" hidden>Delete selected permanently</button>
     </div>
-    <p class="err" id="bulk-err" hidden></p>
+    <p class="err" id="bulk-err" role="alert" hidden></p>
     <div id="status" class="status">Loading…</div>
     <main id="list" class="list"></main>
   </div>
