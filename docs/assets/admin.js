@@ -1,4 +1,4 @@
-/* EnT-DB review page: curator sign-in with email and password, then review, edit, approve or reject. */
+/* TrEnDB review page: curator sign-in with email and password, then review, edit, approve or reject. */
 (function () {
   "use strict";
   var $ = Ent.$, api = Ent.api;

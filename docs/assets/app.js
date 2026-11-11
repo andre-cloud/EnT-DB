@@ -1,4 +1,4 @@
-/* EnT-DB public page: browse approved entries, search, submit. */
+/* TrEnDB public page: browse approved entries, search, submit. */
 (function () {
   "use strict";
   var $ = Ent.$, el = Ent.el, api = Ent.api;
@@ -197,7 +197,7 @@
     $("gate-title").textContent = title; $("gate-text").textContent = text; $("gate-fields").hidden = !withForm;
     $("gate-err").hidden = !err; $("gate-err").textContent = err || "";
   }
-  function loginGate(err) { gate("Sign in", "EnT-DB is in private preview. Enter the user name and password you were given.", true, err); }
+  function loginGate(err) { gate("Sign in", "TrEnDB is in private preview. Enter the user name and password you were given.", true, err); }
   function lock(msg) { saveAccess(null); state.access = null; state.docs = []; state.loaded = false; $("gate-pass").value = ""; loginGate(msg || ""); }
   function openApp(a, gated) {
     state.access = a; $("gate").hidden = true; $("app-body").hidden = false; $("lock").hidden = !gated;
@@ -220,6 +220,6 @@
   });
   $("lock").addEventListener("click", function (e) { e.preventDefault(); lock(""); });
 
-  if (!api.configured) gate("Private preview", "EnT-DB is not open yet.", false, "");
+  if (!api.configured) gate("Private preview", "TrEnDB is not open yet.", false, "");
   else tryAccess(readAccess() || { user: "", pass: "" }, false);
 })();

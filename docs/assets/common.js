@@ -1,4 +1,4 @@
-/* EnT-DB shared front-end: structure handling (OpenChemLib), search, cards, sketcher, API. */
+/* TrEnDB shared front-end: structure handling (OpenChemLib), search, cards, sketcher, API. */
 (function () {
   "use strict";
   var Ent = window.Ent = {};

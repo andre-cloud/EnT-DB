@@ -1,4 +1,4 @@
--- EnT-DB database schema. Run once in the Supabase SQL editor.
+-- TrEnDB database schema. Run once in the Supabase SQL editor.
 -- Safe to re-run: every statement is idempotent.
 
 create extension if not exists pgcrypto with schema extensions;

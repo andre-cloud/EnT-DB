@@ -1,4 +1,4 @@
-/* EnT-DB scoring and normalisation.
+/* TrEnDB scoring and normalisation.
  * One file, two homes: the browser loads it for the live preview, and the
  * same text is embedded in supabase/functions/submit/index.ts, where the
  * score that counts is computed. Edit here, then run tools/build-function.mjs. */

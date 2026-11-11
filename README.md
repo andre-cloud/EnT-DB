@@ -1,10 +1,10 @@
-# EnT-DB
+# TrEnDB
 
 A curated database of triplet energies for energy-transfer (EnT) donors and acceptors.
 Every entry records the value, how it was determined (experiment or computation, and which),
 the paper it comes from and where in that paper, and the structure.
 
-Site: https://nuniwo-source.github.io/EnT-DB/
+Site: https://nuniwo-source.github.io/TrEnDB/
 
 ## How it works
 
@@ -69,7 +69,7 @@ Repository **Settings → Pages → Build and deployment**: source *Deploy from 
 5. **Edge Functions → Deploy a new function → Via editor**: name it `submit` and paste the whole of
    `supabase/functions/submit/index.ts`. Switch **Verify JWT off** for this function: visitors are anonymous.
    Access is controlled inside the function (shared site login, rate limit).
-6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/EnT-DB` and `IP_SALT` = any long random text
+6. **Edge Functions → Secrets**: add `SITE_URL` = `https://nuniwo-source.github.io/TrEnDB` and `IP_SALT` = any long random text
    (required: without it the function refuses submissions), plus the notification secret from step 4 below.
 7. **Project Settings → API**: copy the *Project URL* and the *anon / publishable* key into `docs/assets/config.js`
    and commit. These two values are meant to be public. Never commit the *service role* key.
