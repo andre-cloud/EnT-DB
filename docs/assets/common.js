@@ -155,6 +155,10 @@
     });
     if (st.sort === "et-asc") rows.sort(function (a, b) { return a.et_kcal - b.et_kcal; });
     else if (st.sort === "et-desc") rows.sort(function (a, b) { return b.et_kcal - a.et_kcal; });
+    else if (st.sort === "received-desc") rows.sort(function (a, b) {
+      var ta = Date.parse(a.created_at || "") || 0, tb = Date.parse(b.created_at || "") || 0;
+      return tb - ta || (String(b.id) < String(a.id) ? -1 : String(b.id) > String(a.id) ? 1 : 0);
+    });
     else if (st.sort === "review") rows.sort(function (a, b) {
       var d = (Number(b.score) || 0) - (Number(a.score) || 0);
       return d || (String(a.created_at || "") < String(b.created_at || "") ? -1 : 1);
@@ -225,6 +229,84 @@
     info.textContent = res.err ? res.err
       : res.rows.length < total ? res.rows.length + " of " + total + " entries match the search and filters."
       : "Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.";
+    var badge = $("ss-active-badge");
+    if (badge) badge.hidden = !res.searching;
+  };
+
+  Ent.copyText = function (text, btn) {
+    var val = String(text || "");
+    if (!val) return;
+    function flash() {
+      if (!btn) return;
+      var orig = btn.getAttribute("data-orig") || btn.textContent;
+      btn.setAttribute("data-orig", orig);
+      btn.textContent = "Copied";
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(function () { btn.textContent = orig; }, 1400);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(val).then(flash, function () { fallbackCopy(val, flash); });
+    } else fallbackCopy(val, flash);
+  };
+  function fallbackCopy(val, done) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = val; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.left = "-9999px";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch (e) {}
+  }
+  function copyBtn(getVal, label) {
+    var b = el("button", "btn tiny", "Copy"); b.type = "button";
+    b.setAttribute("aria-label", label || "Copy value");
+    b.addEventListener("click", function (e) { e.stopPropagation(); Ent.copyText(typeof getVal === "function" ? getVal() : getVal, b); });
+    return b;
+  }
+  function syncModalOpen() {
+    var ed = $("ed"), sk = $("sk");
+    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden));
+    document.body.classList.toggle("modal-open", open);
+  }
+
+  var THEME_KEY = "entdb-theme", THEMES = ["auto", "light", "dark"];
+  function applyTheme(t, btn) {
+    if (THEMES.indexOf(t) < 0) t = "auto";
+    if (t === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", t);
+    if (btn) btn.textContent = "Theme: " + t.charAt(0).toUpperCase() + t.slice(1);
+    try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  }
+  Ent.initTheme = function (btnId) {
+    var btn = $(btnId);
+    var saved = "auto";
+    try { saved = localStorage.getItem(THEME_KEY) || "auto"; } catch (e) {}
+    applyTheme(saved, btn);
+    if (btn) btn.addEventListener("click", function () {
+      var cur = document.documentElement.getAttribute("data-theme") || "auto";
+      applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length], btn);
+    });
+  };
+
+  Ent.toast = function (msg, opts) {
+    opts = opts || {};
+    var host = $("toast-host"); if (!host) return;
+    while (host.children.length >= 3) host.firstElementChild.remove();
+    var node = el("div", "toast");
+    node.appendChild(el("span", "grow", msg));
+    var timer = null;
+    function close() { clearTimeout(timer); node.remove(); }
+    if (opts.actionLabel && opts.onAction) {
+      var act = el("button", "btn tiny", opts.actionLabel); act.type = "button";
+      act.addEventListener("click", function () { act.disabled = true; Promise.resolve(opts.onAction()).finally(close); });
+      node.appendChild(act);
+    }
+    var x = el("button", "toast-x", "×"); x.type = "button"; x.setAttribute("aria-label", "Dismiss");
+    x.addEventListener("click", close);
+    node.appendChild(x);
+    host.appendChild(node);
+    timer = setTimeout(close, opts.timeoutMs || 7000);
   };
 
   /* ---------- cards ---------- */
@@ -263,25 +345,99 @@
     s.setAttribute("aria-label", "Triplet energy " + list.map(function (d) { return d.et_kcal; }).join(", ") + " kcal/mol on a 40 to 80 scale");
     return s;
   }
-  /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.onSuggest(d) on the public page,
-     o.admin = {busy, drafts, onPatch(id, patch) -> Promise<bool>, approve(d, note)} */
+  function scoreDetails(d) {
+    var g = EntScore.gradeOf(d.score);
+    if (!Array.isArray(d.score_items) || !d.score_items.length) {
+      return el("span", "chip " + g.cls, "Score " + d.score + " · " + g.label);
+    }
+    var det = el("details", "score-details");
+    var sum = el("summary", "chip " + g.cls, "Score " + d.score + " · " + g.label + " ▾");
+    sum.title = "Show scoring breakdown";
+    det.appendChild(sum);
+    var pop = el("div", "score-pop"), ul = el("ul");
+    d.score_items.forEach(function (item) {
+      var cls = item.edited ? "" : item.got >= item.max ? "full" : item.got === 0 ? "zero" : "";
+      var li = el("li", cls);
+      li.appendChild(el("span", "pts", item.edited ? "Edit" : (item.got + "/" + item.max)));
+      var txt = elT("span", null, item.label);
+      if (item.note) txt.appendChild(elT("small", null, item.note));
+      li.appendChild(txt);
+      ul.appendChild(li);
+    });
+    pop.appendChild(ul); det.appendChild(pop);
+    return det;
+  }
+
+  function inlineCasLookup(d, adm, busy) {
+    var wrap = el("div", "cas-inline");
+    wrap.appendChild(el("span", "hint", "No CAS"));
+    var btn = el("button", "btn tiny", "Lookup CAS"); btn.type = "button"; btn.disabled = busy;
+    var status = el("span", "hint"); status.setAttribute("aria-live", "polite");
+    var picks = el("span", "chip-group");
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      btn.disabled = true; status.textContent = "Asking PubChem…"; picks.replaceChildren();
+      Ent.lookupCas(d.smiles).then(function (list) {
+        btn.disabled = false;
+        if (!list.length) { status.textContent = "Not on PubChem"; return; }
+        status.textContent = "Found:";
+        list.slice(0, 3).forEach(function (cas, idx) {
+          var apply = el("button", "btn tiny" + (idx === 0 ? " primary" : ""), "Use " + cas);
+          apply.type = "button";
+          apply.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            apply.disabled = true; status.textContent = "Saving…";
+            adm.onPatch(d.id, { cas: cas });
+          });
+          picks.appendChild(apply);
+        });
+      }, function () { btn.disabled = false; status.textContent = "PubChem unavailable"; });
+    });
+    wrap.appendChild(btn); wrap.appendChild(status); wrap.appendChild(picks);
+    return wrap;
+  }
+
+  /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.clusterTag, o.onSuggest(d),
+     o.admin = {busy, drafts, activeId, onFocusCard, onPatch(id, patch) -> Promise<bool>, approve(d, note), selected, onSelect, onDelete} */
   Ent.card = function (d, o) {
     o = o || {}; var adm = o.admin || null, dup = o.dup || null;
-    var c = el("article", "card" + (dup && dup.flag ? " dup" : "")), head = el("div", "head");
-    if (adm && adm.selected) {
-      var pick = el("label", "selpick"), selBox = el("input"), card = c; selBox.type = "checkbox"; selBox.checked = !!adm.selected[d.id];
-      if (selBox.checked) card.classList.add("picked");
-      selBox.addEventListener("change", function () { adm.onSelect(d.id, selBox.checked); card.classList.toggle("picked", selBox.checked); });
-      pick.appendChild(selBox); pick.appendChild(document.createTextNode("Select")); head.appendChild(pick);
+    var cls = "card" + (dup && dup.flag ? " dup" : "") + (adm && adm.activeId === d.id ? " kb-focus" : "");
+    var c = el("article", cls), head = el("div", "head");
+    c.setAttribute("data-id", d.id);
+    if (adm && adm.onFocusCard) {
+      c.addEventListener("click", function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest("a,button,input,textarea,select,summary,label")) return;
+        adm.onFocusCard(d.id);
+      });
     }
+    if (adm && (adm.selected || d.created_at || d.submitted_by)) {
+      var top = el("div", "card-top");
+      if (adm.selected) {
+        var pick = el("label", "selpick"), selBox = el("input"), card = c; selBox.type = "checkbox"; selBox.checked = !!adm.selected[d.id];
+        if (selBox.checked) card.classList.add("picked");
+        selBox.addEventListener("change", function () { adm.onSelect(d.id, selBox.checked); card.classList.toggle("picked", selBox.checked); });
+        pick.appendChild(selBox); pick.appendChild(document.createTextNode("Select")); top.appendChild(pick);
+      }
+      var metaParts = [];
+      if (d.source_kind === "form") metaParts.push("Form submission"); else if (d.source_kind) metaParts.push(d.source_kind);
+      if (d.submitted_by) metaParts.push(d.submitted_by);
+      if (d.created_at) metaParts.push(new Date(d.created_at).toLocaleDateString());
+      if (metaParts.length) {
+        var mt = el("span", "card-meta-top", metaParts.join(" · "));
+        if (d.created_at) mt.title = new Date(d.created_at).toLocaleString();
+        top.appendChild(mt);
+      }
+      head.appendChild(top);
+    }
+    if (o.clusterTag) head.appendChild(el("span", "cluster-tag", o.clusterTag));
     head.appendChild(el("h2", null, d.name || "(unnamed)"));
+
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
     if (d.cls) chips.appendChild(el("span", "chip plain", d.cls));
     if (o.simMode && o.scores && o.scores[d.id] != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(o.scores[d.id], 2)));
-    if (d.score != null) { var g = EntScore.gradeOf(d.score); chips.appendChild(el("span", "chip " + g.cls, "Score " + d.score + " · " + g.label)); }
-    if (adm && d.source_kind === "form") chips.appendChild(el("span", "chip plain", "Form submission"));
+    if (d.score != null) chips.appendChild(scoreDetails(d));
     if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
     if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
     if (adm && !d.smiles_checked) chips.appendChild(el("span", "chip warn", "Structure unchecked"));
@@ -290,22 +446,40 @@
     head.appendChild(chips); c.appendChild(head);
     if (dup && (dup.db.length || dup.queue.length || dup.stereo.length)) c.appendChild(dupNote(dup));
 
+    var etVal = Number(d.et_kcal);
     var et = el("div", "et");
-    et.appendChild(el("span", "v", fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : "")));
+    et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
     et.appendChild(el("span", "u", "kcal/mol"));
     et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
+    if (isFinite(etVal) && (etVal < S_MIN || etVal > S_MAX)) {
+      et.appendChild(el("span", "chip warn", etVal < S_MIN ? "Off scale (<40)" : "Off scale (>80)"));
+    }
     c.appendChild(et); c.appendChild(scale(d));
 
     var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(d.smiles);
     if (info) paper.innerHTML = info.svg; else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
     st.appendChild(paper);
-    var si = el("div", "sinfo");
-    if (d.cas) si.appendChild(el("span", "formula", "CAS " + d.cas));
-    si.appendChild(el("code", "smiles", d.smiles || "—"));
+    var si = el("div", "sinfo"), busy = adm && !!adm.busy[d.id];
+    if (d.cas) {
+      var casRow = el("div", "copy-row");
+      casRow.appendChild(el("span", "formula", "CAS " + d.cas));
+      casRow.appendChild(copyBtn(d.cas, "Copy CAS number"));
+      si.appendChild(casRow);
+    } else if (adm && d.smiles) {
+      si.appendChild(inlineCasLookup(d, adm, busy));
+    }
+    if (d.smiles) {
+      var smiRow = el("div", "copy-row");
+      smiRow.appendChild(el("code", "smiles", d.smiles));
+      smiRow.appendChild(copyBtn(d.smiles, "Copy SMILES"));
+      si.appendChild(smiRow);
+    } else {
+      si.appendChild(el("code", "smiles", "—"));
+    }
     if (info && info.formula) si.appendChild(el("span", "formula", info.formula));
     if (d.structure_note) si.appendChild(el("span", "hint", d.structure_note));
-    var busy = adm && !!adm.busy[d.id];
     if (adm) {
+      var saRow = el("div", "sinfo-actions");
       var ob = el("button", "btn small", "Open in sketcher"); ob.type = "button"; ob.disabled = busy;
       ob.addEventListener("click", function () {
         Ent.sketcher.open({
@@ -314,10 +488,17 @@
           onSave: function (s) { return adm.onPatch(d.id, { smiles: s, idcode: Ent.idCode(s), smiles_checked: true }); }
         });
       });
-      si.appendChild(ob);
-      var lab = el("label", "check"), cb = el("input"); cb.type = "checkbox"; cb.id = "chk-" + d.id; cb.checked = !!d.smiles_checked; cb.disabled = busy;
-      cb.addEventListener("change", function () { adm.onPatch(d.id, { smiles_checked: cb.checked }); });
-      lab.appendChild(cb); lab.appendChild(document.createTextNode("Structure verified")); si.appendChild(lab);
+      saRow.appendChild(ob);
+      var lab = el("label", "check"), cb = el("input"), chkMsg = el("span", "hint");
+      cb.type = "checkbox"; cb.id = "chk-" + d.id; cb.checked = !!d.smiles_checked; cb.disabled = busy;
+      chkMsg.setAttribute("aria-live", "polite");
+      cb.addEventListener("change", function () {
+        chkMsg.textContent = "Saving…";
+        adm.onPatch(d.id, { smiles_checked: cb.checked }).then(function (ok) { if (!ok) chkMsg.textContent = ""; });
+      });
+      lab.appendChild(cb); lab.appendChild(document.createTextNode("Structure verified"));
+      saRow.appendChild(lab); saRow.appendChild(chkMsg);
+      si.appendChild(saRow);
     }
     st.appendChild(si); c.appendChild(st);
 
@@ -328,23 +509,23 @@
     row(dl, "Conditions", d.conditions);
     row(dl, "Source", d.citation);
     row(dl, "Where", d.location);
-    if (d.quote) { var qd = el("span"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
+    if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
     row(dl, "What it says", d.evidence);
-    if (d.doi) row(dl, "DOI", doiLink(d.doi, d.doi));
-    row(dl, "Verification", d.verify_note);
-    row(dl, "UV-vis", EntScore.formatUv(d) || "Not recorded");
-    row(dl, "Direct excitation", EntScore.formatDirectExc(d.direct_exc) || "Not recorded");
-    if (adm) {
-      if (d.score_items && d.score_items.length) {
-        var lost = d.score_items.filter(function (i) { return i.got < i.max; });
-        var edited = d.score_items.filter(function (i) { return i.edited; }).pop();
-        row(dl, "Check", (lost.length ? "Points lost on: " + lost.map(function (i) { return i.label + " (" + i.got + "/" + i.max + ")"; }).join("; ") : "All checks passed")
-          + (edited ? ". The score predates a curator's edit of " + edited.note + "." : ""));
-      }
-      row(dl, "Submitted by", d.submitted_by);
-      row(dl, "Received", d.created_at ? new Date(d.created_at).toLocaleString() : "");
+    if (d.doi) {
+      var doiRow = el("div", "copy-row"), dw = el("span", "doi-wrap");
+      dw.appendChild(doiLink(d.doi, d.doi)); doiRow.appendChild(dw);
+      doiRow.appendChild(copyBtn(EntScore.cleanDoi(d.doi) || d.doi, "Copy DOI"));
+      row(dl, "DOI", doiRow);
     }
+    if (d.verify_note) {
+      var vn = el("span", (d.verify_level === "abstract" || d.verify_level === "secondaria") ? "verify-callout" : null, d.verify_note);
+      row(dl, "Verification", vn);
+    }
+    var uvTxt = EntScore.formatUv(d), dirTxt = EntScore.formatDirectExc(d.direct_exc);
+    if (uvTxt) row(dl, "UV-vis", uvTxt);
+    if (dirTxt) row(dl, "Direct excitation", dirTxt);
     c.appendChild(dl);
+
     var usesList = Array.isArray(d.uses) ? d.uses.filter(function (u) { return u && u.doi; }) : [];
     if (usesList.length) {
       var ul = el("ul", "uses");
@@ -363,16 +544,23 @@
     }
 
     if (adm) {
-      var f = el("label", "field", "Note (optional)"), ni = el("input"); ni.id = "note-" + d.id; ni.type = "text";
-      ni.value = adm.drafts[d.id] != null ? adm.drafts[d.id] : (d.note || "");
+      var curNote = adm.drafts[d.id] != null ? adm.drafts[d.id] : (d.note || "");
+      var f = el("label", "field", "Curator note (optional)"), ni = el("input");
+      ni.id = "note-" + d.id; ni.type = "text"; ni.value = curNote; ni.placeholder = "Reason or context for this decision…";
       ni.addEventListener("input", function () { adm.drafts[d.id] = ni.value; });
-      f.appendChild(ni); c.appendChild(f);
+      f.appendChild(ni);
+      var noteBtn = el("button", "btn tiny ghost note-toggle", "+ Add note"); noteBtn.type = "button";
+      f.hidden = !curNote; noteBtn.hidden = !!curNote;
+      noteBtn.addEventListener("click", function () { noteBtn.hidden = true; f.hidden = false; ni.focus(); });
+      c.appendChild(noteBtn); c.appendChild(f);
+
       var act = el("div", "actions");
-      var decide = function (label, cls, status) {
-        var b = el("button", "btn " + cls, label); b.type = "button"; b.disabled = busy;
+      var decide = function (label, clsName, status) {
+        var b = el("button", "btn " + clsName, label); b.type = "button"; b.disabled = busy;
         b.addEventListener("click", function () {
           var done = function (ok) { if (ok) delete adm.drafts[d.id]; };
           if (status === "approved" && adm.approve) { Promise.resolve(adm.approve(d, ni.value || "")).then(done); return; }
+          if (status === "rejected" && adm.reject) { Promise.resolve(adm.reject(d, ni.value || "")).then(done); return; }
           adm.onPatch(d.id, { status: status, decided_at: new Date().toISOString(), note: ni.value || "" }).then(done);
         });
         act.appendChild(b);
@@ -421,14 +609,18 @@
   function valueBlock(d, o, many) {
     var v = el("section", "val");
     var top = el("div", "valtop");
+    var etVal = Number(d.et_kcal);
     var et = el("div", "et");
-    et.appendChild(el("span", "v", fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : "")));
+    et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
     et.appendChild(el("span", "u", "kcal/mol"));
     et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
+    if (isFinite(etVal) && (etVal < S_MIN || etVal > S_MAX)) {
+      et.appendChild(el("span", "chip warn", etVal < S_MIN ? "Off scale (<40)" : "Off scale (>80)"));
+    }
     top.appendChild(et);
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
-    if (d.score != null) { var g = EntScore.gradeOf(d.score); chips.appendChild(el("span", "chip " + g.cls, "Score " + d.score + " · " + g.label)); }
+    if (d.score != null) chips.appendChild(scoreDetails(d));
     top.appendChild(chips); v.appendChild(top);
     if (!many) v.appendChild(scale(d));
     var dl = el("dl");
@@ -438,9 +630,14 @@
     row(dl, "Conditions", d.conditions);
     row(dl, "Source", d.citation);
     row(dl, "Where", d.location);
-    if (d.quote) { var qd = el("span"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
+    if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
     row(dl, "What it says", d.evidence);
-    if (d.doi) row(dl, "DOI", doiLink(d.doi, d.doi));
+    if (d.doi) {
+      var doiRow = el("div", "copy-row"), dw = el("span", "doi-wrap");
+      dw.appendChild(doiLink(d.doi, d.doi)); doiRow.appendChild(dw);
+      doiRow.appendChild(copyBtn(EntScore.cleanDoi(d.doi) || d.doi, "Copy DOI"));
+      row(dl, "DOI", doiRow);
+    }
     v.appendChild(dl);
     if (o.onSuggest) {
       var sa = el("div", "actions"), sb = el("button", "btn small", many ? "Suggest a correction to this value" : "Suggest a correction"); sb.type = "button";
@@ -481,21 +678,34 @@
     st.appendChild(paper);
     var si = el("div", "sinfo");
     var cas = items.map(function (d) { return d.cas; }).filter(Boolean)[0];
-    if (cas) si.appendChild(el("span", "formula", "CAS " + cas));
-    si.appendChild(el("code", "smiles", p.smiles || "—"));
+    if (cas) {
+      var casRow = el("div", "copy-row");
+      casRow.appendChild(el("span", "formula", "CAS " + cas));
+      casRow.appendChild(copyBtn(cas, "Copy CAS number"));
+      si.appendChild(casRow);
+    }
+    if (p.smiles) {
+      var smiRow = el("div", "copy-row");
+      smiRow.appendChild(el("code", "smiles", p.smiles));
+      smiRow.appendChild(copyBtn(p.smiles, "Copy SMILES"));
+      si.appendChild(smiRow);
+    } else {
+      si.appendChild(el("code", "smiles", "—"));
+    }
     if (info && info.formula) si.appendChild(el("span", "formula", info.formula));
     if (p.structure_note) si.appendChild(el("span", "hint", p.structure_note));
     st.appendChild(si); c.appendChild(st);
 
     items.forEach(function (d) { c.appendChild(valueBlock(d, o, many)); });
 
-    var first = function (k) { return items.map(function (d) { return d[k]; }).filter(Boolean)[0]; };
     var firstUv = items.map(EntScore.formatUv).filter(Boolean)[0];
     var firstDir = items.map(function (d) { return EntScore.formatDirectExc(d.direct_exc); }).filter(Boolean)[0];
-    var dl = el("dl");
-    row(dl, "UV-vis", firstUv || "Not recorded");
-    row(dl, "Direct excitation", firstDir || "Not recorded");
-    c.appendChild(dl);
+    if (firstUv || firstDir) {
+      var dl = el("dl");
+      if (firstUv) row(dl, "UV-vis", firstUv);
+      if (firstDir) row(dl, "Direct excitation", firstDir);
+      c.appendChild(dl);
+    }
     var seen = {}, usesList = [];
     items.forEach(function (d) {
       (Array.isArray(d.uses) ? d.uses : []).forEach(function (u) {
@@ -608,13 +818,13 @@
     var h = el("h2", null, title); h.id = "dlg-title"; box.setAttribute("aria-labelledby", "dlg-title"); box.appendChild(h);
     var host = $("ed"); dlgReturn = document.activeElement;
     build(box);
-    host.replaceChildren(box); host.hidden = false;
+    host.replaceChildren(box); host.hidden = false; syncModalOpen();
     var first = box.querySelector("input, select, textarea, button"); if (first) first.focus();
     return box;
   };
   Ent.closeDialog = function () {
     var host = $("ed"); if (!host || host.hidden) return;
-    host.hidden = true; host.replaceChildren();
+    host.hidden = true; host.replaceChildren(); syncModalOpen();
     if (dlgReturn && dlgReturn.focus) dlgReturn.focus(); dlgReturn = null;
   };
 
@@ -628,13 +838,40 @@
     }
     return String(v);
   }
-  /* s: suggestion row, entry: current entry or null, h = {busy, approve(s), reject(s)} */
+  function suggThumb(smiles, label) {
+    var box = el("div", "sugg-thumb");
+    var info = molInfo(smiles);
+    if (info) box.innerHTML = info.svg; else box.textContent = label || "No drawing";
+    return box;
+  }
+  /* s: suggestion row, entry: current entry or null, h = {busy, approve(s, note), reject(s, note), edit(s, entry, note)} */
   Ent.suggestionCard = function (s, entry, h) {
     var c = el("article", "card sugg"), head = el("div", "head");
     head.appendChild(el("h2", null, "Suggested correction · " + (entry ? entry.name : "entry no longer available")));
     var chips = el("div", "chips"); chips.appendChild(el("span", "chip suggchip", "Correction from a reader"));
     if (entry && entry.cas) chips.appendChild(el("span", "chip plain", "CAS " + entry.cas));
+    if (entry && entry.origin) chips.appendChild(el("span", "chip " + (entry.origin === "calc" ? "calc" : "exp"), entry.origin === "calc" ? "Computed" : "Experimental"));
+    if (entry && entry.et_kcal != null) chips.appendChild(el("span", "chip plain", fmt(Number(entry.et_kcal), 1) + " kcal/mol"));
     head.appendChild(chips); c.appendChild(head);
+
+    if (entry && (entry.smiles || (s.changes && s.changes.smiles))) {
+      var st = el("div", "sugg-struct"), chSmi = s.changes && s.changes.smiles;
+      if (entry.smiles) st.appendChild(suggThumb(entry.smiles, "Current"));
+      if (chSmi && chSmi !== entry.smiles) {
+        st.appendChild(el("span", "hint", "→"));
+        st.appendChild(suggThumb(chSmi, "Suggested"));
+      }
+      var sm = el("div", "sinfo");
+      var info = molInfo(entry.smiles || chSmi);
+      if (info && info.formula) sm.appendChild(el("span", "formula", info.formula));
+      if (entry.doi) {
+        var dr = el("div", "copy-row"), dw = el("span", "doi-wrap");
+        dw.appendChild(doiLink(entry.doi, "Source DOI: " + entry.doi)); dr.appendChild(dw);
+        sm.appendChild(dr);
+      }
+      st.appendChild(sm); c.appendChild(st);
+    }
+
     var wrap = el("div", "tablewrap"), t = el("table", "diff"), tr = el("tr");
     ["Field", "Now in the database", "Suggested"].forEach(function (x) { tr.appendChild(el("th", null, x)); });
     t.appendChild(tr);
@@ -646,11 +883,27 @@
     wrap.appendChild(t); c.appendChild(wrap);
     var dl = el("dl"); row(dl, "Reason given", s.comment); row(dl, "Submitted by", s.submitted_by);
     row(dl, "Received", s.created_at ? new Date(s.created_at).toLocaleString() : ""); c.appendChild(dl);
+
+    var nf = el("label", "field", "Curator note (optional)"), ni = el("input");
+    ni.type = "text"; ni.value = s.note || ""; ni.placeholder = "Note saved on the suggestion record…";
+    nf.appendChild(ni);
+    var noteToggle = el("button", "btn tiny ghost note-toggle", "+ Add curator note"); noteToggle.type = "button";
+    nf.hidden = !s.note; noteToggle.hidden = !!s.note;
+    noteToggle.addEventListener("click", function () { noteToggle.hidden = true; nf.hidden = false; ni.focus(); });
+    c.appendChild(noteToggle); c.appendChild(nf);
+
     var act = el("div", "actions"), busy = !!h.busy[s.id];
     var ok = el("button", "btn primary", "Approve: apply to the entry"), no = el("button", "btn reject", "Reject");
     ok.type = no.type = "button"; ok.disabled = busy || !entry; no.disabled = busy;
-    ok.addEventListener("click", function () { h.approve(s); }); no.addEventListener("click", function () { h.reject(s); });
-    act.appendChild(ok); act.appendChild(no); c.appendChild(act);
+    ok.addEventListener("click", function () { h.approve(s, ni.value.trim()); });
+    no.addEventListener("click", function () { h.reject(s, ni.value.trim()); });
+    act.appendChild(ok); act.appendChild(no);
+    if (entry && h.edit) {
+      var ed = el("button", "btn", "Edit & apply…"); ed.type = "button"; ed.disabled = busy;
+      ed.addEventListener("click", function () { h.edit(s, entry, ni.value.trim()); });
+      act.appendChild(ed);
+    }
+    c.appendChild(act);
     if (h.busy[s.id] === "err") c.appendChild(el("p", "err", "Could not save. Try again."));
     return c;
   };
@@ -669,25 +922,35 @@
     ["direct_exc", "Direct excitation (e.g. LED: 415, Kessil: 427)", "direct_map"],
     ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
   ];
+  var EDIT_MAP = {}; EDIT.forEach(function (f) { EDIT_MAP[f[0]] = f; });
+  var EDIT_GROUPS = [
+    { legend: "Molecule", rows: [["name"], ["cas", "cls", "role"], ["structure_note"]] },
+    { legend: "Triplet energy", rows: [["origin", "et_kcal", "et_unc"], ["et_reported", "et_type"], ["method", "conditions"]] },
+    { legend: "Source & verification", rows: [["citation"], ["doi", "location"], ["quote"], ["evidence"], ["verify_note"]] },
+    { legend: "Absorption & excitation", rows: [["uv_lmax", "uv_eps", "uv_cond"], ["direct_exc"]] }
+  ];
   /* Fields the score was computed from: editing one marks the score as older than the entry. */
   var SCORED = ["name", "origin", "et_kcal", "et_unc", "et_type", "method", "conditions", "citation", "doi", "location", "quote", "uv_lmax", "uv_eps", "uv_cond", "direct_exc"];
-  function useRow(u) {
+  function useRow(u, onChange) {
     var r = el("div", "ed-use");
     var a = el("label", "field", "DOI of a paper where it was used"), ai = el("input"); ai.type = "text"; ai.className = "mono ed-use-doi"; ai.value = (u && u.doi) || ""; a.appendChild(ai);
     var b = el("label", "field", "What it was used for"), bi = el("input"); bi.type = "text"; bi.className = "ed-use-note"; bi.maxLength = 300; bi.value = (u && u.note) || ""; b.appendChild(bi);
-    var x = el("button", "btn small", "Remove"); x.type = "button"; x.addEventListener("click", function () { r.remove(); });
+    var x = el("button", "btn small", "Remove"); x.type = "button"; x.addEventListener("click", function () { r.remove(); if (onChange) onChange(); });
+    if (onChange) { ai.addEventListener("input", onChange); bi.addEventListener("input", onChange); }
     r.appendChild(a); r.appendChild(b); r.appendChild(x); return r;
   }
   /* "Look up on PubChem" under the CAS field: fills the first match and lists the others. */
-  function casLookup(inp, smiles) {
+  function casLookup(inp, getSmiles) {
     var wrap = el("div", "actions"), b = el("button", "btn small", "Look up on PubChem"), msg = el("span", "hint");
-    b.type = "button"; b.disabled = !smiles; msg.setAttribute("aria-live", "polite");
+    b.type = "button"; msg.setAttribute("aria-live", "polite");
     b.addEventListener("click", function () {
+      var smi = (typeof getSmiles === "function" ? getSmiles() : getSmiles) || "";
+      if (!smi.trim()) { msg.textContent = "Give the SMILES first."; return; }
       b.disabled = true; msg.textContent = "Asking PubChem…";
-      Ent.lookupCas(smiles).then(function (list) {
+      Ent.lookupCas(smi).then(function (list) {
         b.disabled = false;
         if (!list.length) { msg.textContent = "PubChem has no CAS number for this structure."; return; }
-        inp.value = list[0];
+        inp.value = list[0]; inp.dispatchEvent(new Event("input", { bubbles: true }));
         msg.textContent = "From PubChem; check it before saving." + (list.length > 1 ? " PubChem also lists: " + list.slice(1, 6).join(", ") + (list.length > 6 ? "…" : "") : "");
       }, function () { b.disabled = false; msg.textContent = "PubChem could not be reached. Try again."; });
     });
@@ -710,74 +973,197 @@
     });
     wrap.appendChild(b); wrap.appendChild(msg); return wrap;
   };
+  var edCanClose = null;
   Ent.editor = {
-    open: function (d, onSave) {
-      var box = el("div", "sk-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
-      var h = el("h2", null, "Edit · " + (d.name || "")); h.id = "ed-title"; box.setAttribute("aria-labelledby", "ed-title");
-      box.appendChild(h);
-      box.appendChild(el("p", "hint", "The structure is edited with “Open in sketcher” on the card. Changes are saved for every reader as soon as you press Save."));
-      EDIT.forEach(function (f) {
-        var lab = elT("label", "field", f[1]), inp;
+    open: function (d, onSave, opts) {
+      opts = opts || {};
+      var overrides = opts.overrides || null;
+      var origSmiles = d.smiles || "", curSmiles = (overrides && overrides.smiles) || origSmiles;
+      var box = el("div", "sk-box ed-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+
+      var head = el("div", "ed-head");
+      var h = el("h2", null, opts.title || ("Edit · " + (d.name || ""))); h.id = "ed-title"; box.setAttribute("aria-labelledby", "ed-title");
+      var headAct = el("div", "ed-head-actions"), doiSlot = el("span"), closeX = el("button", "btn small", "Close");
+      closeX.type = "button"; closeX.setAttribute("aria-label", "Close editor");
+      headAct.appendChild(doiSlot); headAct.appendChild(closeX);
+      head.appendChild(h); head.appendChild(headAct); box.appendChild(head);
+
+      var body = el("div", "ed-body");
+
+      /* Live structure panel inside editor so stereodescriptors & CAS can be verified visually */
+      var stWrap = el("div", "ed-struct"), paper = el("div", "paper"), si = el("div", "sinfo");
+      var smiRow = el("div", "copy-row"), smiCode = el("code", "smiles"), smiCopy = copyBtn(function () { return curSmiles; }, "Copy SMILES");
+      var fml = el("span", "formula"), skBtn = el("button", "btn small", "Edit structure in sketcher"); skBtn.type = "button";
+      var stAct = el("div", "actions"); stAct.appendChild(skBtn);
+      smiRow.appendChild(smiCode); smiRow.appendChild(smiCopy);
+      si.appendChild(smiRow); si.appendChild(fml); si.appendChild(stAct);
+      stWrap.appendChild(paper); stWrap.appendChild(si); body.appendChild(stWrap);
+      function drawStruct() {
+        var info = molInfo(curSmiles);
+        if (info) { paper.innerHTML = info.svg; fml.textContent = info.formula || ""; }
+        else { paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available"; fml.textContent = ""; }
+        smiCode.textContent = curSmiles || "—";
+        stWrap.classList.toggle("changed", curSmiles !== origSmiles);
+      }
+
+      var fieldLabs = {};
+      function buildField(k) {
+        var f = EDIT_MAP[k]; if (!f) return null;
+        var lab = el("label", "field"), lbl = elT("span", null, f[1]), inp;
+        lab.appendChild(lbl);
         if (f[2] === "select") { inp = el("select"); f[3].forEach(function (o) { inp.appendChild(new Option(o[1], o[0])); }); }
         else if (f[2] === "area") { inp = el("textarea"); inp.rows = 2; }
-        else { inp = el("input"); inp.type = f[2] === "number" ? "number" : "text"; if (f[2] === "number") inp.step = "any"; }
+        else {
+          inp = el("input"); inp.type = f[2] === "number" ? "number" : "text";
+          if (f[2] === "number") inp.step = "any";
+          if (k === "doi" || k === "cas") inp.className = "mono";
+        }
         inp.id = "ed-" + f[0];
-        inp.value = f[2] === "direct_map" ? EntScore.formatDirectExc(d[f[0]]) : (d[f[0]] == null ? "" : d[f[0]]);
-        lab.appendChild(inp); box.appendChild(lab);
-        if (f[0] === "cas") box.appendChild(casLookup(inp, d.smiles));
-        if (f[0] === "name") box.appendChild(iupacLookup(inp, function () { var sm = document.getElementById("ed-smiles"); return sm ? sm.value : d.smiles; }));
+        var init = overrides && (f[0] in overrides) ? overrides[f[0]] : d[f[0]];
+        inp.value = f[2] === "direct_map" ? EntScore.formatDirectExc(init) : (init == null ? "" : String(init));
+        lab.appendChild(inp);
+        if (f[0] === "cas") lab.appendChild(casLookup(inp, function () { return curSmiles; }));
+        if (f[0] === "name") lab.appendChild(iupacLookup(inp, function () { return curSmiles; }));
+        fieldLabs[k] = lab;
+        return lab;
+      }
+
+      EDIT_GROUPS.forEach(function (grp) {
+        var fs = el("fieldset"), lg = el("legend", null, grp.legend);
+        fs.appendChild(lg);
+        grp.rows.forEach(function (rowKeys) {
+          if (rowKeys.length === 1) { var one = buildField(rowKeys[0]); if (one) fs.appendChild(one); return; }
+          var fr = el("div", "frow");
+          rowKeys.forEach(function (k) { var fld = buildField(k); if (fld) fr.appendChild(fld); });
+          fs.appendChild(fr);
+        });
+        body.appendChild(fs);
       });
-      box.appendChild(el("p", "hint", "Papers in which this molecule was used in photocatalysis"));
+
+      var usesFs = el("fieldset"), usesLg = el("legend", null, "Photocatalysis uses");
+      usesFs.appendChild(usesLg);
       var uses = el("div", "stack"); uses.id = "ed-uses";
-      (Array.isArray(d.uses) ? d.uses : []).forEach(function (u) { uses.appendChild(useRow(u)); });
-      box.appendChild(uses);
-      var add = el("button", "btn small", "Add a paper"); add.type = "button"; add.addEventListener("click", function () { uses.appendChild(useRow(null)); });
-      var addWrap = el("div", "actions"); addWrap.appendChild(add); box.appendChild(addWrap);
-      var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
-      var act = el("div", "actions"), save = el("button", "btn primary", "Save changes"), cancel = el("button", "btn", "Cancel");
-      save.type = "button"; cancel.type = "button"; act.appendChild(save); act.appendChild(cancel); box.appendChild(act);
-      cancel.addEventListener("click", Ent.editor.close);
-      save.addEventListener("click", function () {
+      var initUses = Array.isArray(d.uses) ? d.uses.slice() : [];
+      if (overrides && overrides.uses_add) initUses.push(overrides.uses_add);
+      initUses.forEach(function (u) { uses.appendChild(useRow(u, syncDirty)); });
+      usesFs.appendChild(uses);
+      var add = el("button", "btn small", "Add a paper"); add.type = "button";
+      add.addEventListener("click", function () { uses.appendChild(useRow(null, syncDirty)); syncDirty(); });
+      var addWrap = el("div", "actions"); addWrap.appendChild(add); usesFs.appendChild(addWrap);
+      body.appendChild(usesFs);
+      box.appendChild(body);
+
+      var foot = el("div", "ed-foot");
+      var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); foot.appendChild(err);
+      var dirtyBar = el("div", "ed-dirty-confirm"); dirtyBar.hidden = true;
+      var dirtyQ = el("span", null, "You have unsaved changes."), dirtyBtns = el("div", "actions");
+      var keepBtn = el("button", "btn small", "Keep editing"), discBtn = el("button", "btn small danger primary", "Discard changes");
+      keepBtn.type = discBtn.type = "button"; dirtyBtns.appendChild(keepBtn); dirtyBtns.appendChild(discBtn);
+      dirtyBar.appendChild(dirtyQ); dirtyBar.appendChild(dirtyBtns); foot.appendChild(dirtyBar);
+
+      var footRow = el("div", "ed-foot-row"), dirtyMsg = el("span", "hint", "No changes yet");
+      var act = el("div", "actions"), save = el("button", "btn primary", opts.saveLabel || "Save changes"), cancel = el("button", "btn", "Cancel");
+      save.type = cancel.type = "button"; act.appendChild(save); act.appendChild(cancel);
+      footRow.appendChild(dirtyMsg); footRow.appendChild(act); foot.appendChild(footRow);
+      box.appendChild(foot);
+
+      function collectState(validate) {
         var patch = {}, bad = "";
+        if (curSmiles !== origSmiles) {
+          patch.smiles = curSmiles;
+          patch.idcode = Ent.idCode(curSmiles);
+          patch.smiles_checked = true;
+        }
         EDIT.forEach(function (f) {
           var v = $("ed-" + f[0]).value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
           if (f[2] === "direct_map") {
             var dm = EntScore.parseDirectExc(v);
-            if (dm.bad) { bad = f[1] + " must be like \"LED: 415, Kessil: 427\" or JSON {\"LED\": 415}."; return; }
+            if (dm.bad) { if (validate) bad = f[1] + " must be like \"LED: 415, Kessil: 427\" or JSON {\"LED\": 415}."; else patch[f[0]] = v; return; }
             out = dm.map;
             if (JSON.stringify(out) === JSON.stringify(old)) return;
             patch[f[0]] = out; return;
           }
           if (f[2] === "number") {
             out = v === "" ? null : EntScore.num(v);
-            if (v !== "" && isNaN(out)) bad = f[1] + " must be a number.";
+            if (v !== "" && isNaN(out)) { if (validate) bad = f[1] + " must be a number."; else { patch[f[0]] = v; return; } }
             old = old == null ? null : Number(old);
           } else out = v === "" ? null : v;
           if (f[0] === "doi" && out) out = EntScore.cleanDoi(out);
           if (f[0] === "cas" && out) out = EntScore.cleanCas(out);
           if (out === old) return;
-          /* only what changed is checked, so an old odd value never blocks other edits */
-          if (f[0] === "doi" && out && !EntScore.isDoi(out)) bad = "Give the source as a DOI (for example 10.1021/jacs.0c05069), not as a link.";
-          if (f[0] === "cas" && out && !EntScore.casValid(out)) bad = "“" + out + "” is not a valid CAS number.";
+          if (validate) {
+            /* only what changed is checked, so an old odd value never blocks other edits */
+            if (f[0] === "doi" && out && !EntScore.isDoi(out)) bad = "Give the source as a DOI (for example 10.1021/jacs.0c05069), not as a link.";
+            if (f[0] === "cas" && out && !EntScore.casValid(out)) bad = "“" + out + "” is not a valid CAS number.";
+          }
           patch[f[0]] = out;
         });
-        /* A number field that the browser could not read shows as empty: keep the old value. */
-        EDIT.forEach(function (f) { if (f[2] === "number" && $("ed-" + f[0]).validity && $("ed-" + f[0]).validity.badInput) bad = f[1] + " must be a number."; });
-        if ("name" in patch && !patch.name) bad = "The name cannot be empty.";
-        if ("et_kcal" in patch && patch.et_kcal == null) bad = "The triplet energy cannot be empty.";
-        else if ("et_kcal" in patch && !(patch.et_kcal > 0 && patch.et_kcal <= EntScore.ET_MAX)) bad = "The triplet energy must be above 0 and at most " + EntScore.ET_MAX + " kcal/mol.";
-        if ("et_unc" in patch && patch.et_unc != null && patch.et_unc < 0) bad = "The uncertainty cannot be negative.";
-        if (("et_kcal" in patch || "et_unc" in patch) && !("et_reported" in patch) && d.et_reported)
-          bad = "You changed the value: update “Value as reported” too, so the card does not contradict itself.";
+        if (validate) {
+          EDIT.forEach(function (f) { if (f[2] === "number" && $("ed-" + f[0]).validity && $("ed-" + f[0]).validity.badInput) bad = f[1] + " must be a number."; });
+          if ("name" in patch && !patch.name) bad = "The name cannot be empty.";
+          if ("et_kcal" in patch && patch.et_kcal == null) bad = "The triplet energy cannot be empty.";
+          else if ("et_kcal" in patch && !(patch.et_kcal > 0 && patch.et_kcal <= EntScore.ET_MAX)) bad = "The triplet energy must be above 0 and at most " + EntScore.ET_MAX + " kcal/mol.";
+          if ("et_unc" in patch && patch.et_unc != null && patch.et_unc < 0) bad = "The uncertainty cannot be negative.";
+          if (("et_kcal" in patch || "et_unc" in patch) && !("et_reported" in patch) && d.et_reported)
+            bad = "You changed the value: update “Value as reported” too, so the card does not contradict itself.";
+        }
         var list = [];
         Array.prototype.forEach.call(uses.children, function (r) {
           var doi = EntScore.cleanDoi(r.querySelector(".ed-use-doi").value), note = r.querySelector(".ed-use-note").value.trim();
           if (!doi && !note) return;
-          if (!EntScore.isDoi(doi)) bad = "“" + (doi || "(empty)") + "” is not a DOI. Give papers as DOIs, not as links.";
+          if (validate && !EntScore.isDoi(doi)) bad = "“" + (doi || "(empty)") + "” is not a DOI. Give papers as DOIs, not as links.";
           list.push({ doi: doi, note: note });
         });
         if (JSON.stringify(list) !== JSON.stringify(Array.isArray(d.uses) ? d.uses : [])) patch.uses = list.length ? list : null;
-        if (bad) { err.textContent = bad; err.hidden = false; return; }
+        return { patch: patch, bad: bad };
+      }
+
+      function syncDoiLink() {
+        var raw = $("ed-doi").value.trim(), cleaned = EntScore.cleanDoi(raw);
+        doiSlot.replaceChildren();
+        if (EntScore.isDoi(cleaned)) {
+          var a = link("Open DOI", "https://doi.org/" + encodeURI(cleaned));
+          a.className = "btn small"; doiSlot.appendChild(a);
+        }
+      }
+
+      function syncDirty() {
+        var res = collectState(false), patch = res.patch;
+        Object.keys(fieldLabs).forEach(function (k) { fieldLabs[k].classList.toggle("changed", k in patch); });
+        var n = Object.keys(patch).filter(function (k) { return k !== "idcode" && k !== "smiles_checked"; }).length;
+        dirtyMsg.textContent = n ? n + (n === 1 ? " field modified" : " fields modified") : "No changes yet";
+        if (!n) dirtyBar.hidden = true;
+        syncDoiLink();
+        return n;
+      }
+
+      EDIT.forEach(function (f) {
+        var inp = $("ed-" + f[0]);
+        inp.addEventListener("input", syncDirty);
+        inp.addEventListener("change", syncDirty);
+      });
+
+      skBtn.addEventListener("click", function () {
+        Ent.sketcher.open({
+          title: "Sketcher · " + ($("ed-name").value.trim() || d.name || ""), smiles: curSmiles, saveLabel: "Apply to editor",
+          hint: "Edit the drawing or SMILES, then apply to review the change inside the editor.",
+          onSave: function (s) { curSmiles = s; drawStruct(); syncDirty(); return true; }
+        });
+      });
+
+      function requestClose() {
+        if (!syncDirty()) { Ent.editor.close(); return; }
+        dirtyBar.hidden = false; keepBtn.focus();
+      }
+      edCanClose = requestClose;
+      keepBtn.addEventListener("click", function () { dirtyBar.hidden = true; });
+      discBtn.addEventListener("click", Ent.editor.close);
+      cancel.addEventListener("click", requestClose);
+      closeX.addEventListener("click", requestClose);
+
+      save.addEventListener("click", function () {
+        var res = collectState(true), patch = res.patch;
+        if (res.bad) { err.textContent = res.bad; err.hidden = false; return; }
         if (!Object.keys(patch).length) { Ent.editor.close(); return; }
         var touched = SCORED.filter(function (k) { return k in patch; });
         if (touched.length && Array.isArray(d.score_items)) {
@@ -790,23 +1176,33 @@
           if (ok) Ent.editor.close(); else { err.textContent = "Could not save. Try again."; err.hidden = false; }
         });
       });
-      var host = $("ed"); host.replaceChildren(box); host.hidden = false;
+
+      var host = $("ed"); host.replaceChildren(box); host.hidden = false; syncModalOpen();
       edReturn = document.activeElement;
+      drawStruct(); syncDirty();
       var first = $("ed-name"); if (first) first.focus();
     },
+    requestClose: function () { if (edCanClose) edCanClose(); else { Ent.editor.close(); Ent.closeDialog(); } },
     close: function () {
       var host = $("ed"); if (!host || host.hidden) return;
-      host.hidden = true; host.replaceChildren();
+      edCanClose = null;
+      host.hidden = true; host.replaceChildren(); syncModalOpen();
       if (edReturn && edReturn.focus) edReturn.focus(); edReturn = null;
     }
   };
   var edReturn = null;
-  /* Escape closes whichever dialog is open. */
+  /* Backdrop click closes active dialog (respecting dirty-state confirmation for the editor). */
+  document.addEventListener("click", function (e) {
+    var ed = $("ed"), sk = $("sk");
+    if (sk && !sk.hidden && e.target === sk) { Ent.sketcher.close(); return; }
+    if (ed && !ed.hidden && e.target === ed) { Ent.editor.requestClose(); }
+  });
+  /* Escape closes whichever dialog is topmost (sketcher before editor). */
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
     var ed = $("ed"), sk = $("sk");
-    if (ed && !ed.hidden) { Ent.editor.close(); Ent.closeDialog(); }
-    else if (sk && !sk.hidden) Ent.sketcher.close();
+    if (sk && !sk.hidden) Ent.sketcher.close();
+    else if (ed && !ed.hidden) Ent.editor.requestClose();
   });
 
   /* ---------- long lists: draw 50 cards at a time ---------- */
@@ -838,7 +1234,7 @@
       $("sk-title").textContent = opts.title; $("sk-smiles").value = opts.smiles || ""; $("sk-save").textContent = opts.saveLabel;
       $("sk-hint").textContent = opts.hint + " The sketcher is built for a mouse and may respond poorly to touch."; skMsg("");
       skReturn = document.activeElement;
-      $("sk").hidden = false; $("sk-smiles").focus();
+      $("sk").hidden = false; syncModalOpen(); $("sk-smiles").focus();
       if (!editor) {
         try {
           if (!window.OCL || !OCL.StructureEditor) throw new Error("no editor");
@@ -849,7 +1245,7 @@
       if (editor) { try { editor.setSmiles(opts.smiles || ""); } catch (e) { if (opts.smiles) skMsg("This SMILES could not be drawn."); } }
     },
     close: function () {
-      $("sk").hidden = true; skOpts = null;
+      $("sk").hidden = true; skOpts = null; syncModalOpen();
       if (skReturn && skReturn.focus) skReturn.focus(); skReturn = null;
     },
     bind: function () {
@@ -895,11 +1291,12 @@
   }
   function creds(a) { return JSON.stringify({ p_user: (a && a.user) || "", p_pass: (a && a.pass) || "" }); }
   /* -> Promise<true|false>: true when the site is open or the login matches */
-  api.checkAccess = function (a) {
-    return fetch(base + "/rest/v1/rpc/check_access", { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
+  api.checkAccess = function (a, token) {
+    return fetch(base + "/rest/v1/rpc/check_access", { method: "POST", headers: headers(token || null), body: creds(a) }).then(asJson);
   };
   /* The API returns at most 1000 rows per request, so long lists are read page by page. */
   var PAGE = 1000;
+  var PUBLIC_COLS = "id,created_at,name,cas,smiles,idcode,structure_note,cls,role,origin,et_kcal,et_unc,et_reported,et_type,method,conditions,citation,doi,location,quote,evidence,uv_lmax,uv_eps,uv_cond,direct_exc,score,uses";
   function allPages(getPage) {
     var out = [];
     return (function next(offset) {
@@ -909,25 +1306,48 @@
       });
     })(0);
   }
-  api.listPublic = function (a) {
+  api.listPublic = function (a, useAdmin) {
+    if (useAdmin) {
+      return authed(function (t) {
+        return allPages(function (offset) {
+          return fetch(base + "/rest/v1/entries?select=" + PUBLIC_COLS + "&status=eq.approved&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
+            { headers: headers(t) }).then(asJson);
+        });
+      });
+    }
     return allPages(function (offset) {
       return fetch(base + "/rest/v1/rpc/list_entries?order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
         { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
     });
   };
   api.submit = function (payload) {
-    return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(), body: JSON.stringify(payload) }).then(asJson);
+    return api.token().then(function (t) {
+      return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(t || null), body: JSON.stringify(payload) }).then(asJson);
+    });
   };
 
   /* curator session: email + password sign-in */
   function saveSession(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {} }
   function readSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
+  function tokenEmail(tok, fallback) {
+    if (fallback) return fallback;
+    try {
+      var p = String(tok || "").split(".")[1];
+      if (!p) return "";
+      var j = JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/")));
+      return j.email || "";
+    } catch (e) { return ""; }
+  }
+  api.sessionEmail = function () {
+    var s = readSession();
+    return s ? tokenEmail(s.access_token, s.email) : "";
+  };
   api.signOut = function () { try { localStorage.removeItem(SESSION_KEY); } catch (e) {} };
   api.signIn = function (email, password) {
     return fetch(base + "/auth/v1/token?grant_type=password",
       { method: "POST", headers: headers(), body: JSON.stringify({ email: email, password: password }) })
       .then(asJson).then(function (r) {
-        saveSession({ access_token: r.access_token, refresh_token: r.refresh_token, expires_at: Date.now() + (r.expires_in || 3600) * 1000 });
+        saveSession({ access_token: r.access_token, refresh_token: r.refresh_token, expires_at: Date.now() + (r.expires_in || 3600) * 1000, email: (r.user && r.user.email) || email || "" });
         return true;
       });
   };
@@ -939,7 +1359,7 @@
     return fetch(base + "/auth/v1/token?grant_type=refresh_token",
       { method: "POST", headers: headers(), body: JSON.stringify({ refresh_token: s.refresh_token }) })
       .then(asJson).then(function (r) {
-        saveSession({ access_token: r.access_token, refresh_token: r.refresh_token, expires_at: Date.now() + (r.expires_in || 3600) * 1000 });
+        saveSession({ access_token: r.access_token, refresh_token: r.refresh_token, expires_at: Date.now() + (r.expires_in || 3600) * 1000, email: (r.user && r.user.email) || s.email || "" });
         return r.access_token;
       }, function () { api.signOut(); return null; });
   };

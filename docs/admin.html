@@ -14,33 +14,20 @@
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <meta name="theme-color" content="#12301F">
 </head>
-<body>
+<body class="admin-page">
 <div class="wrap">
   <header class="topbar">
     <h1 class="brand"><img src="assets/logo.svg" alt="" width="40" height="40"><span>Tr<span class="en">En</span>DB <span class="sub">review</span></span></h1>
-    <span><a href="./">Public site</a> · <a href="#" id="signout" hidden>Sign out</a></span>
+    <div class="topbar-actions">
+      <span class="curator-badge" id="curator-email" hidden></span>
+      <button class="btn small ghost" id="theme-toggle" type="button" title="Cycle colour theme (Auto, Light, Dark)">Theme: Auto</button>
+      <button class="btn small ghost" id="kb-help-btn" type="button" title="Keyboard shortcuts (?)" hidden>Shortcuts</button>
+      <a href="./">Public site</a>
+      <a href="#" id="signout" hidden>Sign out</a>
+    </div>
   </header>
 
   <p class="banner" id="adm-msg" role="status" hidden></p>
-  <div class="banner" id="imp" hidden>
-    <span id="imp-text"></span>
-    <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
-  </div>
-  <div class="banner" id="iupac" hidden>
-    <span id="iupac-text" aria-live="polite"></span>
-    <div class="actions" style="margin-top:8px">
-      <button class="btn primary" id="iupac-go" type="button">Use IUPAC names</button>
-      <button class="btn" id="iupac-pc" type="button" hidden>Look up the others on PubChem</button>
-      <button class="btn" id="iupac-stop" type="button" hidden>Stop</button>
-    </div>
-  </div>
-  <div class="banner" id="cas" hidden>
-    <span id="cas-text" aria-live="polite"></span>
-    <div class="actions" style="margin-top:8px">
-      <button class="btn" id="cas-go" type="button">Fill missing CAS numbers from PubChem</button>
-      <button class="btn" id="cas-stop" type="button" hidden>Stop</button>
-    </div>
-  </div>
 
   <form class="login" id="login" hidden novalidate>
     <h2>Curator sign-in</h2>
@@ -52,103 +39,183 @@
   </form>
 
   <div id="panel" hidden>
-    <nav class="tabs" role="tablist" aria-label="Views">
-      <button class="tab" id="tab-pending" role="tab" data-view="pending" aria-selected="true">Queue<span class="n" id="n-pending">0</span></button>
-      <button class="tab" id="tab-approved" role="tab" data-view="approved" aria-selected="false">Approved<span class="n" id="n-approved">0</span></button>
-      <button class="tab" id="tab-rejected" role="tab" data-view="rejected" aria-selected="false">Rejected<span class="n" id="n-rejected">0</span></button>
-      <button class="tab" id="reload" type="button">Refresh</button>
-    </nav>
+    <div class="admin-sticky">
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button class="tab" id="tab-pending" role="tab" data-view="pending" aria-selected="true">Queue<span class="n" id="n-pending">0</span></button>
+        <button class="tab" id="tab-approved" role="tab" data-view="approved" aria-selected="false">Approved<span class="n" id="n-approved">0</span></button>
+        <button class="tab" id="tab-rejected" role="tab" data-view="rejected" aria-selected="false">Rejected<span class="n" id="n-rejected">0</span></button>
+        <span class="grow"></span>
+        <span class="sync-meta" id="last-sync" aria-live="polite"></span>
+        <button class="tab tab-tool" id="reload" type="button">Refresh</button>
+        <button class="tab tab-tool" id="toggle-tools" type="button" aria-expanded="false" aria-controls="tools-aside">Tools &amp; key<span class="n" id="n-tools" hidden>0</span></button>
+      </nav>
 
-    <section class="ssearch" id="up-box" aria-labelledby="up-title">
-      <h2 id="up-title">Upload batch JSON</h2>
-      <div class="tools">
-        <input id="up-file" type="file" accept=".json,application/json" hidden>
-        <button class="btn small" id="up-pick" type="button">Choose JSON file…</button>
-        <button class="btn small primary" id="up-go" type="button" hidden>Import into queue</button>
-        <button class="btn small" id="up-clear" type="button" hidden>Clear</button>
+      <div class="selbar" id="selbar" role="toolbar" aria-label="Selected entries" hidden>
+        <span id="sel-n" class="sel-count" aria-live="polite">0 selected</span>
+        <button class="btn small" id="sel-visible" type="button" hidden>Select visible</button>
+        <button class="btn small" id="sel-all" type="button">Select all listed</button>
+        <button class="btn small" id="sel-none" type="button" hidden>Clear selection</button>
+        <span class="grow"></span>
+        <button class="btn small primary" id="sel-approve" type="button" hidden>Approve selected</button>
+        <button class="btn small reject" id="sel-reject" type="button" hidden>Reject selected</button>
+        <button class="btn small" id="sel-queue" type="button" hidden>Back to queue</button>
+        <button class="btn small danger" id="sel-delete" type="button" hidden>Delete selected permanently</button>
       </div>
-      <p class="hint" id="up-info" aria-live="polite">Import a batch JSON generated by <code>trendb-extract</code> directly into the review queue.</p>
-      <p class="err" id="up-err" role="alert" hidden></p>
-    </section>
-
-  <div class="tools" id="tools-main">
-    <input id="q" class="grow" type="search" placeholder="Search name, SMILES, DOI or source" aria-label="Text search">
-    <select id="f-origin" aria-label="Data origin">
-      <option value="">Experimental and computed</option>
-      <option value="exp">Experimental only</option>
-      <option value="calc">Computed only</option>
-    </select>
-    <select id="f-sort" aria-label="Sort order">
-      <option value="review">Review order: score, duplicates together</option>
-      <option value="added">Order added</option>
-      <option value="et-asc">Triplet energy, low to high</option>
-      <option value="et-desc">Triplet energy, high to low</option>
-      <option value="sim">Similarity to query</option>
-    </select>
-  </div>
-  <div class="tools" id="tools-filter">
-    <input id="f-cas" class="mono cas" type="search" placeholder="CAS number" aria-label="Search by CAS number" spellcheck="false" autocomplete="off">
-    <select id="f-role" aria-label="Role">
-      <option value="">Donors and acceptors</option>
-      <option value="acceptor">Acceptors (with dual-role)</option>
-      <option value="donor">Donors (with dual-role)</option>
-      <option value="both">Dual-role only</option>
-    </select>
-    <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
-    <label class="inline"><span>E<sub>T</sub> from</span> <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
-    <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
-    <button class="btn small" id="f-reset" type="button">Reset filters</button>
-  </div>
-
-  <section class="ssearch" id="ss-box" aria-labelledby="ss-title">
-    <h2 id="ss-title">Structure search</h2>
-    <div class="tools">
-      <input id="ss-smiles" class="grow mono" type="text" placeholder="Query SMILES, e.g. C=Cc1ccccc1" aria-label="Query SMILES" spellcheck="false" autocomplete="off">
-      <select id="ss-mode" aria-label="Search type">
-        <option value="sub">Substructure</option>
-        <option value="exact">Exact structure</option>
-        <option value="sim">Similarity</option>
-      </select>
-      <input id="ss-thr" class="num" type="number" min="0" max="1" step="0.05" value="0.5" aria-label="Minimum Tanimoto similarity" hidden>
-      <button class="btn small" id="ss-draw" type="button">Draw query</button>
-      <button class="btn small" id="ss-clear" type="button">Clear</button>
     </div>
-    <p class="hint" id="ss-info" aria-live="polite">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
-  </section>
 
-  <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
-  <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
-
-    <aside class="key" id="key" aria-labelledby="key-title">
-      <details open>
-        <summary id="key-title">Card colours</summary>
-        <ul>
-          <li><span class="sw sugg"></span><span><b>Purple</b> · a reader’s correction to a published entry. Always first in the queue. Approve writes only the changed fields.</span></li>
-          <li><span class="sw dup"></span><span><b>Yellow</b> · possible duplicate: the same value is already in the database or in the queue. Duplicates are listed one after the other. Approve asks which entry to overwrite.</span></li>
-          <li><span class="sw known"></span><span><b>White, “New value for a known molecule”</b> · a different value for a molecule already in the database. Approve adds it to that molecule’s card.</span></li>
-          <li><span class="sw plain"></span><span><b>White</b> · new molecule.</span></li>
-        </ul>
-        <p class="hint">Queue order: corrections, then entries by score (highest first), with duplicates kept together.</p>
-        <p class="hint">Chips: <span class="chip exp">Good</span> score 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> below 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
-      </details>
-    </aside>
-
-    <div class="selbar" id="selbar" role="toolbar" aria-label="Selected entries">
-      <span id="sel-n" aria-live="polite">0 selected</span>
-      <button class="btn small" id="sel-all" type="button">Select all listed</button>
-      <button class="btn small" id="sel-none" type="button" hidden>Clear selection</button>
-      <span class="grow"></span>
-      <button class="btn small primary" id="sel-approve" type="button" hidden>Approve selected</button>
-      <button class="btn small reject" id="sel-reject" type="button" hidden>Reject selected</button>
-      <button class="btn small" id="sel-queue" type="button" hidden>Back to queue</button>
-      <button class="btn small danger" id="sel-delete" type="button" hidden>Delete selected permanently</button>
-    </div>
     <p class="err" id="bulk-err" role="alert" hidden></p>
-    <div id="status" class="status">Loading…</div>
-    <main id="list" class="list"></main>
+
+    <div class="admin-grid">
+      <div class="admin-main">
+        <div class="triage-bar" id="triage-bar" role="group" aria-label="Quick curator filters">
+          <button class="pill" type="button" data-triage="" aria-pressed="true">All<span class="n" id="tr-all">0</span></button>
+          <button class="pill pill-sugg" type="button" data-triage="sugg" aria-pressed="false" hidden>Corrections<span class="n" id="tr-sugg">0</span></button>
+          <button class="pill pill-dup" type="button" data-triage="dup" aria-pressed="false" hidden>Duplicates<span class="n" id="tr-dup">0</span></button>
+          <button class="pill pill-warn" type="button" data-triage="unchecked" aria-pressed="false" hidden>Unchecked structure<span class="n" id="tr-unchecked">0</span></button>
+          <button class="pill" type="button" data-triage="nocas" aria-pressed="false" hidden>Missing CAS<span class="n" id="tr-nocas">0</span></button>
+          <button class="pill pill-warn" type="button" data-triage="verify" aria-pressed="false" hidden>Source to verify<span class="n" id="tr-verify">0</span></button>
+          <button class="pill" type="button" data-triage="form" aria-pressed="false" hidden>Form submissions<span class="n" id="tr-form">0</span></button>
+          <button class="pill pill-bad" type="button" data-triage="low" aria-pressed="false" hidden>Score &lt; 50<span class="n" id="tr-low">0</span></button>
+        </div>
+
+        <section class="filter-panel" aria-label="Search and filters">
+          <div class="tools" id="tools-main">
+            <input id="q" class="grow" type="search" placeholder="Search name, SMILES, DOI or source" aria-label="Text search">
+            <select id="f-origin" aria-label="Data origin">
+              <option value="">Experimental and computed</option>
+              <option value="exp">Experimental only</option>
+              <option value="calc">Computed only</option>
+            </select>
+            <select id="f-sort" aria-label="Sort order">
+              <option value="review">Review order: score, duplicates together</option>
+              <option value="received-desc">Date received, newest first</option>
+              <option value="added">Date received, oldest first</option>
+              <option value="et-asc">Triplet energy, low to high</option>
+              <option value="et-desc">Triplet energy, high to low</option>
+              <option value="sim">Similarity to query</option>
+            </select>
+          </div>
+          <div class="tools" id="tools-filter">
+            <input id="f-cas" class="mono cas" type="search" placeholder="CAS number" aria-label="Search by CAS number" spellcheck="false" autocomplete="off">
+            <select id="f-role" aria-label="Role">
+              <option value="">Donors and acceptors</option>
+              <option value="acceptor">Acceptors (with dual-role)</option>
+              <option value="donor">Donors (with dual-role)</option>
+              <option value="both">Dual-role only</option>
+            </select>
+            <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
+            <label class="inline"><span>E<sub>T</sub> from</span> <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+            <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
+            <button class="btn small" id="f-reset" type="button">Reset</button>
+          </div>
+
+          <details class="ssearch" id="ss-details">
+            <summary id="ss-title">
+              <span>Structure search</span>
+              <span class="chip" id="ss-active-badge" hidden>Active</span>
+            </summary>
+            <div class="ssearch-body" id="ss-box">
+              <div class="tools">
+                <input id="ss-smiles" class="grow mono" type="text" placeholder="Query SMILES, e.g. C=Cc1ccccc1" aria-label="Query SMILES" spellcheck="false" autocomplete="off">
+                <select id="ss-mode" aria-label="Search type">
+                  <option value="sub">Substructure</option>
+                  <option value="exact">Exact structure</option>
+                  <option value="sim">Similarity</option>
+                </select>
+                <input id="ss-thr" class="num" type="number" min="0" max="1" step="0.05" value="0.5" aria-label="Minimum Tanimoto similarity" hidden>
+                <button class="btn small" id="ss-draw" type="button">Draw query</button>
+                <button class="btn small" id="ss-clear" type="button">Clear</button>
+              </div>
+            </div>
+          </details>
+          <p class="hint" id="ss-info" aria-live="polite">Exact match includes E/Z geometry; similarity is a Tanimoto score on fragment fingerprints, which ignore E/Z.</p>
+        </section>
+
+        <p class="legend" id="legend">Reference ticks on the scale (kcal/mol): Ru = [Ru(bpy)₃]²⁺ 46.5 · Ir = Ir(ppy)₃ 55.2 · TX = thioxanthone 63.3 · BP = benzophenone 68. Values from Molecules 2022, 27, 5342 (Table 1) and Saltiel et al., Pure Appl. Chem. 1975, 41, 559.</p>
+        <p class="err" id="ocl-msg" hidden>The structure library did not load, so structures show as SMILES only and structure search is off.</p>
+
+        <div id="status" class="status">Loading…</div>
+        <main id="list" class="list"></main>
+      </div>
+
+      <aside class="admin-aside" id="tools-aside" aria-label="Curator tools and colour key">
+        <section class="tool-card" id="imp" hidden>
+          <h3>Published literature batch</h3>
+          <p class="hint" id="imp-text"></p>
+          <div class="actions"><button class="btn small primary" id="imp-go" type="button">Import into the queue</button></div>
+        </section>
+
+        <section class="tool-card" id="up-box" aria-labelledby="up-title">
+          <h3 id="up-title">Upload batch JSON</h3>
+          <div class="dropzone" id="up-drop">
+            <input id="up-file" type="file" accept=".json,application/json" hidden>
+            <p class="hint">Drop a <code>trendb-extract</code> JSON file here or pick one manually.</p>
+            <div class="tools">
+              <button class="btn small" id="up-pick" type="button">Choose JSON file…</button>
+              <button class="btn small primary" id="up-go" type="button" hidden>Import into queue</button>
+              <button class="btn small" id="up-clear" type="button" hidden>Clear</button>
+            </div>
+          </div>
+          <p class="hint" id="up-info" aria-live="polite">Import entries directly into the review queue.</p>
+          <div class="err" id="up-err" role="alert" hidden></div>
+        </section>
+
+        <section class="tool-card" id="enrich-box" aria-labelledby="enrich-title">
+          <div class="tool-head">
+            <h3 id="enrich-title">Metadata enrichment</h3>
+            <select id="enrich-scope" class="compact-select" aria-label="Enrichment scope">
+              <option value="pending">Queue only</option>
+              <option value="all">All entries</option>
+            </select>
+          </div>
+
+          <div class="tool-sub" id="iupac" hidden>
+            <p class="hint" id="iupac-text" aria-live="polite"></p>
+            <progress id="iupac-prog" class="tool-prog" value="0" max="1" hidden></progress>
+            <div class="actions">
+              <button class="btn small primary" id="iupac-go" type="button">Use IUPAC names</button>
+              <button class="btn small" id="iupac-pc" type="button" hidden>Look up on PubChem</button>
+              <button class="btn small" id="iupac-stop" type="button" hidden>Stop</button>
+            </div>
+          </div>
+
+          <div class="tool-sub" id="cas" hidden>
+            <p class="hint" id="cas-text" aria-live="polite"></p>
+            <progress id="cas-prog" class="tool-prog" value="0" max="1" hidden></progress>
+            <div class="actions">
+              <button class="btn small" id="cas-go" type="button">Fill missing CAS from PubChem</button>
+              <button class="btn small" id="cas-stop" type="button" hidden>Stop</button>
+            </div>
+          </div>
+
+          <p class="hint" id="enrich-empty" hidden>All entries in this scope have checked IUPAC names and CAS numbers.</p>
+
+          <details id="tool-log-wrap" class="tool-log-wrap" hidden>
+            <summary>Last run log <span class="n" id="tool-log-count">0</span></summary>
+            <ul id="tool-log" class="tool-log"></ul>
+            <button class="btn tiny" id="tool-log-clear" type="button">Clear log</button>
+          </details>
+        </section>
+
+        <section class="key" id="key" aria-labelledby="key-title">
+          <details open>
+            <summary id="key-title">Card colours &amp; badges</summary>
+            <ul>
+              <li><span class="sw sugg"></span><span><b>Purple</b> · a reader’s correction to a published entry. Always first in the queue. Approve writes only the changed fields.</span></li>
+              <li><span class="sw dup"></span><span><b>Yellow</b> · possible duplicate: the same value is already in the database or in the queue. Duplicates are listed together. Approve asks which entry to overwrite.</span></li>
+              <li><span class="sw known"></span><span><b>White, “New value for a known molecule”</b> · a different value for a molecule already in the database. Approve adds it to that molecule’s card.</span></li>
+              <li><span class="sw plain"></span><span><b>White</b> · new molecule.</span></li>
+            </ul>
+            <p class="hint">Queue order: corrections, then entries by score (highest first), with duplicates kept together.</p>
+            <p class="hint">Chips: <span class="chip exp">Good</span> 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> &lt; 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
+          </details>
+        </section>
+      </aside>
+    </div>
   </div>
 </div>
 
+<div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 <div class="sk" id="ed" hidden></div>
 
 <div class="sk" id="sk" hidden>

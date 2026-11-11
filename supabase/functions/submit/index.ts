@@ -519,6 +519,26 @@ async function handleSuggestion(payload, ipHash, tooMany) {
   return json({ id: saved.id, suggestion: true });
 }
 
+async function isCuratorAuth(authHeader: string): Promise<boolean> {
+  if (!/^Bearer\s+\S+$/i.test(authHeader)) return false;
+  try {
+    const ur = await fetch(`${SB_URL}/auth/v1/user`, {
+      headers: { apikey: SB_KEY, Authorization: authHeader },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!ur.ok) return false;
+    const u = await ur.json();
+    const email = String(u?.email || "").trim().toLowerCase();
+    if (!email || !u?.email_confirmed_at) return false;
+    const ar = await rest("admins?select=email&limit=200");
+    if (!ar.ok) return false;
+    const admins = await ar.json();
+    return Array.isArray(admins) && admins.some((a) => String(a.email || "").trim().toLowerCase() === email);
+  } catch (_e) {
+    return false;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ error: "Use POST." }, 405);
@@ -537,13 +557,17 @@ Deno.serve(async (req) => {
   // Honeypot: real visitors never see or fill this field. Pretend it worked.
   if (String(payload.website || "").trim()) return json({ id: null, score: 0, grade: "Poor" });
 
-  // Shared site login: enforced by the database, so it cannot be skipped from the browser.
-  const acc = await rest("rpc/check_access", {
-    method: "POST",
-    body: JSON.stringify({ p_user: String(payload.access_user || "").slice(0, 100), p_pass: String(payload.access_pass || "").slice(0, 200) }),
-  });
-  if (!acc.ok) return json({ error: "The server could not check your access." }, 500);
-  if ((await acc.json()) !== true) return json({ error: "Sign in to submit an entry." }, 401);
+  // Shared site login or authenticated curator: enforced on the server, so it cannot be skipped from the browser.
+  let allowed = await isCuratorAuth(req.headers.get("authorization") || "");
+  if (!allowed) {
+    const acc = await rest("rpc/check_access", {
+      method: "POST",
+      body: JSON.stringify({ p_user: String(payload.access_user || "").slice(0, 100), p_pass: String(payload.access_pass || "").slice(0, 200) }),
+    });
+    if (!acc.ok) return json({ error: "The server could not check your access." }, 500);
+    allowed = (await acc.json()) === true;
+  }
+  if (!allowed) return json({ error: "Sign in to submit an entry." }, 401);
 
   const salt = Deno.env.get("IP_SALT");
   if (!salt) return json({ error: "The server is not configured." }, 500);

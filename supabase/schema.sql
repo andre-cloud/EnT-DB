@@ -251,6 +251,7 @@ language sql stable security definer
 set search_path = ''
 as $$
   select not exists (select 1 from public.site_access)
+      or (auth.uid() is not null and public.is_admin())
       or exists (
         select 1 from public.site_access s
         where s.username = coalesce(p_user, '')

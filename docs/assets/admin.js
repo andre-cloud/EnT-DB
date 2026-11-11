@@ -1,8 +1,13 @@
-/* TrEnDB review page: curator sign-in with email and password, then review, edit, approve or reject. */
+/* TrEnDB review page: curator sign-in, triage queue, batch/PubChem tools, editor & undoable review. */
 (function () {
   "use strict";
-  var $ = Ent.$, api = Ent.api;
-  var state = { docs: [], sugg: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, selected: {}, search: Ent.newSearch("review") };
+  var $ = Ent.$, el = Ent.el, elT = Ent.elT, api = Ent.api;
+  var state = {
+    docs: [], sugg: [], view: "pending", triage: "",
+    loaded: false, refreshing: false, loadErr: "", lastSync: null,
+    busy: {}, drafts: {}, selected: {}, activeId: "",
+    search: Ent.newSearch("review")
+  };
   var dupCache = {};   /* pending id -> duplicates result, recomputed on every load */
   function approvedDocs() { return state.docs.filter(function (d) { return d.status === "approved"; }); }
   function pendingDocs() { return state.docs.filter(function (d) { return d.status === "pending"; }); }
@@ -15,7 +20,43 @@
   }
 
   function banner(t) { var m = $("adm-msg"); m.hidden = !t; m.textContent = t || ""; }
-  function show(which) { $("login").hidden = which !== "login"; $("panel").hidden = which !== "panel"; $("signout").hidden = which !== "panel"; }
+  function show(which) {
+    $("login").hidden = which !== "login";
+    $("panel").hidden = which !== "panel";
+    $("signout").hidden = which !== "panel";
+    $("kb-help-btn").hidden = which !== "panel";
+    var ce = $("curator-email");
+    if (which === "panel") {
+      var em = api.sessionEmail ? api.sessionEmail() : "";
+      ce.textContent = em; ce.hidden = !em;
+    } else {
+      ce.textContent = ""; ce.hidden = true;
+    }
+  }
+
+  Ent.initTheme("theme-toggle");
+  var toast = Ent.toast;
+
+  /* ---------- Tool log helper ---------- */
+  var toolLogs = [];
+  function addToolLog(msg) {
+    var stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    toolLogs.unshift(stamp + " · " + msg);
+    if (toolLogs.length > 50) toolLogs.length = 50;
+    drawToolLog();
+  }
+  function drawToolLog() {
+    var wrap = $("tool-log-wrap"), ul = $("tool-log");
+    wrap.hidden = !toolLogs.length;
+    $("tool-log-count").textContent = toolLogs.length;
+    ul.replaceChildren.apply(ul, toolLogs.map(function (t) { return el("li", null, t); }));
+  }
+  $("tool-log-clear").addEventListener("click", function () { toolLogs = []; drawToolLog(); });
+
+  function updateToolsBadge() {
+    var n = (pendingImport.length ? 1 : 0) + ((nameFix().length || namePc().length) ? 1 : 0) + (casTodo().length ? 1 : 0);
+    var b = $("n-tools"); b.textContent = n; b.hidden = !n;
+  }
 
   function onPatch(id, patch) {
     state.busy[id] = true; render();
@@ -23,11 +64,89 @@
       delete state.busy[id];
       if (rows && rows[0]) { state.docs = state.docs.map(function (d) { return d.id === id ? rows[0] : d; }); dupCache = {}; }
       else state.busy[id] = "err";               /* no row returned: not allowed or gone */
-      render(); return !!(rows && rows[0]);
+      render(); drawCas(); drawNames(); return !!(rows && rows[0]);
     }, function (err) {
-      if (err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
+      if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
       state.busy[id] = "err"; render(); return false;
     });
+  }
+
+  /* ---------- Triage pills & suggestion filtering ---------- */
+  var TRIAGE_PRED = {
+    dup: function (d) { var x = dupOf(d); return !!(x && x.flag); },
+    unchecked: function (d) { return !d.smiles_checked; },
+    nocas: function (d) { return !d.cas; },
+    verify: function (d) { return d.verify_level === "abstract" || d.verify_level === "secondaria"; },
+    form: function (d) { return d.source_kind === "form"; },
+    low: function (d) { return d.score != null && Number(d.score) < 50; }
+  };
+  function updateTriageBar(inView) {
+    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0 };
+    inView.forEach(function (d) {
+      Object.keys(TRIAGE_PRED).forEach(function (k) { if (TRIAGE_PRED[k](d)) counts[k]++; });
+    });
+    if (state.triage && state.triage !== "" && !counts[state.triage]) state.triage = "";
+    Array.prototype.forEach.call($("triage-bar").querySelectorAll(".pill"), function (btn) {
+      var k = btn.getAttribute("data-triage"), cnt = counts[k] || 0;
+      var badge = btn.querySelector(".n"); if (badge) badge.textContent = cnt;
+      btn.hidden = k !== "" && cnt === 0 && state.triage !== k;
+      btn.setAttribute("aria-pressed", String(state.triage === k));
+    });
+  }
+  $("triage-bar").addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest(".pill") : null;
+    if (!btn) return;
+    state.triage = btn.getAttribute("data-triage") || "";
+    state.search.pager.shown = 0;
+    render();
+  });
+
+  function filterSuggestions(byId) {
+    if (state.view !== "pending" || !state.sugg.length) return [];
+    if (state.triage && state.triage !== "sugg") return [];
+    var st = state.search, q = st.q.trim().toLowerCase();
+    var out = state.sugg.filter(function (sg) {
+      var entry = byId[sg.entry_id] || null;
+      if (st.origin && (!entry || entry.origin !== st.origin)) return false;
+      if (st.cas && (!entry || String(entry.cas || "").indexOf(st.cas) !== 0)) return false;
+      if (st.role && (!entry || (entry.role !== st.role && entry.role !== "both"))) return false;
+      if (st.cls && (!entry || (entry.cls || "") !== st.cls)) return false;
+      if (q) {
+        var hay = [entry && entry.name, entry && entry.cas, entry && entry.smiles, entry && entry.doi, sg.comment, sg.submitted_by, JSON.stringify(sg.changes || {})]
+          .filter(Boolean).join(" ").toLowerCase();
+        if (hay.indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+    if (st.sort === "received-desc") {
+      out.sort(function (a, b) { return (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0); });
+    }
+    return out;
+  }
+
+  function setFocusCard(id, scrollIntoView) {
+    state.activeId = id || "";
+    Array.prototype.forEach.call($("list").children, function (node) {
+      if (!node.getAttribute) return;
+      var hit = node.getAttribute("data-id") === state.activeId;
+      node.classList.toggle("kb-focus", hit);
+      if (hit && scrollIntoView && node.scrollIntoView) node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }
+
+  var lastOrderIds = [];
+  function syncActiveAfterRender(rows) {
+    var nextIds = rows.map(function (d) { return d.id; });
+    if (state.activeId && nextIds.indexOf(state.activeId) < 0) {
+      var oldIdx = lastOrderIds.indexOf(state.activeId), picked = "";
+      if (oldIdx >= 0) {
+        var inNext = {}; nextIds.forEach(function (id) { inNext[id] = 1; });
+        for (var i = oldIdx + 1; i < lastOrderIds.length; i++) if (inNext[lastOrderIds[i]]) { picked = lastOrderIds[i]; break; }
+        if (!picked) for (var j = oldIdx - 1; j >= 0; j--) if (inNext[lastOrderIds[j]]) { picked = lastOrderIds[j]; break; }
+      }
+      state.activeId = picked;
+    }
+    lastOrderIds = nextIds;
   }
 
   function render() {
@@ -36,29 +155,65 @@
     ["pending", "approved", "rejected"].forEach(function (k) {
       $("n-" + k).textContent = counts[k]; $("tab-" + k).setAttribute("aria-selected", String(state.view === k));
     });
-    var list = $("list"), status = $("status");
+    var list = $("list"), status = $("status"), rel = $("reload");
+    rel.disabled = state.refreshing;
+    rel.textContent = state.refreshing ? "Refreshing…" : "Refresh";
+    $("last-sync").textContent = state.lastSync ? ("Synced " + state.lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) : "";
     $("up-pick").disabled = !state.loaded;
     if (!state.loaded) { status.hidden = false; status.textContent = state.loadErr || "Loading…"; list.replaceChildren(); drawBulk([]); return; }
+
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
     Ent.fillClasses(inView, state.search);   /* only the classes present in this tab */
+    updateTriageBar(inView);
+
     var res = Ent.filterRows(inView, state.search);
-    if (state.view === "pending" && state.search.sort === "review") res.rows = clusterDuplicates(res.rows);
+    if (state.triage === "sugg") res.rows = [];
+    else if (state.triage && TRIAGE_PRED[state.triage]) res.rows = res.rows.filter(TRIAGE_PRED[state.triage]);
+
+    var clusterTags = {};
+    if (state.view === "pending" && state.search.sort === "review") {
+      var cl = clusterDuplicates(res.rows);
+      res.rows = cl.rows;
+      clusterTags = cl.tags;
+    }
+    syncActiveAfterRender(res.rows);
+
+    var byId = {}; state.docs.forEach(function (d) { byId[d.id] = d; });
+    var shownSugg = res.err ? [] : filterSuggestions(byId);
+
     Ent.searchInfo(res, inView.length);
+    if (!res.err && shownSugg.length) {
+      var info = $("ss-info");
+      info.textContent = shownSugg.length + " correction" + (shownSugg.length === 1 ? "" : "s") +
+        (res.rows.length ? " + " + res.rows.length + " of " + inView.length + " entries" : "") + " shown.";
+    }
+
     Ent.drawList(list, res.rows, function (d) {
-      return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim", dup: dupOf(d),
-        admin: { busy: state.busy, drafts: state.drafts, onPatch: onPatch, approve: approve,
-                 selected: state.selected, onSelect: onSelect, onDelete: confirmDelete } });
+      return Ent.card(d, {
+        scores: res.scores, simMode: state.search.ss.mode === "sim", dup: dupOf(d),
+        clusterTag: clusterTags[d.id] || "",
+        admin: {
+          busy: state.busy, drafts: state.drafts, activeId: state.activeId,
+          onFocusCard: function (id) { setFocusCard(id, false); },
+          onPatch: onPatch, approve: approve, reject: reject,
+          selected: state.selected, onSelect: onSelect, onDelete: confirmDelete
+        }
+      });
     }, state.search.pager, render);
-    /* corrections proposed by readers come first in the queue */
-    if (state.view === "pending" && state.sugg.length) {
-      var byId = {}; state.docs.forEach(function (d) { byId[d.id] = d; });
-      var cards = state.sugg.map(function (sg) { return Ent.suggestionCard(sg, byId[sg.entry_id] || null, { busy: state.busy, approve: approveSuggestion, reject: rejectSuggestion }); });
+
+    if (shownSugg.length) {
+      var cards = shownSugg.map(function (sg) {
+        return Ent.suggestionCard(sg, byId[sg.entry_id] || null, {
+          busy: state.busy, approve: approveSuggestion, reject: rejectSuggestion, edit: editSuggestion
+        });
+      });
       list.prepend.apply(list, cards);
     }
+
     drawBulk(res.err ? [] : res.rows);   /* never offer bulk approval when the search failed */
-    status.hidden = res.rows.length > 0 || (state.view === "pending" && state.sugg.length > 0);
-    if (!res.rows.length) {
-      status.textContent = inView.length ? "No entry matches the current search and filters."
+    status.hidden = res.rows.length > 0 || shownSugg.length > 0;
+    if (!res.rows.length && !shownSugg.length) {
+      status.textContent = (inView.length || state.sugg.length) ? "No entry matches the current search and filters."
         : state.view === "pending" ? "The queue is empty." : state.view === "approved" ? "Nothing approved yet." : "Nothing rejected.";
     }
   }
@@ -75,44 +230,117 @@
     });
     var groups = {}, order = [];
     rows.forEach(function (d) { var r = find(d.id); if (!groups[r]) { groups[r] = []; order.push(r); } groups[r].push(d); });
-    return order.reduce(function (out, r) { return out.concat(groups[r]); }, []);
+    var out = [], tags = {}, gNum = 0;
+    order.forEach(function (r) {
+      var grp = groups[r];
+      if (grp.length > 1) { gNum++; tags[grp[0].id] = "Queue duplicate group #" + gNum + " · " + grp.length + " entries"; }
+      out = out.concat(grp);
+    });
+    return { rows: out, tags: tags };
   }
 
-  /* ---------- approving one entry: duplicates must be resolved first ---------- */
+  /* ---------- approving / rejecting single entries with Undo ---------- */
+  function undoEntry(id, prev, extraRestore) {
+    var tasks = [onPatch(id, prev)];
+    if (extraRestore) tasks.push(onPatch(extraRestore.id, extraRestore.patch));
+    return Promise.all(tasks).then(function (okList) {
+      if (okList.every(Boolean)) toast("Restored previous status.");
+      else toast("Could not undo completely; check the Rejected/Approved tab.");
+    });
+  }
+
+  function reject(d, note) {
+    var prev = { status: d.status, decided_at: d.decided_at || null, note: d.note || null };
+    return onPatch(d.id, { status: "rejected", decided_at: new Date().toISOString(), note: note }).then(function (ok) {
+      if (ok && prev.status === "pending") {
+        toast("Rejected “" + (d.name || "entry") + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+      }
+      return ok;
+    });
+  }
+
+  function buildDupComparison(d, existing) {
+    var tbl = el("table", "cmp"), thead = el("thead"), hr = el("tr");
+    ["Field", "Queue (new)", "Database (existing)"].forEach(function (x) { hr.appendChild(el("th", null, x)); });
+    thead.appendChild(hr); tbl.appendChild(thead);
+    var tbody = el("tbody");
+    var rows = [
+      ["Name", d.name || "—", existing.name || "—"],
+      ["E_T (kcal/mol)", Ent.fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : ""), Ent.fmt(Number(existing.et_kcal), 1) + (existing.et_unc ? " ± " + existing.et_unc : "")],
+      ["Origin", d.origin === "calc" ? "Computed" : "Experimental", existing.origin === "calc" ? "Computed" : "Experimental"],
+      ["Value type", d.et_type || "—", existing.et_type || "—"],
+      ["Method", d.method || "—", existing.method || "—"],
+      ["Conditions", d.conditions || "—", existing.conditions || "—"],
+      ["DOI", d.doi || "—", existing.doi || "—"],
+      ["Citation", d.citation || "—", existing.citation || "—"],
+      ["Verbatim", d.quote || "—", existing.quote || "—"],
+      ["Score", d.score != null ? String(d.score) : "—", existing.score != null ? String(existing.score) : "—"]
+    ];
+    rows.forEach(function (r) {
+      var tr = el("tr", r[1] !== r[2] ? "differs" : null);
+      tr.appendChild(elT("th", null, r[0]));
+      tr.appendChild(el("td", null, r[1]));
+      tr.appendChild(el("td", null, r[2]));
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    return tbl;
+  }
+
   function approve(d, note) {
     var dup = dupOf(d), now = new Date().toISOString();
-    /* a different value for a known molecule is simply added: it appears beside the others on the molecule's card */
-    if (!dup || !dup.dbSame.length) return onPatch(d.id, { status: "approved", decided_at: now, note: note });
+    var prev = { status: d.status, decided_at: d.decided_at || null, note: d.note || null };
+    if (!dup || !dup.dbSame.length) {
+      return onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok) {
+        if (ok && prev.status === "pending") {
+          toast("Approved “" + (d.name || "entry") + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+        }
+        return ok;
+      });
+    }
     return new Promise(function (resolve) {
       Ent.dialog("Possible duplicate: " + (d.name || ""), function (box) {
-        box.appendChild(Ent.el("p", null, "The same value for this molecule is already in the database. To add the new entry, the existing one is overwritten. Choose the entry to overwrite:"));
-        var opts = Ent.el("div", "stack");
+        box.appendChild(el("p", null, "The same value for this molecule is already in the database. Compare the fields and choose which entry to keep:"));
+        var opts = el("div", "stack"), cmpWrap = el("div", "diff-table-wrap");
+        function drawCmp(entry) { cmpWrap.replaceChildren(buildDupComparison(d, entry)); }
         dup.dbSame.forEach(function (m, i) {
-          var lab = Ent.el("label", "check"), r = Ent.el("input"); r.type = "radio"; r.name = "dup-target"; r.value = m.entry.id; r.checked = i === 0;
+          var lab = el("label", "check"), r = el("input"); r.type = "radio"; r.name = "dup-target"; r.value = m.entry.id; r.checked = i === 0;
+          r.addEventListener("change", function () { if (r.checked) drawCmp(m.entry); });
           lab.appendChild(r);
           lab.appendChild(document.createTextNode(m.entry.name + " · " + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol · " +
             (m.entry.origin === "calc" ? "computed" : "experimental") + (m.entry.doi ? " · " + m.entry.doi : "") + " (" + m.why + ")"));
           opts.appendChild(lab);
         });
         box.appendChild(opts);
-        box.appendChild(Ent.el("p", "hint", "The overwritten entry moves to the Rejected tab with a note, so it can be restored. Use “Keep both” only if they are in fact different data; both values then appear on the same molecule card."));
-        var err = Ent.el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
-        var act = Ent.el("div", "actions");
-        var ow = Ent.el("button", "btn primary", "Overwrite the selected entry"), keep = Ent.el("button", "btn", "Keep both"), cancel = Ent.el("button", "btn", "Cancel");
+        drawCmp(dup.dbSame[0].entry);
+        box.appendChild(cmpWrap);
+        box.appendChild(el("p", "hint", "The overwritten entry moves to the Rejected tab with a note, so it can be restored. Use “Keep both” only if they represent distinct data."));
+        var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
+        var act = el("div", "actions");
+        var ow = el("button", "btn primary", "Overwrite the selected entry"), keep = el("button", "btn", "Keep both"), cancel = el("button", "btn", "Cancel");
         [ow, keep, cancel].forEach(function (b) { b.type = "button"; act.appendChild(b); });
         box.appendChild(act);
         cancel.addEventListener("click", function () { Ent.closeDialog(); resolve(false); });
         keep.addEventListener("click", function () {
-          Ent.closeDialog(); onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(resolve);
+          Ent.closeDialog();
+          onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok) {
+            if (ok && prev.status === "pending") toast("Approved (kept both)", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+            resolve(ok);
+          });
         });
         ow.addEventListener("click", function () {
           var pick = box.querySelector('input[name="dup-target"]:checked'); if (!pick) return;
           var old = state.docs.filter(function (x) { return x.id === pick.value; })[0];
+          var oldPrev = { id: old.id, patch: { status: old.status, decided_at: old.decided_at || null, note: old.note || null } };
           ow.disabled = keep.disabled = true;
           onPatch(old.id, { status: "rejected", decided_at: now, note: "Overwritten by “" + (d.name || "") + "” (" + now.slice(0, 10) + ")" + (old.note ? ". " + old.note : "") })
             .then(function (ok) {
               if (!ok) { ow.disabled = keep.disabled = false; err.textContent = "The existing entry could not be removed. Nothing was changed."; err.hidden = false; return; }
-              Ent.closeDialog(); onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(resolve);
+              Ent.closeDialog();
+              onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok2) {
+                if (ok2) toast("Approved & overwrote duplicate", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev, oldPrev); } });
+                resolve(ok2);
+              });
             });
         });
       });
@@ -120,7 +348,7 @@
   }
 
   /* ---------- corrections from readers ---------- */
-  function approveSuggestion(sg) {
+  function approveSuggestion(sg, note) {
     var entry = state.docs.filter(function (d) { return d.id === sg.entry_id; })[0]; if (!entry) return;
     var patch = {}, ch = sg.changes || {};
     Object.keys(ch).forEach(function (k) {
@@ -137,22 +365,52 @@
     apply.then(function (rows) {
       if (!rows || !rows[0]) throw new Error("not saved");
       state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
-      return api.adminPatchSuggestion(sg.id, { status: "approved", decided_at: new Date().toISOString() });
+      return api.adminPatchSuggestion(sg.id, { status: "approved", decided_at: new Date().toISOString(), note: note || null });
     }).then(function () {
       delete state.busy[sg.id]; state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; }); render();
+      toast("Applied correction to “" + (entry.name || "entry") + "”");
     }, function (err) {
       if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
       state.busy[sg.id] = "err"; render();
     });
   }
-  function rejectSuggestion(sg) {
+
+  function editSuggestion(sg, entry, note) {
+    Ent.editor.open(entry, function (patch) {
+      return api.adminPatch(entry.id, patch).then(function (rows) {
+        if (!rows || !rows[0]) return false;
+        state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
+        return api.adminPatchSuggestion(sg.id, { status: "approved", decided_at: new Date().toISOString(), note: note || null })
+          .then(function () {
+            state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; });
+            render();
+            toast("Saved edits & approved correction");
+            return true;
+          }, function () { render(); return false; });
+      }, function (err) {
+        if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
+        return false;
+      });
+    }, { title: "Review suggestion · " + (entry.name || ""), saveLabel: "Save & approve suggestion", overrides: sg.changes || {} });
+  }
+
+  function rejectSuggestion(sg, note) {
+    var prevSugg = sg;
     state.busy[sg.id] = true; render();
-    api.adminPatchSuggestion(sg.id, { status: "rejected", decided_at: new Date().toISOString() }).then(function () {
+    api.adminPatchSuggestion(sg.id, { status: "rejected", decided_at: new Date().toISOString(), note: note || null }).then(function () {
       delete state.busy[sg.id]; state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; }); render();
+      toast("Correction rejected", {
+        actionLabel: "Undo",
+        onAction: function () {
+          return api.adminPatchSuggestion(prevSugg.id, { status: "pending", decided_at: null, note: prevSugg.note || null }).then(function (rows) {
+            state.sugg.unshift((rows && rows[0]) || prevSugg);
+            render();
+          }, function () { toast("Could not undo rejection."); });
+        }
+      });
     }, function () { state.busy[sg.id] = "err"; render(); });
   }
 
-  /* ---------- approve everything the current filters show (duplicates excluded) ---------- */
   /* ---------- selection: approve, reject, re-queue or delete several entries at once ---------- */
   var listed = [];   /* entries shown under the current tab, search and filters */
   function onSelect(id, on) { if (on) state.selected[id] = true; else delete state.selected[id]; drawSel(); }
@@ -164,8 +422,14 @@
   function drawBulk(rows) { listed = rows || []; drawSel(); }
   function drawSel() {
     var sel = selectedDocs(), n = sel.length, v = state.view;
-    $("sel-n").textContent = n + " selected";
-    $("sel-all").hidden = !listed.length; $("sel-all").textContent = "Select all " + listed.length + " listed";
+    var shownLimit = state.search.pager.shown || 50;
+    var dupSkip = v === "pending" ? sel.filter(function (d) { var x = dupOf(d); return x && x.flag; }).length : 0;
+    $("sel-n").textContent = n + " selected" + (dupSkip ? " (" + dupSkip + " duplicate" + (dupSkip === 1 ? "" : "s") + ")" : "");
+    var splitVisible = listed.length > shownLimit;
+    $("sel-visible").hidden = !splitVisible;
+    if (splitVisible) $("sel-visible").textContent = "Select " + shownLimit + " visible";
+    $("sel-all").hidden = !listed.length;
+    $("sel-all").textContent = "Select all " + listed.length + " listed";
     $("sel-none").hidden = !n;
     $("sel-approve").hidden = !n || v === "approved";
     $("sel-reject").hidden = !n || v === "rejected";
@@ -174,21 +438,28 @@
     $("selbar").hidden = !state.loaded || (!listed.length && !n);
   }
   function clearSel() { state.selected = {}; }
+  $("sel-visible").addEventListener("click", function () {
+    var shownLimit = state.search.pager.shown || 50;
+    listed.slice(0, shownLimit).forEach(function (d) { state.selected[d.id] = true; });
+    render();
+  });
   $("sel-all").addEventListener("click", function () { listed.forEach(function (d) { state.selected[d.id] = true; }); render(); });
   $("sel-none").addEventListener("click", function () { clearSel(); render(); });
-  function bulkError(t) { $("bulk-err").textContent = t; $("bulk-err").hidden = false; }
+  function bulkError(t) { $("bulk-err").textContent = t; $("bulk-err").hidden = !t; }
   function runPatch(docs, patch, verb) {
-    $("bulk-err").hidden = true;
+    bulkError("");
     var ids = docs.map(function (d) { return d.id; });
     return api.adminPatchMany(ids, patch).then(function (n) {
-      clearSel(); if (n < ids.length) bulkError((ids.length - n) + " of " + ids.length + " entries could not be " + verb + ".");
-      load();
-    }, function () { bulkError("Not all entries could be " + verb + ". Refresh to see which ones went through."); load(); });
+      clearSel();
+      if (n < ids.length) bulkError((ids.length - n) + " of " + ids.length + " entries could not be " + verb + ".");
+      else toast(n + " " + (n === 1 ? "entry " : "entries ") + verb + ".");
+      return load({ silent: true });
+    }, function () { bulkError("Not all entries could be " + verb + ". Refresh to see which ones went through."); return load({ silent: true }); });
   }
   function askThen(title, text, label, cls, go) {
     Ent.dialog(title, function (box) {
-      box.appendChild(Ent.el("p", null, text));
-      var act = Ent.el("div", "actions"), ok = Ent.el("button", "btn " + cls, label), no = Ent.el("button", "btn", "Cancel");
+      box.appendChild(el("p", null, text));
+      var act = el("div", "actions"), ok = el("button", "btn " + cls, label), no = el("button", "btn", "Cancel");
       ok.type = no.type = "button"; act.appendChild(ok); act.appendChild(no); box.appendChild(act);
       no.addEventListener("click", Ent.closeDialog);
       ok.addEventListener("click", function () { ok.disabled = true; Ent.closeDialog(); go(); });
@@ -218,21 +489,21 @@
     runPatch(sel, { status: "pending", decided_at: null }, "moved back to the queue");
   });
   $("sel-delete").addEventListener("click", function () { confirmDelete(selectedDocs()); });
-  /* Permanent deletion: only rejected entries, always after a confirmation that says it cannot be undone. */
   function confirmDelete(docs) {
     docs = docs.filter(function (d) { return d.status === "rejected"; });
     if (!docs.length) return;
     var what = docs.length === 1 ? "“" + (docs[0].name || "this entry") + "”" : docs.length + " rejected entries";
     askThen("Delete " + what + " permanently?", (docs.length === 1 ? "This removes it" : "This removes them") + " from the database for good, together with any corrections suggested for " + (docs.length === 1 ? "it" : "them") + ". It cannot be undone.",
       "Delete permanently", "danger primary", function () {
-        $("bulk-err").hidden = true;
+        bulkError("");
         api.adminDeleteMany(docs.map(function (d) { return d.id; })).then(function (n) {
           docs.forEach(function (d) { delete state.selected[d.id]; });
           if (n < docs.length) bulkError((docs.length - n) + " of " + docs.length + " entries could not be deleted.");
-          load();
+          else toast("Deleted " + n + (n === 1 ? " entry." : " entries."));
+          load({ silent: true });
         }, function (e) {
           if (e && e.status === 401) { signedOut("Your session ended. Sign in again."); return; }
-          bulkError("The entries could not be deleted. Try again."); load();
+          bulkError("The entries could not be deleted. Try again."); load({ silent: true });
         });
       });
   }
@@ -270,69 +541,88 @@
       drawNames();
       $("imp").hidden = !pendingImport.length;
       $("imp-text").textContent = pendingImport.length + " new literature entries are ready to add to the queue.";
-    }, function () { $("imp").hidden = true; });   /* no batches published: nothing to offer */
+      updateToolsBadge();
+    }, function () { $("imp").hidden = true; updateToolsBadge(); });
   }
   $("imp-go").addEventListener("click", function () {
     var rows = toImportRows(pendingImport);
     $("imp-go").disabled = true; $("imp-text").textContent = "Importing " + rows.length + " entries…";
-    api.adminImport(rows).then(function () { $("imp-go").disabled = false; $("imp").hidden = true; load(); },
-      function (err) {
-        $("imp-go").disabled = false;
-        $("imp-text").textContent = "The import stopped: " + (err.message || "unknown error") + ". Entries already added are kept; press the button to continue.";
-        load();
-      });
+    api.adminImport(rows).then(function () {
+      $("imp-go").disabled = false; $("imp").hidden = true;
+      addToolLog("Imported " + rows.length + " literature batch entries.");
+      toast("Imported " + rows.length + " literature entries.");
+      load({ silent: true });
+    }, function (err) {
+      $("imp-go").disabled = false;
+      $("imp-text").textContent = "The import stopped: " + (err.message || "unknown error") + ". Entries already added are kept; press the button to continue.";
+      load({ silent: true });
+    });
   });
 
   var uploadRows = [];
-  function resetUpload(msg, isErr) {
+  function showUploadErrors(errs) {
+    var box = $("up-err");
+    box.replaceChildren();
+    if (!errs || !errs.length) { box.hidden = true; return; }
+    box.hidden = false;
+    if (errs.length === 1) { box.textContent = errs[0]; return; }
+    box.appendChild(el("span", null, errs.length >= 10 ? "First 10 validation issues:" : errs.length + " validation issues:"));
+    var ul = el("ul", "err-list");
+    errs.slice(0, 10).forEach(function (msg) { ul.appendChild(el("li", null, msg)); });
+    box.appendChild(ul);
+  }
+  function resetUpload(msg, errs) {
     uploadRows = [];
     $("up-file").value = "";
     $("up-go").hidden = true; $("up-go").disabled = false;
     $("up-clear").hidden = true;
-    $("up-err").hidden = !isErr; $("up-err").textContent = isErr ? msg : "";
-    $("up-info").textContent = (!isErr && msg) ? msg : "Import a batch JSON generated by trendb-extract directly into the review queue.";
+    showUploadErrors(Array.isArray(errs) ? errs : (errs ? [errs] : []));
+    $("up-info").textContent = (!errs && msg) ? msg : "Import entries directly into the review queue.";
   }
   function parseAndValidateUpload(raw, fileName) {
-    if (!Array.isArray(raw) || !raw.length) return { err: "The JSON file must be a non-empty array of entry objects." };
+    if (!Array.isArray(raw) || !raw.length) return { errs: ["The JSON file must be a non-empty array of entry objects."] };
     var slug = String(fileName || "upload").replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 40) || "upload";
     var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
-    var valid = [], skipped = 0, usedKeys = {};
+    var valid = [], errs = [], skipped = 0, usedKeys = {};
     for (var i = 0; i < raw.length; i++) {
-      var r = raw[i];
-      if (!r || typeof r !== "object" || Array.isArray(r)) return { err: "Row " + (i + 1) + " is not an object." };
+      var r = raw[i], rowErr = "";
+      if (!r || typeof r !== "object" || Array.isArray(r)) { errs.push("Row " + (i + 1) + " is not an object."); if (errs.length >= 10) break; continue; }
       var tag = r.import_key || ("row " + (i + 1));
       var keys = Object.keys(r);
       for (var ki = 0; ki < keys.length; ki++) {
         var v = r[keys[ki]];
-        if (typeof v === "string" && /https?:\/\//i.test(v)) return { err: tag + " (" + keys[ki] + "): contains a web link; only DOIs are allowed." };
+        if (typeof v === "string" && /https?:\/\//i.test(v)) { rowErr = tag + " (" + keys[ki] + "): contains a web link; only DOIs are allowed."; break; }
       }
       var name = String(r.name || "").trim(), smi = String(r.smiles || "").trim();
-      if (!name) return { err: tag + ": name is required." };
-      if (!smi) return { err: tag + ": smiles is required." };
-      if (Ent.structureOk(smi) === false) return { err: tag + ": SMILES could not be read." };
+      if (!rowErr && !name) rowErr = tag + ": name is required.";
+      if (!rowErr && !smi) rowErr = tag + ": smiles is required.";
+      if (!rowErr && Ent.structureOk(smi) === false) rowErr = tag + ": SMILES could not be read.";
       var et = Number(r.et_kcal);
-      if (!isFinite(et) || et <= 0 || et > EntScore.ET_MAX) return { err: tag + ": et_kcal must be between 0 and " + EntScore.ET_MAX + "." };
-      if (r.origin !== "exp" && r.origin !== "calc") return { err: tag + ": origin must be \"exp\" or \"calc\"." };
+      if (!rowErr && (!isFinite(et) || et <= 0 || et > EntScore.ET_MAX)) rowErr = tag + ": et_kcal must be between 0 and " + EntScore.ET_MAX + ".";
+      if (!rowErr && r.origin !== "exp" && r.origin !== "calc") rowErr = tag + ": origin must be \"exp\" or \"calc\".";
       var doi = r.doi ? EntScore.cleanDoi(r.doi) : null;
-      if (doi && !EntScore.isDoi(doi)) return { err: tag + ": \"" + r.doi + "\" is not a valid DOI." };
+      if (!rowErr && doi && !EntScore.isDoi(doi)) rowErr = tag + ": \"" + r.doi + "\" is not a valid DOI.";
       var cas = r.cas ? EntScore.cleanCas(r.cas) : null;
-      if (cas && !EntScore.casValid(cas)) return { err: tag + ": \"" + r.cas + "\" is not a valid CAS number." };
-      if (r.uv_lmax != null && (!(typeof r.uv_lmax === "number" && Math.floor(r.uv_lmax) === r.uv_lmax && r.uv_lmax >= 100 && r.uv_lmax <= 1500))) {
-        return { err: tag + ": uv_lmax must be an integer between 100 and 1500." };
+      if (!rowErr && cas && !EntScore.casValid(cas)) rowErr = tag + ": \"" + r.cas + "\" is not a valid CAS number.";
+      if (!rowErr && r.uv_lmax != null && (!(typeof r.uv_lmax === "number" && Math.floor(r.uv_lmax) === r.uv_lmax && r.uv_lmax >= 100 && r.uv_lmax <= 1500))) {
+        rowErr = tag + ": uv_lmax must be an integer between 100 and 1500.";
       }
-      if (r.uv_eps != null && (!(typeof r.uv_eps === "number" && Math.floor(r.uv_eps) === r.uv_eps && r.uv_eps >= 0))) {
-        return { err: tag + ": uv_eps must be a non-negative integer." };
+      if (!rowErr && r.uv_eps != null && (!(typeof r.uv_eps === "number" && Math.floor(r.uv_eps) === r.uv_eps && r.uv_eps >= 0))) {
+        rowErr = tag + ": uv_eps must be a non-negative integer.";
       }
-      if (r.direct_exc != null) {
-        if (typeof r.direct_exc !== "object" || Array.isArray(r.direct_exc)) return { err: tag + ": direct_exc must be an object." };
-        var dkeys = Object.keys(r.direct_exc);
-        for (var di = 0; di < dkeys.length; di++) {
-          var dv = r.direct_exc[dkeys[di]];
-          if (!dkeys[di].trim() || typeof dv !== "number" || Math.floor(dv) !== dv || dv < 100 || dv > 1500) {
-            return { err: tag + ": direct_exc values must be integers between 100 and 1500." };
+      if (!rowErr && r.direct_exc != null) {
+        if (typeof r.direct_exc !== "object" || Array.isArray(r.direct_exc)) rowErr = tag + ": direct_exc must be an object.";
+        else {
+          var dkeys = Object.keys(r.direct_exc);
+          for (var di = 0; di < dkeys.length; di++) {
+            var dv = r.direct_exc[dkeys[di]];
+            if (!dkeys[di].trim() || typeof dv !== "number" || Math.floor(dv) !== dv || dv < 100 || dv > 1500) {
+              rowErr = tag + ": direct_exc values must be integers between 100 and 1500."; break;
+            }
           }
         }
       }
+      if (rowErr) { errs.push(rowErr); if (errs.length >= 10) break; continue; }
       var ik = r.import_key ? String(r.import_key).trim() : ("json:" + slug + ":" + (i + 1));
       if (have[ik] || usedKeys[ik]) { skipped++; continue; }
       usedKeys[ik] = 1;
@@ -352,20 +642,17 @@
       }
       valid.push(copy);
     }
-    return { rows: valid, skipped: skipped };
+    return errs.length ? { errs: errs } : { rows: valid, skipped: skipped };
   }
-  $("up-pick").addEventListener("click", function () { $("up-file").click(); });
-  $("up-clear").addEventListener("click", function () { resetUpload(); });
-  $("up-file").addEventListener("change", function (e) {
-    var file = e.target.files && e.target.files[0];
+  function handleUploadFile(file) {
     if (!file) return;
     file.text().then(function (txt) {
       var parsed;
-      try { parsed = JSON.parse(txt); } catch (err) { resetUpload("Could not parse JSON: " + err.message, true); return; }
+      try { parsed = JSON.parse(txt); } catch (err) { resetUpload(null, ["Could not parse JSON: " + err.message]); return; }
       var res = parseAndValidateUpload(parsed, file.name);
-      if (res.err) { resetUpload(res.err, true); return; }
+      if (res.errs) { resetUpload(null, res.errs); return; }
       uploadRows = res.rows;
-      $("up-err").hidden = true; $("up-err").textContent = "";
+      showUploadErrors([]);
       $("up-clear").hidden = false;
       if (!uploadRows.length) {
         $("up-go").hidden = true;
@@ -376,7 +663,22 @@
       $("up-go").textContent = "Import " + uploadRows.length + (uploadRows.length === 1 ? " entry" : " entries");
       $("up-info").textContent = file.name + ": " + uploadRows.length + " ready to import" +
         (res.skipped ? " (" + res.skipped + " already in the database skipped)" : "") + ".";
-    }, function () { resetUpload("Could not read the selected file.", true); });
+    }, function () { resetUpload(null, ["Could not read the selected file."]); });
+  }
+  $("up-pick").addEventListener("click", function () { $("up-file").click(); });
+  $("up-clear").addEventListener("click", function () { resetUpload(); });
+  $("up-file").addEventListener("change", function (e) { handleUploadFile(e.target.files && e.target.files[0]); });
+  var upDrop = $("up-drop");
+  ["dragenter", "dragover"].forEach(function (ev) {
+    upDrop.addEventListener(ev, function (e) { e.preventDefault(); if (state.loaded) upDrop.classList.add("dragover"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    upDrop.addEventListener(ev, function (e) { e.preventDefault(); upDrop.classList.remove("dragover"); });
+  });
+  upDrop.addEventListener("drop", function (e) {
+    if (!state.loaded) return;
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleUploadFile(f);
   });
   $("up-go").addEventListener("click", function () {
     if (!uploadRows.length) return;
@@ -386,18 +688,18 @@
     api.adminImport(rows).then(function () {
       $("up-pick").disabled = false;
       resetUpload("Imported " + rows.length + (rows.length === 1 ? " entry" : " entries") + " into the review queue.");
-      load();
+      addToolLog("Uploaded " + rows.length + " JSON entries.");
+      toast("Imported " + rows.length + (rows.length === 1 ? " entry." : " entries."));
+      load({ silent: true });
     }, function (err) {
       $("up-go").disabled = false; $("up-pick").disabled = false;
       if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
-      $("up-err").hidden = false;
-      $("up-err").textContent = "The import stopped: " + (err.message || "unknown error") + ". Entries already added are kept; try again.";
-      load();
+      showUploadErrors(["The import stopped: " + (err.message || "unknown error") + ". Entries already added are kept; try again."]);
+      load({ silent: true });
     });
   });
 
-  /* Rows imported without a structure code get one as soon as the structure library is ready,
-     so the server can match later submissions of the same molecule. */
+  /* Backfill OpenChemLib structure codes silently once OCL loads. */
   var backfilled = false;
   function backfill() {
     if (backfilled || !state.loaded || !window.OCL) return;
@@ -406,53 +708,65 @@
       .reduce(function (p, d) { return p.then(function () { return api.adminPatch(d.id, { idcode: Ent.idCode(d.smiles) }).catch(function () {}); }); }, Promise.resolve());
   }
 
-  /* ---------- IUPAC names ----------
-     Entry names are IUPAC names only. The literature batches carry them (checked by hand where PubChem
-     has none): entries whose structure is in a batch take that name in one go; the others can be
-     looked up on PubChem, one request at a time. */
+  /* ---------- Scope-aware IUPAC names & CAS enrichment ---------- */
+  function scopedDocs() {
+    return $("enrich-scope").value === "pending" ? pendingDocs() : state.docs;
+  }
+  $("enrich-scope").addEventListener("change", function () { drawNames(); drawCas(); });
+
   var nameMap = {}, batchRows = [], nameRun = null, nameTried = {};
   function buildNames() { nameMap = {}; batchRows.forEach(function (r) { if (r.smiles && r.name) nameMap[nameKey(r.smiles)] = r.name; }); }
-  /* the same structure written as a different SMILES still matches (structure code, when the library is loaded) */
   function nameKey(smi) { return (window.OCL && Ent.idCode(smi)) || smi; }
   function nameOf(d) { return d.smiles ? nameMap[nameKey(d.smiles)] : ""; }
-  function nameFix() { return state.docs.filter(function (d) { var n = nameOf(d); return n && d.name !== n; }); }
-  function namePc() { return state.docs.filter(function (d) { return d.smiles && !nameOf(d) && !nameTried[d.id]; }); }
+  function nameFix() { return scopedDocs().filter(function (d) { var n = nameOf(d); return n && d.name !== n; }); }
+  function namePc() { return scopedDocs().filter(function (d) { return d.smiles && !nameOf(d) && !nameTried[d.id]; }); }
+  function syncEnrichEmpty() {
+    $("enrich-empty").hidden = !$("iupac").hidden || !$("cas").hidden;
+    updateToolsBadge();
+  }
   function drawNames(msg) {
     if (nameRun) return;
     buildNames();
     var a = nameFix().length, b = namePc().length;
     $("iupac").hidden = !a && !b && !msg;
     $("iupac-go").hidden = !a; $("iupac-pc").hidden = !b; $("iupac-stop").hidden = true;
+    $("iupac-prog").hidden = true;
     $("iupac-text").textContent = (msg ? msg + " " : "") +
-      (a ? a + (a === 1 ? " entry has" : " entries have") + " a name that is not the IUPAC name of its structure. " : "") +
-      (b ? b + " other " + (b === 1 ? "entry" : "entries") + " (not from a literature batch) can be checked against PubChem." : "");
+      (a ? a + (a === 1 ? " entry has" : " entries have") + " a name that differs from the literature batch IUPAC name. " : "") +
+      (b ? b + " other " + (b === 1 ? "entry" : "entries") + " can be checked against PubChem." : "");
+    syncEnrichEmpty();
   }
   $("iupac-go").addEventListener("click", function () {
     var byName = {}; nameFix().forEach(function (d) { var n = nameOf(d); (byName[n] = byName[n] || []).push(d.id); });
     var names = Object.keys(byName), done = 0, fail = 0;
     $("iupac-go").disabled = true; nameRun = {};
+    var prog = $("iupac-prog"); prog.max = Math.max(1, names.length); prog.value = 0; prog.hidden = false;
     names.reduce(function (p, n) {
       return p.then(function () {
         $("iupac-text").textContent = "Renaming… " + done + " / " + names.length + " structures";
-        return api.adminPatchMany(byName[n], { name: n }).then(function () { done++; }, function (e) { fail++; if (e && e.status === 401) throw e; });
+        return api.adminPatchMany(byName[n], { name: n }).then(function () { done++; prog.value = done + fail; }, function (e) { fail++; prog.value = done + fail; if (e && e.status === 401) throw e; });
       });
     }, Promise.resolve()).then(function () {
-      nameRun = null; $("iupac-go").disabled = false;
-      load().then(function () { drawNames(fail ? fail + " structures could not be renamed; try again." : "Names updated."); });
-    }, function () { nameRun = null; $("iupac-go").disabled = false; signedOut("Your session ended. Sign in again."); });
+      nameRun = null; $("iupac-go").disabled = false; prog.hidden = true;
+      addToolLog("Batch IUPAC rename: " + done + " structures updated" + (fail ? ", " + fail + " failed" : "") + ".");
+      load({ silent: true }).then(function () { drawNames(fail ? fail + " structures could not be renamed; try again." : "Names updated."); });
+    }, function () { nameRun = null; $("iupac-go").disabled = false; prog.hidden = true; signedOut("Your session ended. Sign in again."); });
   });
   $("iupac-pc").addEventListener("click", function () {
     var todo = namePc(), run = nameRun = { stop: false, set: 0, same: 0, miss: 0, fail: 0, inRow: 0 };
     $("iupac-go").hidden = $("iupac-pc").hidden = true; $("iupac-stop").hidden = false; $("iupac-stop").disabled = false;
+    var prog = $("iupac-prog"); prog.max = Math.max(1, todo.length); prog.value = 0; prog.hidden = false;
     function finish(why) {
-      nameRun = null; render();
-      drawNames(why + " Renamed " + run.set + ", already IUPAC " + run.same + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") +
-        (run.miss ? ". Entries PubChem does not know need their IUPAC name written in the editor." : "."));
+      nameRun = null; prog.hidden = true; render();
+      var summary = why + " Renamed " + run.set + ", already IUPAC " + run.same + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + ".";
+      addToolLog("PubChem IUPAC: " + summary);
+      drawNames(summary + (run.miss ? " Entries PubChem does not know need their IUPAC name written in the editor." : ""));
     }
     (function step(i) {
       if (run.stop) return finish("Stopped.");
       if (i >= todo.length) return finish("Done.");
       if (run.inRow >= 5) return finish("Stopped after five errors in a row.");
+      prog.value = i;
       $("iupac-text").textContent = "Checking " + (i + 1) + " / " + todo.length + " on PubChem…";
       var d = todo[i], wait = 250;
       Ent.lookupIupac(d.smiles).then(function (n) {
@@ -470,33 +784,36 @@
   });
   $("iupac-stop").addEventListener("click", function () { if (nameRun) { nameRun.stop = true; $("iupac-stop").disabled = true; } });
 
-  /* ---------- CAS numbers looked up on PubChem ---------- */
-  /* One request at a time with a pause, under PubChem's limit of 5 per second.
-     Entries PubChem has no CAS number for are skipped for the rest of this visit. */
   var casRun = null, casMiss = {};
-  function casTodo() { return state.docs.filter(function (d) { return !d.cas && d.smiles && !casMiss[d.id]; }); }
+  function casTodo() { return scopedDocs().filter(function (d) { return !d.cas && d.smiles && !casMiss[d.id]; }); }
   function drawCas() {
     if (casRun) return;
     var n = casTodo().length;
     $("cas").hidden = !n; $("cas-go").hidden = false; $("cas-stop").hidden = true;
+    $("cas-prog").hidden = true;
     $("cas-text").textContent = n + (n === 1 ? " entry has" : " entries have") + " no CAS number. PubChem can fill the ones it knows; check doubtful ones in the editor.";
+    syncEnrichEmpty();
   }
   $("cas-go").addEventListener("click", function () {
     var todo = casTodo(), run = casRun = { stop: false, out: false, found: 0, miss: 0, fail: 0, inRow: 0 };
     $("cas-go").hidden = true; $("cas-stop").hidden = false; $("cas-stop").disabled = false;
+    var prog = $("cas-prog"); prog.max = Math.max(1, todo.length); prog.value = 0; prog.hidden = false;
     function finish(why) {
-      casRun = null;
-      if (run.out) return;   /* signed out meanwhile: the panel is gone */
-      dupCache = {}; render(); drawCas();   /* new CAS numbers change which entries are duplicates */
+      casRun = null; prog.hidden = true;
+      if (run.out) return;
+      dupCache = {}; render(); drawCas();
       var left = casTodo().length;
+      var summary = why + " Filled " + run.found + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + ".";
+      addToolLog("PubChem CAS: " + summary);
       $("cas").hidden = false; $("cas-go").hidden = !left;
-      $("cas-text").textContent = why + " Filled " + run.found + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + "."
-        + (left ? " " + left + " can still be tried." : "");
+      $("cas-text").textContent = summary + (left ? " " + left + " can still be tried." : "");
+      syncEnrichEmpty();
     }
     (function step(i) {
       if (run.stop) return finish("Stopped.");
       if (i >= todo.length) return finish("Done.");
       if (run.inRow >= 5) return finish("Stopped after five errors in a row (PubChem or the database did not answer).");
+      prog.value = i;
       $("cas-text").textContent = "Looking up " + (i + 1) + " / " + todo.length + " · filled " + run.found + " · not on PubChem " + run.miss + (run.fail ? " · failed " + run.fail : "");
       var d = todo[i], wait = 250;
       Ent.lookupCas(d.smiles).then(function (list) {
@@ -508,23 +825,42 @@
         });
       }).catch(function (err) {
         if (err && err.status === 401) { run.stop = run.out = true; signedOut("Your session ended. Sign in again."); return; }
-        run.fail++; run.inRow++; wait = 2000;   /* PubChem busy or offline, or the save failed: back off */
+        run.fail++; run.inRow++; wait = 2000;
       }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
     })(0);
   });
   $("cas-stop").addEventListener("click", function () { if (casRun) { casRun.stop = true; $("cas-stop").disabled = true; } });
 
-  function load() {
-    state.loaded = false; state.loadErr = ""; render();
+  /* ---------- Load, Auth & Drawer ---------- */
+  function load(opts) {
+    opts = opts || {};
+    var silent = !!(opts.silent && state.loaded);
+    if (!silent) state.loaded = false;
+    state.refreshing = true; state.loadErr = "";
+    render();
     return Promise.all([api.adminList(), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
-        state.docs = r[0] || []; state.sugg = r[1] || []; dupCache = {}; state.loaded = true; render(); backfill(); checkBatches(); drawCas();
-      },
-      function (err) {
-        if (err.status === 401) signedOut("Your session ended. Sign in again.");
-        else { state.loadErr = "The entries could not be loaded. Use Refresh to try again."; render(); }
-      });
+      state.docs = r[0] || []; state.sugg = r[1] || [];
+      dupCache = {}; state.loaded = true; state.refreshing = false; state.lastSync = new Date();
+      render(); backfill(); checkBatches(); drawCas();
+    }, function (err) {
+      state.refreshing = false;
+      if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
+      else {
+        if (!silent) state.loadErr = "The entries could not be loaded. Use Refresh to try again.";
+        else toast("Refresh failed. Check your connection.");
+        render();
+      }
+    });
   }
-  function signedOut(msg) { if (casRun) casRun.stop = casRun.out = true; if (nameRun) nameRun.stop = true; $("cas").hidden = true; $("iupac").hidden = true; $("imp").hidden = true; resetUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
+  function signedOut(msg) {
+    if (casRun) casRun.stop = casRun.out = true;
+    if (nameRun) nameRun.stop = true;
+    $("cas").hidden = true; $("iupac").hidden = true; $("imp").hidden = true;
+    $("tools-aside").classList.remove("open");
+    $("toggle-tools").setAttribute("aria-expanded", "false");
+    state.activeId = ""; state.triage = "";
+    resetUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || "");
+  }
 
   function start() {
     if (!api.configured) { show(""); banner("The backend is not configured yet, so there is nothing to review. See the setup steps in the repository README."); return; }
@@ -534,7 +870,6 @@
         if (ok === true) { show("panel"); banner(""); load(); }
         else signedOut("This address is not a curator of this database.");
       }, function (err) {
-        /* A rejected token ends the session; a network problem does not. */
         if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
         else { show(""); banner("The server could not be reached to check your sign-in. Check the connection and reload the page."); }
       });
@@ -556,11 +891,81 @@
     });
   });
   $("signout").addEventListener("click", function (e) { e.preventDefault(); signedOut(""); });
-  $("reload").addEventListener("click", load);
-  ["pending", "approved", "rejected"].forEach(function (k) {
-    $("tab-" + k).addEventListener("click", function () { state.view = k; state.search.pager.shown = 0; clearSel(); render(); });
+  $("reload").addEventListener("click", function () { load({ silent: true }); });
+  $("toggle-tools").addEventListener("click", function () {
+    var aside = $("tools-aside"), open = !aside.classList.contains("open");
+    aside.classList.toggle("open", open);
+    $("toggle-tools").setAttribute("aria-expanded", String(open));
   });
-  /* Changing the search or filters disarms a pending bulk approval: it must cover what was confirmed. */
+  ["pending", "approved", "rejected"].forEach(function (k) {
+    $("tab-" + k).addEventListener("click", function () {
+      state.view = k; state.triage = ""; state.activeId = ""; state.search.pager.shown = 0; clearSel(); render();
+    });
+  });
+
+  /* ---------- Keyboard shortcuts (when no input/modal is active) ---------- */
+  function showShortcuts() {
+    Ent.dialog("Keyboard shortcuts", function (box) {
+      var grid = el("div", "kb-grid");
+      [
+        ["J / K", "Move focus to next / previous card"],
+        ["E", "Open structured editor on focused card"],
+        ["S", "Open sketcher on focused card"],
+        ["V", "Toggle Structure verified on focused card"],
+        ["X", "Select / deselect focused card"],
+        ["A", "Approve focused card"],
+        ["R", "Reject focused card"],
+        ["?", "Show this shortcuts reference"],
+        ["Esc", "Close active dialog or sketcher"]
+      ].forEach(function (pair) {
+        grid.appendChild(el("kbd", null, pair[0]));
+        grid.appendChild(el("span", null, pair[1]));
+      });
+      box.appendChild(grid);
+      var act = el("div", "actions"), ok = el("button", "btn primary", "Close");
+      ok.type = "button"; ok.addEventListener("click", Ent.closeDialog);
+      act.appendChild(ok); box.appendChild(act);
+    });
+  }
+  $("kb-help-btn").addEventListener("click", showShortcuts);
+  document.addEventListener("keydown", function (e) {
+    if ($("panel").hidden || !state.loaded) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var ed = $("ed"), sk = $("sk");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (document.activeElement && document.activeElement.isContentEditable)) return;
+
+    var key = e.key;
+    if (key === "?") { e.preventDefault(); showShortcuts(); return; }
+    var cards = Array.prototype.filter.call($("list").children, function (c) { return c.hasAttribute && c.hasAttribute("data-id"); });
+    if (!cards.length) return;
+    var idx = -1;
+    cards.forEach(function (c, i) { if (c.getAttribute("data-id") === state.activeId) idx = i; });
+    if (key === "j" || key === "J") {
+      e.preventDefault();
+      var next = cards[Math.min(cards.length - 1, idx + 1)];
+      setFocusCard(next.getAttribute("data-id"), true);
+      return;
+    }
+    if (key === "k" || key === "K") {
+      e.preventDefault();
+      var prev = cards[idx <= 0 ? 0 : idx - 1];
+      setFocusCard(prev.getAttribute("data-id"), true);
+      return;
+    }
+    var cur = idx >= 0 ? cards[idx] : null;
+    if (!cur) return;
+    var lk = key.toLowerCase();
+    if (lk === "x") { e.preventDefault(); var sb = cur.querySelector(".selpick input"); if (sb) sb.click(); }
+    else if (lk === "v") { e.preventDefault(); var vb = $("chk-" + cur.getAttribute("data-id")); if (vb) vb.click(); }
+    else if (lk === "s") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Open in sketcher") b.click(); }); }
+    else if (lk === "e") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Edit entry") b.click(); }); }
+    else if (lk === "a") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Approve") b.click(); }); }
+    else if (lk === "r") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Reject") b.click(); }); }
+  });
+
+  $("f-reset").addEventListener("click", function () { state.triage = ""; });
   Ent.bindSearch(state.search, function () { render(); });
   Ent.sketcher.bind();
   Ent.loadOCL(function () { dupCache = {}; if (state.loaded) { render(); drawNames(); } backfill(); });

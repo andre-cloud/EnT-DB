@@ -1,11 +1,76 @@
-/* TrEnDB public page: browse approved entries, search, submit. */
+/* TrEnDB public page: browse approved entries, search, submit, and curator sign-in bridge. */
 (function () {
   "use strict";
   var $ = Ent.$, el = Ent.el, api = Ent.api;
-  var state = { docs: [], view: "db", loaded: false, failed: false, access: null, search: Ent.newSearch() };
+  var state = {
+    docs: [], view: "db", triage: "", loaded: false, failed: false,
+    access: null, isAdmin: false, gated: false, curatorModal: false,
+    search: Ent.newSearch("received-desc")
+  };
   var ACCESS_KEY = "entdb-access";   /* kept for the browser tab only */
   function readAccess() { try { return JSON.parse(sessionStorage.getItem(ACCESS_KEY) || "null"); } catch (e) { return null; } }
   function saveAccess(a) { try { if (a) sessionStorage.setItem(ACCESS_KEY, JSON.stringify(a)); else sessionStorage.removeItem(ACCESS_KEY); } catch (e) {} }
+
+  Ent.initTheme("theme-toggle");
+
+  function syncAuthUi() {
+    $("go-admin").hidden = !state.isAdmin;
+    var ce = $("curator-email");
+    var em = state.isAdmin && api.sessionEmail ? api.sessionEmail() : "";
+    ce.textContent = em || (state.isAdmin ? "Curator" : "");
+    ce.hidden = !state.isAdmin;
+    $("pub-signin").hidden = state.isAdmin || state.gated || !api.configured;
+    $("lock").hidden = !(state.gated || state.isAdmin);
+  }
+
+  /* ---------- Quick filter pills & database summary ---------- */
+  function multiValueSet(docs) {
+    var set = {};
+    Ent.groupByMolecule(docs).forEach(function (items) {
+      if (items.length > 1) items.forEach(function (d) { set[d.id] = 1; });
+    });
+    return set;
+  }
+  var TRIAGE_PRED = {
+    exp: function (d) { return d.origin !== "calc"; },
+    calc: function (d) { return d.origin === "calc"; },
+    donor: function (d) { return d.role === "donor" || d.role === "both"; },
+    acceptor: function (d) { return d.role === "acceptor" || d.role === "both"; },
+    uv: function (d) { return !!EntScore.formatUv(d); }
+  };
+  function updateSummaryAndPills(docs, multiSet) {
+    var molGroups = Ent.groupByMolecule(docs);
+    var expN = 0, calcN = 0;
+    var counts = { "": docs.length, exp: 0, calc: 0, donor: 0, acceptor: 0, multi: 0, uv: 0 };
+    docs.forEach(function (d) {
+      if (d.origin === "calc") calcN++; else expN++;
+      if (TRIAGE_PRED.exp(d)) counts.exp++;
+      if (TRIAGE_PRED.calc(d)) counts.calc++;
+      if (TRIAGE_PRED.donor(d)) counts.donor++;
+      if (TRIAGE_PRED.acceptor(d)) counts.acceptor++;
+      if (multiSet[d.id]) counts.multi++;
+      if (TRIAGE_PRED.uv(d)) counts.uv++;
+    });
+    $("st-mols").textContent = molGroups.length;
+    $("st-vals").textContent = docs.length;
+    $("st-exp").textContent = expN;
+    $("st-calc").textContent = calcN;
+
+    if (state.triage && !counts[state.triage]) state.triage = "";
+    Array.prototype.forEach.call($("triage-bar").querySelectorAll(".pill"), function (btn) {
+      var k = btn.getAttribute("data-triage"), cnt = counts[k] || 0;
+      var badge = btn.querySelector(".n"); if (badge) badge.textContent = cnt;
+      btn.hidden = k !== "" && cnt === 0 && state.triage !== k;
+      btn.setAttribute("aria-pressed", String(state.triage === k));
+    });
+  }
+  $("triage-bar").addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest(".pill") : null;
+    if (!btn) return;
+    state.triage = btn.getAttribute("data-triage") || "";
+    state.search.pager.shown = 0;
+    render();
+  });
 
   function render() {
     $("n-db").textContent = state.docs.length;
@@ -13,15 +78,23 @@
     $("tab-db").setAttribute("aria-selected", String(state.view === "db"));
     $("tab-submit").setAttribute("aria-selected", String(state.view === "submit"));
     var sub = state.view === "submit", list = $("list"), status = $("status");
-    ["tools-main", "tools-filter", "ss-box", "legend", "list"].forEach(function (id) { $(id).hidden = sub; });
+    $("db-view").hidden = sub;
+    $("pub-toggle-aside").hidden = sub;
     $("form").hidden = !sub;
     if (sub) { status.hidden = true; updateForm(); return; }
     if (!state.loaded) {
+      updateSummaryAndPills([], {});
       status.hidden = false; list.replaceChildren();
       status.textContent = state.failed ? "The database could not be loaded. Reload the page to try again." : "Loading the database…";
       return;
     }
+    var multiSet = multiValueSet(state.docs);
+    updateSummaryAndPills(state.docs, multiSet);
+
     var res = Ent.filterRows(state.docs, state.search);
+    if (state.triage === "multi") res.rows = res.rows.filter(function (d) { return !!multiSet[d.id]; });
+    else if (state.triage && TRIAGE_PRED[state.triage]) res.rows = res.rows.filter(TRIAGE_PRED[state.triage]);
+
     Ent.searchInfo(res, state.docs.length);
     /* one card per molecule, carrying every value that matches the search */
     Ent.drawList(list, Ent.groupByMolecule(res.rows), function (items) {
@@ -88,8 +161,10 @@
     $("fm-submit").disabled = true; fmMsg();
     var p = payload(); p.access_user = (state.access && state.access.user) || ""; p.access_pass = (state.access && state.access.pass) || "";
     api.submit(p).then(function (r) {
+      $("fm-submit").disabled = false;
       $("form").reset(); updateForm();
       fmMsg("fm-ok", "Sent for review with a score of " + r.score + " (" + r.grade + "). It will appear in the database once a curator approves it.");
+      Ent.toast("Entry sent for review (score " + r.score + " · " + r.grade + ").");
     }, function (err) {
       $("fm-submit").disabled = false;
       if (err.status === 401) { lock("Your access is no longer valid. Sign in again."); return; }
@@ -98,9 +173,7 @@
     });
   });
 
-  /* ---------- suggesting a correction to an entry in the database ----------
-     Every field is shown with its current value; the reader changes any number of them at once.
-     Only the fields that differ from the entry are sent, and a curator sees them old against new. */
+  /* ---------- suggesting a correction to an entry in the database ---------- */
   var LONG = { quote: 1, conditions: 1, method: 1, citation: 1, evidence: 1, et_type: 1 };
   function curText(d, k) {
     var v = d[k];
@@ -123,7 +196,23 @@
   }
   function openSuggest(d) {
     Ent.dialog("Suggest a correction · " + (d.name || ""), function (box) {
-      box.appendChild(el("p", "hint", "Change any fields that are wrong or missing — as many as you like — and leave the others as they are. Changed fields are highlighted. A curator compares old and new values before anything changes. Give papers as DOIs, not as links."));
+      box.classList.add("ed-box");
+      var oldTitle = box.querySelector("h2");
+      var head = el("div", "ed-head"), closeX = el("button", "btn small", "Close");
+      closeX.type = "button"; closeX.addEventListener("click", Ent.closeDialog);
+      head.appendChild(oldTitle); head.appendChild(closeX);
+
+      var body = el("div", "ed-body");
+      if (d.smiles) {
+        var st = el("div", "ed-struct"), paper = el("div", "paper"), si = el("div", "sinfo");
+        var info = Ent.molInfo(d.smiles);
+        if (info) { paper.innerHTML = info.svg; si.appendChild(el("span", "formula", info.formula)); }
+        else paper.textContent = "Structure";
+        si.appendChild(el("code", "smiles", d.smiles));
+        st.appendChild(paper); st.appendChild(si); body.appendChild(st);
+      }
+      body.appendChild(el("p", "hint", "Change any fields that are wrong or missing — changed fields highlight immediately. A curator compares old and new values before anything changes. Give papers as DOIs, not as links."));
+
       var grid = el("div", "sugg-grid"), inputs = [];
       EntScore.SUGGEST_FIELDS.forEach(function (f) {
         var k = f[0], type = f[2];
@@ -151,18 +240,22 @@
         inputs.push({ k: k, type: type, now: now, inp: inp });
         grid.appendChild(lab);
       });
-      box.appendChild(grid);
+      body.appendChild(grid);
       var ub = el("div", "sugg-use"), ud = el("label", "field", "Add a paper where it was used in photocatalysis (DOI, optional)"), udi = el("input");
       udi.type = "text"; udi.placeholder = "10.xxxx/…"; ud.appendChild(udi);
       var un = el("label", "field", "What it was used for"), uni = el("input"); uni.type = "text"; uni.maxLength = 300; un.appendChild(uni);
-      ub.appendChild(ud); ub.appendChild(un); box.appendChild(ub);
-      var lc = el("label", "field", "What is wrong, and where does the correct value come from? (required)"), com = el("textarea"); com.rows = 3; com.maxLength = 1000; lc.appendChild(com); box.appendChild(lc);
-      var lb = el("label", "field", "Your name or contact (optional, seen only by curators)"), by = el("input"); by.type = "text"; by.maxLength = 120; lb.appendChild(by); box.appendChild(lb);
-      var hp = el("div", "hp"); hp.setAttribute("aria-hidden", "true"); var hpi = el("input"); hpi.type = "text"; hpi.tabIndex = -1; hpi.autocomplete = "off"; hp.appendChild(hpi); box.appendChild(hp);
-      var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
-      var okm = el("p", "ok"); okm.hidden = true; box.appendChild(okm);
+      ub.appendChild(ud); ub.appendChild(un); body.appendChild(ub);
+      var lc = el("label", "field", "What is wrong, and where does the correct value come from? (required)"), com = el("textarea"); com.rows = 3; com.maxLength = 1000; lc.appendChild(com); body.appendChild(lc);
+      var lb = el("label", "field", "Your name or contact (optional, seen only by curators)"), by = el("input"); by.type = "text"; by.maxLength = 120; lb.appendChild(by); body.appendChild(lb);
+      var hp = el("div", "hp"); hp.setAttribute("aria-hidden", "true"); var hpi = el("input"); hpi.type = "text"; hpi.tabIndex = -1; hpi.autocomplete = "off"; hp.appendChild(hpi); body.appendChild(hp);
+
+      var foot = el("div", "ed-foot");
+      var err = el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); foot.appendChild(err);
+      var okm = el("p", "ok"); okm.hidden = true; foot.appendChild(okm);
       var act = el("div", "actions"), send = el("button", "btn primary", "Send the suggestion"), close = el("button", "btn", "Close");
-      send.type = close.type = "button"; act.appendChild(send); act.appendChild(close); box.appendChild(act);
+      send.type = close.type = "button"; act.appendChild(send); act.appendChild(close); foot.appendChild(act);
+      box.replaceChildren(head, body, foot);
+
       close.addEventListener("click", Ent.closeDialog);
       send.addEventListener("click", function () {
         var changes = {};
@@ -179,9 +272,9 @@
             if (!r || !r.suggestion) throw { status: 409 };
             okm.textContent = "Thank you. A curator will review the " + Object.keys(chk.clean).length + " suggested change(s); the entry changes only if they are approved."; okm.hidden = false;
             send.hidden = true;
+            Ent.toast("Suggestion sent for review.");
           }).catch(function (e) {
             send.disabled = false;
-            /* an out-of-date server treats the suggestion as a new entry and asks for a structure */
             var stale = e.status === 409 || (e.status === 400 && /add the structure|smiles or draw/i.test(e.message || ""));
             err.textContent = stale ? "Corrections are not enabled on the server yet: a curator has to update the server function. Nothing was sent."
               : e.status === 429 ? "Too many submissions from this connection. Try again in an hour."
@@ -193,43 +286,137 @@
     });
   }
 
-  /* ---------- boot ---------- */
-  Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (t) {
+  /* ---------- tabs, aside toggle & shortcuts ---------- */
+  Array.prototype.forEach.call(document.querySelectorAll(".tab[data-view]"), function (t) {
     t.addEventListener("click", function () { state.view = t.getAttribute("data-view"); render(); });
   });
+  $("pub-go-submit").addEventListener("click", function () { state.view = "submit"; render(); });
+  $("pub-toggle-aside").addEventListener("click", function () {
+    var aside = $("pub-aside"), open = !aside.classList.contains("open");
+    aside.classList.toggle("open", open);
+    $("pub-toggle-aside").setAttribute("aria-expanded", String(open));
+  });
+  $("f-reset").addEventListener("click", function () { state.triage = ""; });
   Ent.bindSearch(state.search, render);
   Ent.sketcher.bind();
   Ent.loadOCL(render);
 
-  /* ---------- access gate ---------- */
-  function gate(title, text, withForm, err) {
-    $("app-body").hidden = true; $("lock").hidden = true; $("gate").hidden = false;
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && state.curatorModal && !$("gate").hidden) { cancelCuratorGate(); return; }
+    if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (state.view !== "db" || $("app-body").hidden) return;
+    var ed = $("ed"), sk = $("sk");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    e.preventDefault(); $("q").focus();
+  });
+
+  /* ---------- unified access gate & curator bridge ---------- */
+  function gate(title, text, withForm, err, isCuratorModal) {
+    state.curatorModal = !!isCuratorModal;
+    $("app-body").hidden = true; $("gate").hidden = false;
     $("gate-title").textContent = title; $("gate-text").textContent = text; $("gate-fields").hidden = !withForm;
+    $("gate-user-text").textContent = isCuratorModal ? "Curator email" : "User or curator email";
+    $("gate-cancel").hidden = !isCuratorModal;
     $("gate-err").hidden = !err; $("gate-err").textContent = err || "";
+    syncAuthUi();
   }
-  function loginGate(err) { gate("Sign in", "TrEnDB is in private preview. Enter the user name and password you were given.", true, err); }
-  function lock(msg) { saveAccess(null); state.access = null; state.docs = []; state.loaded = false; $("gate-pass").value = ""; loginGate(msg || ""); }
-  function openApp(a, gated) {
-    state.access = a; $("gate").hidden = true; $("app-body").hidden = false; $("lock").hidden = !gated;
+  function loginGate(err) {
+    if (state.curatorModal) {
+      gate("Curator sign-in", "Sign in with your curator email and password to unlock the admin shortcut.", true, err, true);
+      return;
+    }
+    gate("Sign in", "TrEnDB is in private preview. Sign in with the preview user name and password, or with your curator email and password.", true, err, false);
+  }
+  function cancelCuratorGate() {
+    state.curatorModal = false; $("gate-pass").value = "";
+    $("gate").hidden = true; $("app-body").hidden = false;
+    syncAuthUi();
+  }
+  function lock(msg) {
+    saveAccess(null); api.signOut();
+    state.access = null; state.isAdmin = false; state.gated = false; state.curatorModal = false;
+    state.docs = []; state.loaded = false; $("gate-pass").value = "";
+    syncAuthUi();
+    if (msg) loginGate(msg);
+    else tryAccess({ user: "", pass: "" }, false);
+  }
+  function openApp(a, gated, isAdmin) {
+    var alreadyLoaded = state.loaded && state.curatorModal;
+    state.access = a; state.gated = !!gated; state.isAdmin = !!isAdmin; state.curatorModal = false;
+    $("gate").hidden = true; $("app-body").hidden = false;
+    syncAuthUi();
+    if (alreadyLoaded) {
+      Ent.toast("Signed in as curator. You can open the admin page from the top bar.");
+      return;
+    }
     state.loaded = false; state.failed = false; render();
-    api.listPublic(a).then(function (rows) { state.docs = rows || []; state.loaded = true; render(); },
+    api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; render(); },
       function () { state.failed = true; render(); });
   }
   function tryAccess(a, fromForm) {
     return api.checkAccess(a).then(function (ok) {
-      if (ok === true) { if (fromForm) saveAccess(a); openApp(a, !!(a.user || a.pass)); }
+      if (ok === true) { if (fromForm) saveAccess(a); openApp(a, !!(a.user || a.pass), false); }
       else { if (!fromForm) saveAccess(null); loginGate(fromForm ? "Wrong user name or password." : ""); }
-    }, function () { gate("Unavailable", "The database could not be reached. Reload the page to try again.", false, ""); });
+    }, function () { gate("Unavailable", "The database could not be reached. Reload the page to try again.", false, "", false); });
   }
+
   $("gate").addEventListener("submit", function (e) {
     e.preventDefault();
-    var a = { user: $("gate-user").value.trim(), pass: $("gate-pass").value };
-    if (!a.user || !a.pass) { loginGate("Enter both the user name and the password."); return; }
+    var u = $("gate-user").value.trim(), p = $("gate-pass").value;
+    if (!u || !p) {
+      loginGate(state.curatorModal ? "Enter your email and password." : "Enter both the user name and the password.");
+      return;
+    }
     $("gate-send").disabled = true;
-    tryAccess(a, true).then(function () { $("gate-send").disabled = false; });
+    var looksEmail = /^\S+@\S+\.\S+$/.test(u);
+    if (state.curatorModal || looksEmail) {
+      api.signIn(u, p).then(function () {
+        return api.isAdmin().then(function (ok) {
+          $("gate-send").disabled = false;
+          if (ok === true) { $("gate-pass").value = ""; openApp(null, false, true); return; }
+          api.signOut();
+          if (state.curatorModal) { loginGate("This address is not a curator of this database."); return; }
+          return tryAccess({ user: u, pass: p }, true);
+        }, function () {
+          $("gate-send").disabled = false;
+          loginGate("Could not verify curator status. Try again.");
+        });
+      }, function (err) {
+        $("gate-send").disabled = false;
+        if (state.curatorModal) {
+          loginGate(err && (err.status === 400 || err.status === 401) ? "Wrong email or password."
+            : err && err.status === 429 ? "Too many attempts. Wait a few minutes and try again." : "Sign-in failed. Try again.");
+          return;
+        }
+        tryAccess({ user: u, pass: p }, true);
+      });
+      return;
+    }
+    tryAccess({ user: u, pass: p }, true).then(function () { $("gate-send").disabled = false; });
+  });
+  $("gate-cancel").addEventListener("click", cancelCuratorGate);
+  $("pub-signin").addEventListener("click", function () {
+    $("gate-user").value = ""; $("gate-pass").value = "";
+    state.curatorModal = true;
+    loginGate("");
+    $("gate-user").focus();
   });
   $("lock").addEventListener("click", function (e) { e.preventDefault(); lock(""); });
 
-  if (!api.configured) gate("Private preview", "TrEnDB is not open yet.", false, "");
-  else tryAccess(readAccess() || { user: "", pass: "" }, false);
+  function boot() {
+    if (!api.configured) { gate("Private preview", "TrEnDB is not open yet.", false, "", false); return; }
+    api.token().then(function (t) {
+      if (!t) return false;
+      return api.isAdmin().then(function (ok) {
+        if (ok === true) return true;
+        api.signOut(); return false;
+      }, function () { return false; });
+    }).then(function (adminOk) {
+      if (adminOk) { openApp(null, false, true); return; }
+      return tryAccess(readAccess() || { user: "", pass: "" }, false);
+    });
+  }
+  boot();
 })();
