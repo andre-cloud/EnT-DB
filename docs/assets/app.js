@@ -23,8 +23,9 @@
     }
     var res = Ent.filterRows(state.docs, state.search);
     Ent.searchInfo(res, state.docs.length);
-    Ent.drawList(list, res.rows, function (d) {
-      return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim", onSuggest: openSuggest });
+    /* one card per molecule, carrying every value that matches the search */
+    Ent.drawList(list, Ent.groupByMolecule(res.rows), function (items) {
+      return Ent.moleculeCard(items, { scores: res.scores, simMode: state.search.ss.mode === "sim", onSuggest: openSuggest });
     }, state.search.pager, render);
     status.hidden = res.rows.length > 0;
     if (!res.rows.length) {
@@ -54,7 +55,7 @@
     if (known && (known.db.length || known.stereo.length)) {
       kn.hidden = false;
       kn.textContent = known.db.length
-        ? "Already in the database: " + known.db.map(function (m) { return m.entry.name + " (" + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol, " + m.why + ")"; }).join("; ") + ". Send it only if it is a different measurement or paper; to fix an existing entry, use “Suggest a correction” on its card."
+        ? "Already in the database: " + known.db.map(function (m) { return m.entry.name + " (" + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol, " + m.why + ")"; }).join("; ") + ". A different value (another paper or method) is welcome: it will appear beside the existing ones on the molecule's card. To fix an existing value, use “Suggest a correction” on its card."
         : "A different stereoisomer is in the database (" + known.stereo.map(function (e) { return e.name; }).join("; ") + "). Check the E/Z or R/S assignment.";
     } else kn.hidden = true;
     var sc = EntScore.scoreEntry(f, ctx), g = EntScore.gradeOf(sc.total);
@@ -95,32 +96,56 @@
     });
   });
 
-  /* ---------- suggesting a correction to an entry in the database ---------- */
+  /* ---------- suggesting a correction to an entry in the database ----------
+     Every field is shown with its current value; the reader changes any number of them at once.
+     Only the fields that differ from the entry are sent, and a curator sees them old against new. */
+  var LONG = { quote: 1, conditions: 1, method: 1, citation: 1, uv: 1, evidence: 1, et_type: 1 };
+  function curText(d, k) { var v = d[k]; return v == null ? "" : String(v); }
+  function differs(type, now, val) {
+    var t = String(val).trim();
+    if (type === "et" || type === "unc") {
+      if (t === "" || now === "") return t !== now;
+      return EntScore.num(t) !== Number(now);
+    }
+    if (type === "cas") return EntScore.cleanCas(t) !== now;
+    if (type === "doi") return EntScore.cleanDoi(t).toLowerCase() !== now.toLowerCase();
+    return t !== now.trim();
+  }
   function openSuggest(d) {
     Ent.dialog("Suggest a correction · " + (d.name || ""), function (box) {
-      box.appendChild(el("p", "hint", "Pick each field that is wrong and give the correct value. A curator checks the suggestion before anything changes. Give papers as DOIs, not as links."));
-      var rows = el("div", "stack"); box.appendChild(rows);
-      function addRow() {
-        var r = el("div", "ed-use"), lf = el("label", "field", "Field"), sel = el("select");
-        EntScore.SUGGEST_FIELDS.forEach(function (f) { sel.appendChild(new Option(f[1].replace("E_T", "Triplet energy"), f[0])); });
-        lf.appendChild(sel);
-        var lv = el("label", "field", "Correct value"), val = el("input"); val.type = "text"; lv.appendChild(val);
-        var ln = el("label", "field", "What it was used for"), note = el("input"); note.type = "text"; note.maxLength = 300; ln.appendChild(note);
-        var cur = el("p", "hint");
-        function sync() {
-          var k = sel.value, use = k === "uses_add";
-          ln.hidden = !use; lv.firstChild.textContent = use ? "DOI of the paper" : "Correct value";
-          var v = use ? "" : d[k]; cur.textContent = use ? "" : "Now: " + (v == null || v === "" ? "(empty)" : String(v));
-          if (!val.value && !use && v != null) val.value = String(v);
-        }
-        sel.addEventListener("change", function () { val.value = ""; sync(); });
-        var x = el("button", "btn small", "Remove"); x.type = "button"; x.addEventListener("click", function () { r.remove(); });
-        r.appendChild(lf); r.appendChild(lv); r.appendChild(ln); r.appendChild(x); r.appendChild(cur);
-        rows.appendChild(r); sync();
-      }
-      addRow();
-      var more = el("button", "btn small", "Correct another field"); more.type = "button"; more.addEventListener("click", addRow);
-      var mw = el("div", "actions"); mw.appendChild(more); box.appendChild(mw);
+      box.appendChild(el("p", "hint", "Change any fields that are wrong or missing — as many as you like — and leave the others as they are. Changed fields are highlighted. A curator compares old and new values before anything changes. Give papers as DOIs, not as links."));
+      var grid = el("div", "sugg-grid"), inputs = [];
+      EntScore.SUGGEST_FIELDS.forEach(function (f) {
+        var k = f[0], type = f[2];
+        if (type === "use") return;
+        var now = curText(d, k), lab = el("label", "field"), inp;
+        lab.appendChild(Ent.elT("span", null, f[1].replace(" (structure)", "")));
+        if (type === "role" || type === "origin") {
+          inp = el("select");
+          (type === "role" ? [["acceptor", "Acceptor"], ["donor", "Donor (sensitizer)"], ["both", "Both"]] : [["exp", "Experiment"], ["calc", "Computation"]])
+            .forEach(function (o) { inp.appendChild(new Option(o[1], o[0])); });
+        } else if (LONG[k]) { inp = el("textarea"); inp.rows = 2; inp.maxLength = 500; }
+        else { inp = el("input"); inp.type = "text"; inp.maxLength = type === "text" ? 500 : 400; }
+        inp.value = now; inp.setAttribute("data-k", k);
+        if (type === "cas") inp.placeholder = "e.g. 100-42-5";
+        if (type === "doi") inp.placeholder = "10.xxxx/…";
+        var was = el("small", "was"); was.hidden = true;
+        lab.appendChild(inp); lab.appendChild(was);
+        if (LONG[k] || k === "smiles" || k === "name") lab.classList.add("wide");
+        var sync = function () {
+          var ch = differs(type, now, inp.value);
+          lab.classList.toggle("changed", ch);
+          was.hidden = !ch; was.textContent = "Now: " + (now === "" ? "(empty)" : now);
+        };
+        inp.addEventListener("input", sync); inp.addEventListener("change", sync);
+        inputs.push({ k: k, type: type, now: now, inp: inp });
+        grid.appendChild(lab);
+      });
+      box.appendChild(grid);
+      var ub = el("div", "sugg-use"), ud = el("label", "field", "Add a paper where it was used in photocatalysis (DOI, optional)"), udi = el("input");
+      udi.type = "text"; udi.placeholder = "10.xxxx/…"; ud.appendChild(udi);
+      var un = el("label", "field", "What it was used for"), uni = el("input"); uni.type = "text"; uni.maxLength = 300; un.appendChild(uni);
+      ub.appendChild(ud); ub.appendChild(un); box.appendChild(ub);
       var lc = el("label", "field", "What is wrong, and where does the correct value come from? (required)"), com = el("textarea"); com.rows = 3; com.maxLength = 1000; lc.appendChild(com); box.appendChild(lc);
       var lb = el("label", "field", "Your name or contact (optional, seen only by curators)"), by = el("input"); by.type = "text"; by.maxLength = 120; lb.appendChild(by); box.appendChild(lb);
       var hp = el("div", "hp"); hp.setAttribute("aria-hidden", "true"); var hpi = el("input"); hpi.type = "text"; hpi.tabIndex = -1; hpi.autocomplete = "off"; hp.appendChild(hpi); box.appendChild(hp);
@@ -131,24 +156,25 @@
       close.addEventListener("click", Ent.closeDialog);
       send.addEventListener("click", function () {
         var changes = {};
-        Array.prototype.forEach.call(rows.children, function (r) {
-          var k = r.querySelector("select").value, inputs = r.querySelectorAll("input");
-          changes[k] = k === "uses_add" ? { doi: inputs[0].value, note: inputs[1].value } : inputs[0].value;
-        });
-        /* unchanged values are not corrections */
-        Object.keys(changes).forEach(function (k) { if (k !== "uses_add" && String(changes[k]).trim() === String(d[k] == null ? "" : d[k])) delete changes[k]; });
+        inputs.forEach(function (x) { if (differs(x.type, x.now, x.inp.value)) changes[x.k] = x.inp.value; });
+        if (udi.value.trim() || uni.value.trim()) changes.uses_add = { doi: udi.value, note: uni.value };
+        if (!Object.keys(changes).length) { err.textContent = "Change at least one field, or add a paper."; err.hidden = false; return; }
         var chk = EntScore.checkSuggestion(changes);
-        if (chk.error) { err.textContent = Object.keys(changes).length ? chk.error : "Change at least one value."; err.hidden = false; return; }
-        if (!com.value.trim()) { err.textContent = "Explain briefly what is wrong and where the correct value comes from."; err.hidden = false; return; }
+        if (chk.error) { err.textContent = chk.error; err.hidden = false; return; }
+        if (!com.value.trim()) { err.textContent = "Explain briefly what is wrong and where the correct value comes from."; err.hidden = false; com.focus(); return; }
         err.hidden = true; send.disabled = true;
         api.submit({ kind: "suggestion", entry_id: d.id, changes: chk.clean, comment: com.value, by: by.value, website: hpi.value,
           access_user: (state.access && state.access.user) || "", access_pass: (state.access && state.access.pass) || "" })
-          .then(function () {
-            okm.textContent = "Thank you. A curator will review the correction; the entry changes only if it is approved."; okm.hidden = false;
+          .then(function (r) {
+            if (!r || !r.suggestion) throw { status: 409 };
+            okm.textContent = "Thank you. A curator will review the " + Object.keys(chk.clean).length + " suggested change(s); the entry changes only if they are approved."; okm.hidden = false;
             send.hidden = true;
-          }, function (e) {
+          }).catch(function (e) {
             send.disabled = false;
-            err.textContent = e.status === 429 ? "Too many submissions from this connection. Try again in an hour."
+            /* an out-of-date server treats the suggestion as a new entry and asks for a structure */
+            var stale = e.status === 409 || (e.status === 400 && /add the structure|smiles or draw/i.test(e.message || ""));
+            err.textContent = stale ? "Corrections are not enabled on the server yet: a curator has to update the server function. Nothing was sent."
+              : e.status === 429 ? "Too many submissions from this connection. Try again in an hour."
               : e.status === 401 ? "Your access is no longer valid. Reload the page and sign in again."
               : e.status === 400 ? e.message : "The suggestion could not be sent. Try again in a moment.";
             err.hidden = false;

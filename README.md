@@ -15,12 +15,14 @@ Site: https://nuniwo-source.github.io/EnT-DB/
   consistency; the server recomputes the score, so the browser cannot fake it.
 - **Review.** A submission is stored as *pending* and the curator is notified. It becomes public
   only when a curator approves it on the review page (`admin.html`).
-- **Duplicates.** A queued entry that looks like a molecule already in the database is marked in yellow.
-  The same molecule is recognised by CAS number first, then by structure (E/Z and R/S kept apart), identical
-  SMILES and name. Approving it asks which existing entry to overwrite (the old one moves to *Rejected*), or
-  to keep both when they are different measurements. Bulk approval leaves duplicates for one-by-one review.
-- **Corrections.** Readers can suggest a correction to any entry in the database. It reaches the queue as a
-  purple card showing old and new values; approving it writes only the changed fields into the entry.
+- **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
+  structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
+- **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both
+  computed, and from the same paper within 1 kcal/mol, or any paper within 0.1 kcal/mol) is marked in yellow; approving
+  it asks which existing entry to overwrite (the old one moves to *Rejected*). A *different* value for a known molecule
+  is not a duplicate: it is approved normally and appears on the same card. Bulk approval skips yellow entries.
+- **Corrections.** Readers can suggest corrections to any value in the database, changing any number of fields at
+  once in one form. It reaches the queue as a purple card showing old and new values; approving it writes only the changed fields into the entry.
 - **DOIs only.** Sources are stored and linked as DOIs, never as links (pasted links are reduced to the DOI
   inside them, and the database refuses link columns). `tools/check-links.mjs` checks the published data.
 

@@ -63,12 +63,13 @@
   /* ---------- approving one entry: duplicates must be resolved first ---------- */
   function approve(d, note) {
     var dup = dupOf(d), now = new Date().toISOString();
-    if (!dup || !dup.db.length) return onPatch(d.id, { status: "approved", decided_at: now, note: note });
+    /* a different value for a known molecule is simply added: it appears beside the others on the molecule's card */
+    if (!dup || !dup.dbSame.length) return onPatch(d.id, { status: "approved", decided_at: now, note: note });
     return new Promise(function (resolve) {
       Ent.dialog("Possible duplicate: " + (d.name || ""), function (box) {
-        box.appendChild(Ent.el("p", null, "This molecule is already in the database. To add the new entry, the existing one must be removed first (it is overwritten). Choose the entry to overwrite:"));
+        box.appendChild(Ent.el("p", null, "The same value for this molecule is already in the database. To add the new entry, the existing one is overwritten. Choose the entry to overwrite:"));
         var opts = Ent.el("div", "stack");
-        dup.db.forEach(function (m, i) {
+        dup.dbSame.forEach(function (m, i) {
           var lab = Ent.el("label", "check"), r = Ent.el("input"); r.type = "radio"; r.name = "dup-target"; r.value = m.entry.id; r.checked = i === 0;
           lab.appendChild(r);
           lab.appendChild(document.createTextNode(m.entry.name + " · " + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol · " +
@@ -76,7 +77,7 @@
           opts.appendChild(lab);
         });
         box.appendChild(opts);
-        box.appendChild(Ent.el("p", "hint", "The overwritten entry moves to the Rejected tab with a note, so it can be restored. Use “Keep both” only when the two are different measurements (for example an experimental and a computed value, or two papers)."));
+        box.appendChild(Ent.el("p", "hint", "The overwritten entry moves to the Rejected tab with a note, so it can be restored. Use “Keep both” only if they are in fact different data; both values then appear on the same molecule card."));
         var err = Ent.el("p", "err"); err.hidden = true; err.setAttribute("role", "alert"); box.appendChild(err);
         var act = Ent.el("div", "actions");
         var ow = Ent.el("button", "btn primary", "Overwrite the selected entry"), keep = Ent.el("button", "btn", "Keep both"), cancel = Ent.el("button", "btn", "Cancel");
@@ -137,7 +138,7 @@
   var bulkIds = [], bulkArmed = false, bulkSkipped = 0;
   function drawBulk(rows) {
     var listed = state.view === "pending" ? rows : [];
-    bulkIds = listed.filter(function (d) { var x = dupOf(d); return !(x && x.db.length); }).map(function (d) { return d.id; });
+    bulkIds = listed.filter(function (d) { var x = dupOf(d); return !(x && x.flag); }).map(function (d) { return d.id; });
     bulkSkipped = listed.length - bulkIds.length;
     var n = bulkIds.length, skip = bulkSkipped ? " (" + bulkSkipped + " possible duplicates left for one-by-one review)" : "";
     $("bulk-approve").hidden = !n || bulkArmed; $("bulk-approve").textContent = "Approve all " + n + " listed" + skip;

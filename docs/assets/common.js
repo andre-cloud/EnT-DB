@@ -196,20 +196,27 @@
     if (typeof v === "string") setText(dd, v); else dd.appendChild(v);
     dl.appendChild(dd);
   }
-  function scale(d) {
+  /* one entry, or several values of the same molecule (one mark each; computed ones hollow) */
+  function scale(list) {
+    list = Array.isArray(list) ? list : [list];
     var s = el("div", "scale"); s.appendChild(el("div", "track"));
     REFS.forEach(function (r) {
       var t = el("div", "ref"); t.style.left = pct(r.v) + "%"; s.appendChild(t);
       var l = el("div", "lab", r.l); l.style.left = pct(r.v) + "%"; s.appendChild(l);
     });
-    if (d.et_unc) {
-      var b = el("div", "band"), a = pct(d.et_kcal - d.et_unc), z = pct(Number(d.et_kcal) + Number(d.et_unc));
-      b.style.left = a + "%"; b.style.width = (z - a) + "%"; s.appendChild(b);
-    }
-    var m = el("div", "mark"); m.style.left = pct(d.et_kcal) + "%"; s.appendChild(m);
+    list.forEach(function (d) {
+      if (d.et_unc) {
+        var b = el("div", "band"), a = pct(d.et_kcal - d.et_unc), z = pct(Number(d.et_kcal) + Number(d.et_unc));
+        b.style.left = a + "%"; b.style.width = (z - a) + "%"; s.appendChild(b);
+      }
+    });
+    list.forEach(function (d) {
+      var m = el("div", "mark" + (list.length > 1 && d.origin === "calc" ? " calc" : "")); m.style.left = pct(d.et_kcal) + "%"; s.appendChild(m);
+    });
     var e0 = el("div", "end", String(S_MIN)); e0.style.left = "0"; s.appendChild(e0);
     var e1 = el("div", "end", String(S_MAX)); e1.style.right = "0"; s.appendChild(e1);
-    s.setAttribute("role", "img"); s.setAttribute("aria-label", "Triplet energy " + d.et_kcal + " kcal/mol on a 40 to 80 scale");
+    s.setAttribute("role", "img");
+    s.setAttribute("aria-label", "Triplet energy " + list.map(function (d) { return d.et_kcal; }).join(", ") + " kcal/mol on a 40 to 80 scale");
     return s;
   }
   /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.onSuggest(d) on the public page,
@@ -228,9 +235,10 @@
     if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
     if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
     if (adm && !d.smiles_checked) chips.appendChild(el("span", "chip warn", "Structure unchecked"));
-    if (dup && dup.flag) chips.appendChild(el("span", "chip dupchip", dup.db.length ? "Possible duplicate" : "Same molecule also in the queue"));
+    if (dup && dup.flag) chips.appendChild(el("span", "chip dupchip", dup.dbSame.length ? "Possible duplicate" : "Same value also in the queue"));
+    else if (dup && dup.db.length) chips.appendChild(el("span", "chip plain", "New value for a known molecule"));
     head.appendChild(chips); c.appendChild(head);
-    if (dup && (dup.flag || dup.stereo.length)) c.appendChild(dupNote(dup));
+    if (dup && (dup.db.length || dup.queue.length || dup.stereo.length)) c.appendChild(dupNote(dup));
 
     var et = el("div", "et");
     et.appendChild(el("span", "v", fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : "")));
@@ -330,6 +338,128 @@
     return c;
   };
 
+  /* ---------- one card per molecule (public page) ----------
+     Entries are grouped by CAS number, then by structure code (which keeps E/Z and R/S apart),
+     then by identical SMILES. Two entries with different CAS numbers are never grouped. */
+  Ent.groupByMolecule = function (rows) {
+    var groups = [], byKey = {};
+    function fits(g, k) { return g && !(k.cas && g.cas && g.cas !== k.cas); }
+    rows.forEach(function (d) {
+      var k = keysOf(d), g = null;
+      if (k.cas) g = byKey["cas:" + k.cas] || null;
+      if (!g && k.id && fits(byKey["id:" + k.id], k)) g = byKey["id:" + k.id];
+      if (!g && k.smi && fits(byKey["smi:" + k.smi], k)) g = byKey["smi:" + k.smi];
+      if (!g) { g = { cas: "", items: [] }; groups.push(g); }
+      g.items.push(d); if (k.cas && !g.cas) g.cas = k.cas;
+      if (k.cas) byKey["cas:" + k.cas] = g;
+      if (k.id) byKey["id:" + k.id] = g;
+      if (k.smi) byKey["smi:" + k.smi] = g;
+    });
+    /* rows arrive sorted, so each group sits where its first value would: the order of the list is kept */
+    return groups.map(function (g) { return g.items; });
+  };
+  function byQuality(a, b) {
+    var oa = a.origin === "calc" ? 1 : 0, ob = b.origin === "calc" ? 1 : 0;
+    if (oa !== ob) return oa - ob;
+    return (Number(b.score) || 0) - (Number(a.score) || 0);
+  }
+  function valueBlock(d, o, many) {
+    var v = el("section", "val");
+    var top = el("div", "valtop");
+    var et = el("div", "et");
+    et.appendChild(el("span", "v", fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : "")));
+    et.appendChild(el("span", "u", "kcal/mol"));
+    et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
+    top.appendChild(et);
+    var chips = el("div", "chips");
+    chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
+    if (d.score != null) { var g = EntScore.gradeOf(d.score); chips.appendChild(el("span", "chip " + g.cls, "Score " + d.score + " · " + g.label)); }
+    if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
+    if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
+    top.appendChild(chips); v.appendChild(top);
+    if (!many) v.appendChild(scale(d));
+    var dl = el("dl");
+    row(dl, "Reported value", d.et_reported);
+    row(dl, "Value type", d.et_type);
+    row(dl, "Method", d.method);
+    row(dl, "Conditions", d.conditions);
+    row(dl, "Source", d.citation);
+    row(dl, "Where", d.location);
+    if (d.quote) { var qd = el("span"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
+    row(dl, "What it says", d.evidence);
+    if (d.doi) row(dl, "DOI", doiLink(d.doi, d.doi));
+    row(dl, "Verification", d.verify_note);
+    v.appendChild(dl);
+    if (o.onSuggest) {
+      var sa = el("div", "actions"), sb = el("button", "btn small", many ? "Suggest a correction to this value" : "Suggest a correction"); sb.type = "button";
+      sb.addEventListener("click", function () { o.onSuggest(d); });
+      sa.appendChild(sb); v.appendChild(sa);
+    }
+    return v;
+  }
+  /* items: entries of one molecule; o = {scores, simMode, onSuggest(d)} */
+  Ent.moleculeCard = function (items, o) {
+    o = o || {}; items = items.slice().sort(byQuality);
+    var p = items[0], many = items.length > 1, c = el("article", "card mol"), head = el("div", "head");
+    head.appendChild(el("h2", null, p.name || "(unnamed)"));
+    var chips = el("div", "chips"), roles = {};
+    items.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
+    var role = roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor";
+    chips.appendChild(el("span", "chip", role === "donor" ? "Donor" : role === "both" ? "Donor and acceptor" : "Acceptor"));
+    var cls = items.map(function (d) { return d.cls; }).filter(Boolean)[0];
+    if (cls) chips.appendChild(el("span", "chip plain", cls));
+    if (many) chips.appendChild(el("span", "chip plain", items.length + " values"));
+    if (o.simMode && o.scores) {
+      var best = null; items.forEach(function (d) { var x = o.scores[d.id]; if (x != null && (best == null || x > best)) best = x; });
+      if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
+    }
+    head.appendChild(chips); c.appendChild(head);
+
+    if (many) {
+      var vals = items.map(function (d) { return Number(d.et_kcal); }), lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+      var et = el("div", "et");
+      et.appendChild(el("span", "v", lo === hi ? fmt(lo, 1) : fmt(lo, 1) + "–" + fmt(hi, 1)));
+      et.appendChild(el("span", "u", "kcal/mol"));
+      et.appendChild(elT("span", "alt", items.length + " E_T values, listed below (filled marks: experimental; hollow: computed)"));
+      c.appendChild(et); c.appendChild(scale(items));
+    }
+
+    var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(p.smiles);
+    if (info) paper.innerHTML = info.svg; else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
+    st.appendChild(paper);
+    var si = el("div", "sinfo");
+    var cas = items.map(function (d) { return d.cas; }).filter(Boolean)[0];
+    if (cas) si.appendChild(el("span", "formula", "CAS " + cas));
+    si.appendChild(el("code", "smiles", p.smiles || "—"));
+    if (info && info.formula) si.appendChild(el("span", "formula", info.formula));
+    if (p.structure_note) si.appendChild(el("span", "hint", p.structure_note));
+    st.appendChild(si); c.appendChild(st);
+
+    items.forEach(function (d) { c.appendChild(valueBlock(d, o, many)); });
+
+    var first = function (k) { return items.map(function (d) { return d[k]; }).filter(Boolean)[0]; };
+    var dl = el("dl");
+    row(dl, "UV-vis", first("uv") || "Not recorded");
+    row(dl, "Direct excitation", first("direct_exc") || "Not recorded");
+    c.appendChild(dl);
+    var seen = {}, usesList = [];
+    items.forEach(function (d) {
+      (Array.isArray(d.uses) ? d.uses : []).forEach(function (u) {
+        if (!u || !u.doi) return; var k = EntScore.cleanDoi(u.doi).toLowerCase(); if (seen[k]) return; seen[k] = 1; usesList.push(u);
+      });
+    });
+    if (usesList.length) {
+      var ul = el("ul", "uses");
+      usesList.forEach(function (u) {
+        var li = el("li"); li.appendChild(doiLink(u.doi, "doi:" + EntScore.cleanDoi(u.doi)));
+        if (u.note) li.appendChild(document.createTextNode(" · " + u.note));
+        ul.appendChild(li);
+      });
+      c.appendChild(el("p", "hint", "Used in photocatalysis")); c.appendChild(ul);
+    }
+    return c;
+  };
+
   /* ---------- duplicates ----------
      The same molecule is recognised, in order of priority, by CAS number, by structure
      (OpenChemLib canonical code, which keeps E/Z and R/S apart), by identical SMILES and by
@@ -366,20 +496,34 @@
     if (x.cas && y.cas && x.cas === y.cas) return false;
     return !!(x.skel && y.skel && x.skel === y.skel && x.id !== y.id);
   }
+  /* Two values of the same molecule are the same data when they are both measured or both
+     computed and either come from the same paper and agree within 1 kcal/mol, or agree within
+     0.1 kcal/mol (the same number cited by another paper). Anything else is a new value, which
+     is kept beside the existing ones on the molecule's card. */
+  var sameValue = Ent.sameValue = function (a, b) {
+    if ((a.origin || "exp") !== (b.origin || "exp")) return false;
+    var dv = Math.abs(Number(a.et_kcal) - Number(b.et_kcal));
+    if (isNaN(dv)) return false;
+    var x = EntScore.cleanDoi(a.doi || "").toLowerCase(), y = EntScore.cleanDoi(b.doi || "").toLowerCase();
+    return x && x === y ? dv <= 1 : dv <= 0.1;
+  };
   /* d against the database (approved entries) and the rest of the queue (pending entries).
-     -> {flag, db: [{entry, why}], queue: [...], stereo: [entries]} */
+     -> {flag, db: [{entry, why, same}], queue: [...], stereo: [entries]}
+     flag (yellow card) = the same value is already there; a new value for a known molecule is not flagged. */
   Ent.duplicates = function (d, approved, pending) {
     var res = { flag: false, db: [], queue: [], stereo: [] };
     (approved || []).forEach(function (e) {
       if (e.id === d.id) return;
       var why = sameMolecule(d, e);
-      if (why) res.db.push({ entry: e, why: why }); else if (stereoPartner(d, e)) res.stereo.push(e);
+      if (why) res.db.push({ entry: e, why: why, same: sameValue(d, e) }); else if (stereoPartner(d, e)) res.stereo.push(e);
     });
     (pending || []).forEach(function (e) {
       if (e.id === d.id) return;
-      var why = sameMolecule(d, e); if (why) res.queue.push({ entry: e, why: why });
+      var why = sameMolecule(d, e); if (why) res.queue.push({ entry: e, why: why, same: sameValue(d, e) });
     });
-    res.flag = res.db.length > 0 || res.queue.length > 0;
+    var isSame = function (m) { return m.same; };
+    res.dbSame = res.db.filter(isSame); res.queueSame = res.queue.filter(isSame);
+    res.flag = res.dbSame.length > 0 || res.queueSame.length > 0;
     return res;
   };
   function describe(e) {
@@ -387,14 +531,15 @@
       + (e.doi ? " · " + e.doi : "");
   }
   function dupNote(dup) {
-    var box = el("div", "dupnote");
+    var box = el("div", "dupnote" + (dup.flag ? "" : " info"));
+    var tag = function (m) { return " (" + m.why + (m.same ? "; same value" : "; different value") + ")"; };
     if (dup.db.length) {
-      box.appendChild(el("p", null, "Already in the database:"));
-      var ul = el("ul"); dup.db.forEach(function (m) { ul.appendChild(el("li", null, describe(m.entry) + " (" + m.why + ")")); }); box.appendChild(ul);
+      box.appendChild(el("p", null, dup.dbSame.length ? "Already in the database:" : "This molecule is in the database; this is a new value and will be added to its card:"));
+      var ul = el("ul"); dup.db.forEach(function (m) { ul.appendChild(el("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(ul);
     }
     if (dup.queue.length) {
       box.appendChild(el("p", null, "Also waiting in the queue:"));
-      var uq = el("ul"); dup.queue.forEach(function (m) { uq.appendChild(el("li", null, describe(m.entry) + " (" + m.why + ")")); }); box.appendChild(uq);
+      var uq = el("ul"); dup.queue.forEach(function (m) { uq.appendChild(el("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(uq);
     }
     if (dup.stereo.length) {
       box.appendChild(el("p", "hint", "A different stereoisomer (E/Z or enantiomer) is in the database: " + dup.stereo.map(function (e) { return e.name; }).join("; ") + ". This is not treated as a duplicate."));

@@ -157,3 +157,18 @@ table.diff td.old{color:var(--muted);text-decoration:line-through;text-decoratio
 table.diff td.new{background:var(--sugg-soft);color:var(--fg);font-weight:600}
 input.cas{width:9.5em}
 sub{font-size:.72em;line-height:0}
+/* one card per molecule, several values */
+.card.mol .val{border-top:1px solid var(--line, rgba(127,127,127,.25));padding-top:12px;display:flex;flex-direction:column;gap:8px}
+.valtop{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
+.valtop .chips{margin:0}
+.scale .mark.calc{background:var(--surface);border:2px solid var(--accent);width:6px;margin-left:-3px;box-sizing:border-box}
+.dupnote.info{background:var(--surface-2, rgba(127,127,127,.08))}
+.dupnote li.same{font-weight:600}
+/* correction form: every field at once, changed ones highlighted */
+.sugg-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px}
+.sugg-grid .field.wide{grid-column:1/-1}
+.sugg-grid .field.changed input,.sugg-grid .field.changed select,.sugg-grid .field.changed textarea{border-color:var(--sugg);background:var(--sugg-soft)}
+.sugg-grid .field.changed{color:var(--sugg)}
+.sugg-grid .was{display:block;color:var(--muted, #777);font-weight:400;text-decoration:line-through;overflow-wrap:anywhere}
+.sugg-use{display:flex;gap:10px;flex-wrap:wrap}.sugg-use .field{flex:1 1 220px;min-width:0}
+@media (max-width:560px){.sugg-grid{grid-template-columns:1fr}}
