@@ -50,12 +50,13 @@
     </select>
     <select id="f-sort" aria-label="Sort order">
       <option value="added">Order added</option>
-      <option value="et-asc">E_T ascending</option>
-      <option value="et-desc">E_T descending</option>
+      <option value="et-asc">Triplet energy, low to high</option>
+      <option value="et-desc">Triplet energy, high to low</option>
       <option value="sim">Similarity to query</option>
     </select>
   </div>
   <div class="tools" id="tools-filter">
+    <input id="f-cas" class="mono cas" type="search" placeholder="CAS number" aria-label="Search by CAS number" spellcheck="false" autocomplete="off">
     <select id="f-role" aria-label="Role">
       <option value="">Donors and acceptors</option>
       <option value="acceptor">Acceptors (with dual-role)</option>
@@ -63,7 +64,7 @@
       <option value="both">Dual-role only</option>
     </select>
     <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
-    <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+    <label class="inline"><span>E<sub>T</sub> from</span> <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
     <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
     <button class="btn small" id="f-reset" type="button">Reset filters</button>
   </div>

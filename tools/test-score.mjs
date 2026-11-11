@@ -100,4 +100,29 @@ assert.ok(S.requiredError(S.normalize({ ...full, usenote: "used as donor" }), ok
 const used = S.toDoc(S.normalize({ ...full, usedoi: "https://doi.org/10.1/x", usenote: "donor" }), { total: 0, items: [] });
 assert.deepEqual(used.uses, [{ doi: "10.1/x", note: "donor" }]);
 
+// DOIs: links are reduced to the DOI inside them; links without one stay invalid
+assert.equal(S.cleanDoi("https://doi.org/10.1021/jacs.0c05069"), "10.1021/jacs.0c05069");
+assert.equal(S.cleanDoi("https://pubs-acs-org.example-proxy.org/doi/pdf/10.1021/ja00184a008"), "10.1021/ja00184a008");
+assert.equal(S.cleanDoi("https://doi-org.example-proxy.org/10.1021/cm051312%2B"), "10.1021/cm051312+");
+assert.equal(S.cleanDoi("doi: 10.1039/c8cs00054a."), "10.1039/c8cs00054a");
+assert.ok(!S.isDoi(S.cleanDoi("https://pubs.example.org/jacsat/article/145/39/21576")));
+assert.ok(S.requiredError(S.normalize({ smiles: "C=C", et: "60", doi: "https://example.org/article/1" }), {}).startsWith("Give the source as a DOI"));
+// CAS numbers: format and check digit
+assert.ok(S.casValid("100-42-5"));          // styrene
+assert.ok(S.casValid("7732-18-5"));         // water
+assert.ok(!S.casValid("100-42-6"));
+assert.equal(S.cleanCas("100425"), "100-42-5");
+assert.equal(S.cleanCas(" 100–42–5 "), "100-42-5");
+assert.ok(S.requiredError(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-6" }), {}).startsWith("The CAS number"));
+assert.equal(S.toDoc(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-5" }), { total: 0, items: [] }).cas, "100-42-5");
+// reader corrections
+let cs = S.checkSuggestion({ et_kcal: "61,2", doi: "https://doi.org/10.1021/jacs.0c05069", uses_add: { doi: "10.1021/jacs.3c07678", note: "sensitizer" } });
+assert.equal(cs.error, null);
+assert.equal(cs.clean.et_kcal, 61.2);
+assert.equal(cs.clean.doi, "10.1021/jacs.0c05069");
+assert.ok(S.checkSuggestion({ ip_hash: "x" }).error);
+assert.ok(S.checkSuggestion({ et_kcal: "500" }).error);
+assert.ok(S.checkSuggestion({ doi: "https://example.org/x" }).error);
+assert.ok(S.checkSuggestion({}).error);
+
 console.log("score tests passed");

@@ -43,12 +43,13 @@
     </select>
     <select id="f-sort" aria-label="Sort order">
       <option value="added">Order added</option>
-      <option value="et-asc">E_T ascending</option>
-      <option value="et-desc">E_T descending</option>
+      <option value="et-asc">Triplet energy, low to high</option>
+      <option value="et-desc">Triplet energy, high to low</option>
       <option value="sim">Similarity to query</option>
     </select>
   </div>
   <div class="tools" id="tools-filter">
+    <input id="f-cas" class="mono cas" type="search" placeholder="CAS number" aria-label="Search by CAS number" spellcheck="false" autocomplete="off">
     <select id="f-role" aria-label="Role">
       <option value="">Donors and acceptors</option>
       <option value="acceptor">Acceptors (with dual-role)</option>
@@ -56,7 +57,7 @@
       <option value="both">Dual-role only</option>
     </select>
     <select id="f-cls" aria-label="Class"><option value="">All classes</option></select>
-    <label class="inline">E_T from <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
+    <label class="inline"><span>E<sub>T</sub> from</span> <input id="f-etmin" class="num" type="number" step="any" inputmode="decimal" aria-label="Minimum triplet energy in kcal/mol"></label>
     <label class="inline">to <input id="f-etmax" class="num" type="number" step="any" inputmode="decimal" aria-label="Maximum triplet energy in kcal/mol"> kcal/mol</label>
     <button class="btn small" id="f-reset" type="button">Reset filters</button>
   </div>
@@ -91,6 +92,7 @@
       <legend>Molecule</legend>
       <div class="frow">
         <label class="field">Name<input id="fm-name" type="text" autocomplete="off"></label>
+        <label class="field">CAS number (optional)<input id="fm-cas" class="mono" type="text" placeholder="e.g. 100-42-5" spellcheck="false" autocomplete="off"></label>
         <label class="field">Class (optional)<input id="fm-cls" type="text" placeholder="e.g. Styrenes" autocomplete="off"></label>
       </div>
       <label class="field">SMILES<input id="fm-smiles" class="mono" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. C/C=C/c1ccccc1"></label>
@@ -99,6 +101,7 @@
         <div class="sinfo">
           <button class="btn small" id="fm-draw" type="button">Draw structure</button>
           <span class="formula" id="fm-formula"></span>
+          <p class="banner" id="fm-known" role="status" hidden></p>
           <label class="field">Role in energy transfer
             <select id="fm-role"><option value="acceptor">Acceptor</option><option value="donor">Donor (sensitizer)</option><option value="both">Both</option></select>
           </label>
@@ -197,6 +200,8 @@
 
   <footer class="foot"><a href="#" id="lock" hidden>Sign out</a> Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/EnT-DB">github.com/nuniwo-source/EnT-DB</a>.</footer>
 </div>
+
+<div class="sk" id="ed" hidden></div>
 
 <div class="sk" id="sk" hidden>
   <div class="sk-box" role="dialog" aria-modal="true" aria-labelledby="sk-title">

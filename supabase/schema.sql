@@ -60,11 +60,33 @@ alter table public.entries add column if not exists import_key text;
 create unique index if not exists entries_import_key_idx on public.entries (import_key);
 -- Papers in which the molecule was used in photocatalysis: [{"doi": "...", "note": "..."}]
 alter table public.entries add column if not exists uses jsonb;
+-- CAS registry number, the first key used to recognise the same molecule.
+alter table public.entries add column if not exists cas text;
+create index if not exists entries_cas_idx on public.entries (cas);
 create index if not exists entries_status_idx on public.entries (status);
 create index if not exists entries_idcode_idx on public.entries (idcode);
 create index if not exists entries_ip_idx     on public.entries (ip_hash, created_at);
 
 alter table public.entries enable row level security;
+
+-- Sources are stored as DOIs only. Links (publisher pages, PDFs, library proxies) are not kept:
+-- the link columns are emptied and new values are refused. "not valid" checks new and changed
+-- rows only, so an old row with an odd value never blocks other work.
+update public.entries set pdf_url = null, pdf_label = null, si_url = null, url = null, url_label = null
+where pdf_url is not null or pdf_label is not null or si_url is not null or url is not null or url_label is not null;
+-- The first seed rows had links instead of DOIs for three papers; give them their DOIs.
+update public.entries set doi = '10.1351/pac197541040559' where doi is null and citation like 'Saltiel, Chang, Megarity%';
+update public.entries set doi = '10.1063/1.466936'        where doi is null and citation like 'Swiderek et al., J. Chem. Phys. 1994%';
+update public.entries set doi = '10.1021/ja00281a058'     where doi is null and citation like 'Goodman, Peters, Misawa, Caldwell%';
+alter table public.entries drop constraint if exists entries_no_links;
+alter table public.entries add constraint entries_no_links
+  check (pdf_url is null and si_url is null and url is null) not valid;
+alter table public.entries drop constraint if exists entries_doi_format;
+alter table public.entries add constraint entries_doi_format
+  check (doi is null or doi ~ '^10\.[0-9]{4,9}/[^[:space:]]+$') not valid;
+alter table public.entries drop constraint if exists entries_cas_format;
+alter table public.entries add constraint entries_cas_format
+  check (cas is null or cas ~ '^[0-9]{2,7}-[0-9]{2}-[0-9]$') not valid;
 
 -- True when the signed-in user's account has a confirmed email listed in public.admins.
 -- The email is read from auth.users, not from the sign-in token, and must be confirmed,
@@ -102,14 +124,44 @@ revoke all on public.entries from anon;
 revoke all on public.entries from authenticated;
 grant select, insert, update, delete on public.entries to authenticated;
 
+-- Corrections proposed by readers for approved entries. They arrive through the "submit"
+-- function (service role) and appear in the curators' queue; approving one writes only the
+-- changed fields into the entry.
+create table if not exists public.suggestions (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now(),
+  status      text not null default 'pending' check (status in ('pending','approved','rejected')),
+  decided_at  timestamptz,
+  entry_id    uuid not null references public.entries(id) on delete cascade,
+  changes     jsonb not null,           -- {field: proposed value}
+  comment     text,
+  submitted_by text,
+  note        text,                     -- curator's note
+  ip_hash     text
+);
+create index if not exists suggestions_status_idx on public.suggestions (status);
+create index if not exists suggestions_ip_idx on public.suggestions (ip_hash, created_at);
+alter table public.suggestions enable row level security;
+drop policy if exists suggestions_admin_select on public.suggestions;
+drop policy if exists suggestions_admin_update on public.suggestions;
+drop policy if exists suggestions_admin_delete on public.suggestions;
+create policy suggestions_admin_select on public.suggestions for select to authenticated using ((select public.is_admin()));
+create policy suggestions_admin_update on public.suggestions for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+create policy suggestions_admin_delete on public.suggestions for delete to authenticated using ((select public.is_admin()));
+revoke all on public.suggestions from anon, authenticated;
+grant select, update, delete on public.suggestions to authenticated;
+
 -- What the public site reads: approved rows only, without the private columns.
 -- The view deliberately runs with its owner's rights so anonymous visitors can read it
 -- although they have no access to the table. (Supabase's linter flags this as a
 -- "security definer view"; here it is the intended design.)
-create or replace view public.public_entries as
-select id, created_at, name, smiles, idcode, structure_note, cls, role,
+-- (Dropped and recreated, together with list_entries below, because its columns change.)
+drop function if exists public.list_entries(text, text);
+drop view if exists public.public_entries;
+create view public.public_entries as
+select id, created_at, name, cas, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
-       citation, doi, location, quote, evidence, pdf_url, pdf_label, si_url, url, url_label,
+       citation, doi, location, quote, evidence,
        verify_level, verify_note, uv, direct_exc, score, uses
 from public.entries
 where status = 'approved';

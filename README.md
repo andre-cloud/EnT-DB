@@ -8,12 +8,21 @@ Site: https://nuniwo-source.github.io/EnT-DB/
 
 ## How it works
 
-- **Browse and search.** Text search, plus exact-structure, substructure and similarity search
-  (structures are handled in the browser by [OpenChemLib](https://github.com/cheminfo/openchemlib-js)).
+- **Browse and search.** Text and CAS-number search, filters (role, class, origin, triplet-energy range), and
+  exact-structure, substructure and similarity search (structures are handled in the browser by
+  [OpenChemLib](https://github.com/cheminfo/openchemlib-js)).
 - **Submit.** Anyone can propose an entry. The form scores it from 0 to 100 for completeness and
   consistency; the server recomputes the score, so the browser cannot fake it.
 - **Review.** A submission is stored as *pending* and the curator is notified. It becomes public
   only when a curator approves it on the review page (`admin.html`).
+- **Duplicates.** A queued entry that looks like a molecule already in the database is marked in yellow.
+  The same molecule is recognised by CAS number first, then by structure (E/Z and R/S kept apart), identical
+  SMILES and name. Approving it asks which existing entry to overwrite (the old one moves to *Rejected*), or
+  to keep both when they are different measurements. Bulk approval leaves duplicates for one-by-one review.
+- **Corrections.** Readers can suggest a correction to any entry in the database. It reaches the queue as a
+  purple card showing old and new values; approving it writes only the changed fields into the entry.
+- **DOIs only.** Sources are stored and linked as DOIs, never as links (pasted links are reduced to the DOI
+  inside them, and the database refuses link columns). `tools/check-links.mjs` checks the published data.
 
 The score measures whether an entry is complete and consistent (structure parses, plausible value,
 method fully specified, DOI resolves, agreement with existing entries). It does not prove the value is right.
@@ -113,6 +122,7 @@ offered for import as *pending*; each carries an `import_key`, so importing twic
 ```
 node tools/test-score.mjs          # scoring rules
 node tools/build-function.mjs      # regenerate the server function after editing score.js or the template
+node tools/check-links.mjs         # published data carries DOIs only
 ```
 
 ## Limits worth knowing
