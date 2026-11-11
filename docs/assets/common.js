@@ -63,6 +63,30 @@
   /* true / false when the library is loaded, null when it is not */
   Ent.structureOk = function (smiles) { return window.OCL ? !!molOf(smiles) : null; };
 
+  /* ---------- CAS numbers from PubChem ---------- */
+  /* A CAS number cannot be computed from a structure: it is looked up on PubChem, whose synonyms
+     include the CAS numbers depositors gave. Resolves to the valid ones, most relevant first;
+     [] when PubChem does not know the structure or lists no CAS number. Rejects on network errors. */
+  Ent.lookupCas = function (smiles) {
+    if (!smiles) return Promise.resolve([]);
+    return fetch("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/synonyms/JSON", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "smiles=" + encodeURIComponent(smiles)   /* POST: "/", "#" and "\\" in a SMILES break URLs */
+    }).then(function (r) {
+      if (r.status === 404 || r.status === 400) return null;   /* unknown or unreadable structure */
+      if (!r.ok) { var e = new Error("PubChem answered " + r.status); e.status = r.status; throw e; }
+      return r.json();
+    }).then(function (j) {
+      var seen = {}, out = [];
+      ((j && j.InformationList && j.InformationList.Information) || []).forEach(function (inf) {
+        (inf.Synonym || []).forEach(function (syn) {
+          var c = String(syn).trim(); if (EntScore.casValid(c) && !seen[c]) { seen[c] = 1; out.push(c); }
+        });
+      });
+      return out;
+    });
+  };
+
   function fpIndex(searcher, smiles) {
     if (smiles in idxCache) return idxCache[smiles];
     var m = molOf(smiles), ix = null;
@@ -624,6 +648,21 @@
     var x = el("button", "btn small", "Remove"); x.type = "button"; x.addEventListener("click", function () { r.remove(); });
     r.appendChild(a); r.appendChild(b); r.appendChild(x); return r;
   }
+  /* "Look up on PubChem" under the CAS field: fills the first match and lists the others. */
+  function casLookup(inp, smiles) {
+    var wrap = el("div", "actions"), b = el("button", "btn small", "Look up on PubChem"), msg = el("span", "hint");
+    b.type = "button"; b.disabled = !smiles; msg.setAttribute("aria-live", "polite");
+    b.addEventListener("click", function () {
+      b.disabled = true; msg.textContent = "Asking PubChem…";
+      Ent.lookupCas(smiles).then(function (list) {
+        b.disabled = false;
+        if (!list.length) { msg.textContent = "PubChem has no CAS number for this structure."; return; }
+        inp.value = list[0];
+        msg.textContent = "From PubChem; check it before saving." + (list.length > 1 ? " PubChem also lists: " + list.slice(1, 6).join(", ") + (list.length > 6 ? "…" : "") : "");
+      }, function () { b.disabled = false; msg.textContent = "PubChem could not be reached. Try again."; });
+    });
+    wrap.appendChild(b); wrap.appendChild(msg); return wrap;
+  }
   Ent.editor = {
     open: function (d, onSave) {
       var box = el("div", "sk-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
@@ -637,6 +676,7 @@
         else { inp = el("input"); inp.type = f[2] === "number" ? "number" : "text"; if (f[2] === "number") inp.step = "any"; }
         inp.id = "ed-" + f[0]; inp.value = d[f[0]] == null ? "" : d[f[0]];
         lab.appendChild(inp); box.appendChild(lab);
+        if (f[0] === "cas") box.appendChild(casLookup(inp, d.smiles));
       });
       box.appendChild(el("p", "hint", "Papers in which this molecule was used in photocatalysis"));
       var uses = el("div", "stack"); uses.id = "ed-uses";

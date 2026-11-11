@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>TrEnDB · Review</title>
 <meta name="description" content="Curator review queue for TrEnDB.">
 <meta name="robots" content="noindex">
@@ -22,6 +22,13 @@
   <div class="banner" id="imp" hidden>
     <span id="imp-text"></span>
     <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
+  </div>
+  <div class="banner" id="cas" hidden>
+    <span id="cas-text" aria-live="polite"></span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn" id="cas-go" type="button">Fill missing CAS numbers from PubChem</button>
+      <button class="btn" id="cas-stop" type="button" hidden>Stop</button>
+    </div>
   </div>
 
   <form class="login" id="login" hidden novalidate>
