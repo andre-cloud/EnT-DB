@@ -11,30 +11,39 @@ from typing import Any, Sequence
 from .batch import build_batch, build_batch_from_review
 from .client import TrEnDBClient
 from .ocsr import decimer_available, predict_smiles_decimer, run_ocsr_on_pdf
-from .pdf_extract import extract_pdf
+from .pdf_extract import extract_markdown, extract_pdf
 from .pdf_markdown import pdf_to_markdown
 from .resolvers import Resolver
 
 
-def _expand_pdfs(inputs: list[str]) -> list[Path]:
-    pdfs: list[Path] = []
+def _expand_inputs(inputs: list[str], *, allow_markdown: bool = False) -> list[Path]:
+    found: list[Path] = []
     for item in inputs:
         p = Path(item)
         if p.is_dir():
-            pdfs.extend(sorted(p.glob("*.pdf")))
+            pdfs = sorted(p.glob("*.pdf"))
+            if pdfs or not allow_markdown:
+                found.extend(pdfs)
+            else:
+                found.extend(sorted(p.glob("*.md")))
+                found.extend(sorted(p.glob("*.markdown")))
         elif p.is_file():
-            pdfs.append(p)
+            found.append(p)
         else:
-            pdfs.extend(sorted(Path().glob(item)))
+            found.extend(sorted(Path().glob(item)))
     # Preserve order while deduplicating paths
     seen: set[Path] = set()
     out: list[Path] = []
-    for p in pdfs:
+    for p in found:
         rp = p.resolve()
         if rp not in seen:
             seen.add(rp)
             out.append(p)
     return out
+
+
+def _expand_pdfs(inputs: list[str]) -> list[Path]:
+    return _expand_inputs(inputs, allow_markdown=False)
 
 
 def main_extract(argv: Sequence[str] | None = None) -> int:
@@ -44,8 +53,8 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_ext = sub.add_parser("extract", help="Extract entries from X PDF files or directories.")
-    p_ext.add_argument("pdfs", nargs="+", help="PDF files, directories, or glob patterns.")
+    p_ext = sub.add_parser("extract", help="Extract entries from PDF or Markdown papers, directories, or globs.")
+    p_ext.add_argument("pdfs", nargs="+", help="PDF/Markdown files, directories, or glob patterns.")
     p_ext.add_argument("--manifest", help="Optional JSON mapping pdf filename -> {doi, citation, role, cls}.")
     p_ext.add_argument("--doi", help="Override DOI when extracting a single PDF.")
     p_ext.add_argument("--role", default="acceptor", choices=("acceptor", "donor", "both"), help="Default role.")
@@ -128,9 +137,9 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
         extra_entries = [e.to_dict() for e in db_client.fetch_entries()] if db_client is not None else None
         with Resolver(batches_dir=args.batches_dir, extra_entries=extra_entries, offline=args.offline) as resolver:
             if args.cmd == "extract":
-                pdf_paths = _expand_pdfs(args.pdfs)
-                if not pdf_paths:
-                    print("No PDF files matched.", file=sys.stderr)
+                input_paths = _expand_inputs(args.pdfs, allow_markdown=True)
+                if not input_paths:
+                    print("No PDF or Markdown files matched.", file=sys.stderr)
                     return 2
                 manifest: dict[str, dict[str, Any]] = {}
                 if args.manifest:
@@ -139,20 +148,30 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
                 md_dir = Path(args.out_dir) / "markdown" if args.save_markdown else None
                 fig_dir = Path(args.out_dir) / "figures" if args.decimer else None
                 all_candidates = []
-                for p in pdf_paths:
+                for p in input_paths:
                     meta = manifest.get(p.name, {})
-                    cands = extract_pdf(
-                        p,
-                        resolver=resolver,
-                        doi_override=args.doi or meta.get("doi"),
-                        citation_override=meta.get("citation"),
-                        default_role=meta.get("role", args.role),
-                        default_cls=meta.get("cls", args.cls_name),
-                        enable_ocr=not args.no_ocr,
-                        save_markdown_dir=md_dir,
-                        use_decimer=args.decimer,
-                        figures_dir=fig_dir,
-                    )
+                    if p.suffix.lower() in (".md", ".markdown"):
+                        cands = extract_markdown(
+                            p,
+                            resolver=resolver,
+                            doi_override=args.doi or meta.get("doi"),
+                            citation_override=meta.get("citation"),
+                            default_role=meta.get("role", args.role),
+                            default_cls=meta.get("cls", args.cls_name),
+                        )
+                    else:
+                        cands = extract_pdf(
+                            p,
+                            resolver=resolver,
+                            doi_override=args.doi or meta.get("doi"),
+                            citation_override=meta.get("citation"),
+                            default_role=meta.get("role", args.role),
+                            default_cls=meta.get("cls", args.cls_name),
+                            enable_ocr=not args.no_ocr,
+                            save_markdown_dir=md_dir,
+                            use_decimer=args.decimer,
+                            figures_dir=fig_dir,
+                        )
                     all_candidates.extend(cands)
 
                 res = build_batch(

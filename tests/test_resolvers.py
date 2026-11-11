@@ -17,6 +17,11 @@ def test_resolver_local_and_remote_mocked() -> None:
             return httpx.Response(200, json={"status": "SUCCESS", "smiles": "N#Cc1ccc(C(=O)c2ccccc2)cc1"})
         if "opsin.ch.cam.ac.uk" in url:
             return httpx.Response(404, json={"status": "FAILURE"})
+        if "pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/property/IUPACName/" in url:
+            return httpx.Response(
+                200,
+                json={"PropertyTable": {"Properties": [{"CID": 3102, "IUPACName": "diphenylmethanone"}]}},
+            )
         if "pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/" in url:
             return httpx.Response(
                 200,
@@ -78,3 +83,14 @@ def test_resolver_local_and_remote_mocked() -> None:
         assert resolver.doi_resolves("10.1021/jacs.0c05069") is True
         cite = resolver.fetch_citation("10.1021/jacs.0c05069")
         assert cite == "Elliott, Kayal, J. Am. Chem. Soc. 2020, 142, 14947–14956"
+
+        # IUPAC name lookup + caching
+        assert resolver.resolve_iupac("O=C(c1ccccc1)c1ccccc1") == "diphenylmethanone"
+        n_before_iupac = len(calls)
+        assert resolver.resolve_iupac("O=C(c1ccccc1)c1ccccc1") == "diphenylmethanone"
+        assert len(calls) == n_before_iupac
+
+        # Built-in photochemistry sensitizers resolve offline
+        bz = resolver.resolve_molecule("Benzanthrone", lookup_cas=False)
+        assert bz.smiles == "O=C1c2ccccc2-c2cccc3cccc1c23"
+        assert bz.source == "local_dict"

@@ -89,10 +89,22 @@ def test_load_config_reads_repo_config_js() -> None:
 def test_load_config_reads_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRENDB_USER", raising=False)
     monkeypatch.delenv("TRENDB_PASS", raising=False)
-    (tmp_path / ".env").write_text('TRENDB_USER="demo"\nTRENDB_PASS=\'secret\'\n', encoding="utf-8")
+    monkeypatch.delenv("TRENDB_CURATOR_EMAIL", raising=False)
+    monkeypatch.delenv("TRENDB_CURATOR_PASS", raising=False)
+    (tmp_path / ".env").write_text(
+        'TRENDB_USER="demo"\nTRENDB_PASS=\'secret\'\nTRENDB_CURATOR_EMAIL=cur@example.org\nTRENDB_CURATOR_PASS=pw\n',
+        encoding="utf-8",
+    )
     cfg = load_config(repo_root=tmp_path)
     assert cfg.site_user == "demo"
     assert cfg.site_pass == "secret"
+    assert cfg.curator_email == "cur@example.org"
+    assert cfg.curator_pass == "pw"
+
+    # Empty env vars should not shadow .env values
+    monkeypatch.setenv("TRENDB_USER", "")
+    cfg2 = load_config(repo_root=tmp_path)
+    assert cfg2.site_user == "demo"
 
 
 def test_client_pagination_headers_and_cache(tmp_path: Path) -> None:
@@ -122,6 +134,8 @@ def test_client_pagination_headers_and_cache(tmp_path: Path) -> None:
     client = TrEnDBClient(
         supabase_url="https://example.supabase.co",
         supabase_anon_key="sb_publishable_testkey",
+        curator_email="",
+        curator_pass="",
         cache_path=cache_file,
         cache_ttl_seconds=3600,
         http_client=http,
@@ -138,6 +152,8 @@ def test_client_pagination_headers_and_cache(tmp_path: Path) -> None:
     client2 = TrEnDBClient(
         supabase_url="https://example.supabase.co",
         supabase_anon_key="sb_publishable_testkey",
+        curator_email="",
+        curator_pass="",
         cache_path=cache_file,
         cache_ttl_seconds=3600,
         http_client=http,
@@ -161,6 +177,10 @@ def test_client_jwt_header_and_gated_error() -> None:
     client = TrEnDBClient(
         supabase_url="https://example.supabase.co",
         supabase_anon_key="eyJ_legacy_jwt",
+        site_user="",
+        site_pass="",
+        curator_email="",
+        curator_pass="",
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     assert seen_headers == {}
@@ -174,6 +194,8 @@ def test_query_filters_rdkit_grouping_and_exports(tmp_path: Path) -> None:
     client = TrEnDBClient(
         supabase_url="https://example.supabase.co",
         supabase_anon_key="sb_test",
+        curator_email="",
+        curator_pass="",
         http_client=httpx.Client(
             transport=httpx.MockTransport(lambda req: httpx.Response(200, json=rows))
         ),
@@ -230,3 +252,103 @@ def test_offline_from_real_batches() -> None:
     assert len(entries) >= 187
     tx = client.query().substructure("O=c1c2ccccc2sc2ccccc12").all()
     assert len(tx) >= 10
+
+
+def test_curator_auth_fallback_when_email_in_site_user() -> None:
+    rows = _make_sample_rows()
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url), dict(request.headers)))
+        if request.url.path.endswith("/list_entries"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/check_access"):
+            return httpx.Response(200, json=False)
+        if request.url.path.endswith("/auth/v1/token"):
+            payload = json.loads(request.content.decode("utf-8"))
+            assert payload == {"email": "curator@example.org", "password": "pw"}
+            return httpx.Response(200, json={"access_token": "jwt_curator_tok"})
+        if request.url.path.endswith("/is_admin"):
+            assert request.headers.get("authorization") == "Bearer jwt_curator_tok"
+            return httpx.Response(200, json=True)
+        if request.url.path.endswith("/rest/v1/entries"):
+            assert request.headers.get("authorization") == "Bearer jwt_curator_tok"
+            assert "status=eq.approved" in str(request.url)
+            return httpx.Response(200, json=rows)
+        return httpx.Response(404)
+
+    client = TrEnDBClient(
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="sb_publishable_testkey",
+        site_user="curator@example.org",
+        site_pass="pw",
+        curator_email="",
+        curator_pass="",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    entries = client.fetch_entries()
+    assert len(entries) == 4
+    assert [c[0] for c in calls] == ["POST", "POST", "POST", "POST", "GET"]
+
+
+def test_explicit_curator_auth_and_error_cases() -> None:
+    rows = _make_sample_rows()
+    seen_paths: list[str] = []
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path.endswith("/auth/v1/token"):
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.path.endswith("/is_admin"):
+            return httpx.Response(200, json=True)
+        if request.url.path.endswith("/rest/v1/entries"):
+            return httpx.Response(200, json=rows)
+        return httpx.Response(404)
+
+    c_ok = TrEnDBClient(
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="sb_publishable_testkey",
+        curator_email="curator@example.org",
+        curator_pass="pw",
+        http_client=httpx.Client(transport=httpx.MockTransport(ok_handler)),
+    )
+    assert len(c_ok.fetch_entries()) == 4
+    assert seen_paths == ["/auth/v1/token", "/rest/v1/rpc/is_admin", "/rest/v1/entries"]
+
+    def not_admin_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/v1/token"):
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.path.endswith("/is_admin"):
+            return httpx.Response(200, json=False)
+        return httpx.Response(404)
+
+    c_non_admin = TrEnDBClient(
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="sb_publishable_testkey",
+        curator_email="user@example.org",
+        curator_pass="pw",
+        http_client=httpx.Client(transport=httpx.MockTransport(not_admin_handler)),
+    )
+    with pytest.raises(TrEnDBError, match="public\\.admins"):
+        c_non_admin.fetch_entries()
+
+    def bad_pw_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/list_entries"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/check_access"):
+            return httpx.Response(200, json=False)
+        if request.url.path.endswith("/auth/v1/token"):
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(404)
+
+    c_bad_pw = TrEnDBClient(
+        supabase_url="https://example.supabase.co",
+        supabase_anon_key="sb_publishable_testkey",
+        site_user="curator@example.org",
+        site_pass="wrong",
+        curator_email="",
+        curator_pass="",
+        http_client=httpx.Client(transport=httpx.MockTransport(bad_pw_handler)),
+    )
+    with pytest.raises(TrEnDBError, match="site_access"):
+        c_bad_pw.fetch_entries()

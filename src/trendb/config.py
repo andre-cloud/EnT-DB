@@ -15,12 +15,14 @@ _LINE_COMMENT_RE = re.compile(r"(?:^|(?<=\s))//[^\n]*", re.MULTILINE)
 
 @dataclass(frozen=True)
 class TrEnDBConfig:
-    """Public Supabase connection settings and optional shared-site access credentials."""
+    """Public Supabase connection settings and optional shared-site or curator credentials."""
 
     supabase_url: str
     supabase_anon_key: str
     site_user: str = ""
     site_pass: str = ""
+    curator_email: str = ""
+    curator_pass: str = ""
     repo_root: Path | None = None
 
     @property
@@ -79,6 +81,8 @@ def load_config(
     supabase_anon_key: str | None = None,
     site_user: str | None = None,
     site_pass: str | None = None,
+    curator_email: str | None = None,
+    curator_pass: str | None = None,
     repo_root: str | Path | None = None,
 ) -> TrEnDBConfig:
     """Resolve TrEnDB configuration from explicit args, env vars, .env, or docs/assets/config.js."""
@@ -95,12 +99,24 @@ def load_config(
 
     url = (supabase_url or os.getenv("TRENDB_URL") or dotenv.get("TRENDB_URL") or js_url or "").strip().rstrip("/")
     key = (supabase_anon_key or os.getenv("TRENDB_ANON_KEY") or dotenv.get("TRENDB_ANON_KEY") or js_key or "").strip()
-    user = site_user if site_user is not None else os.getenv("TRENDB_USER", dotenv.get("TRENDB_USER", ""))
-    passwd = site_pass if site_pass is not None else os.getenv("TRENDB_PASS", dotenv.get("TRENDB_PASS", ""))
+    user = site_user if site_user is not None else (os.getenv("TRENDB_USER") or dotenv.get("TRENDB_USER") or "")
+    passwd = site_pass if site_pass is not None else (os.getenv("TRENDB_PASS") or dotenv.get("TRENDB_PASS") or "")
+    c_email = (
+        curator_email
+        if curator_email is not None
+        else (os.getenv("TRENDB_CURATOR_EMAIL") or dotenv.get("TRENDB_CURATOR_EMAIL") or "")
+    )
+    c_pass = (
+        curator_pass
+        if curator_pass is not None
+        else (os.getenv("TRENDB_CURATOR_PASS") or dotenv.get("TRENDB_CURATOR_PASS") or "")
+    )
     return TrEnDBConfig(
         supabase_url=url,
         supabase_anon_key=key,
         site_user=user,
         site_pass=passwd,
+        curator_email=c_email,
+        curator_pass=c_pass,
         repo_root=root,
     )

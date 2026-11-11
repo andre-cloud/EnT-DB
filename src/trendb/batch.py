@@ -240,6 +240,17 @@ def build_batch(
         can = chem.canonical_smiles(smi, isomeric=True) if chem.HAS_RDKIT else smi
         cand.smiles = can or smi
 
+        iupac = resolver.resolve_iupac(cand.smiles)
+        if iupac and iupac.strip() and iupac.strip().lower() != (cand.name or "").strip().lower():
+            orig_name = (cand.name or "").strip()
+            cand.name = iupac.strip()[:200]
+            if orig_name and orig_name != "(unnamed candidate)":
+                prefix = f"Paper name: {orig_name}."
+                if not cand.structure_note:
+                    cand.structure_note = prefix
+                elif prefix not in cand.structure_note:
+                    cand.structure_note = f"{prefix} {cand.structure_note}"
+
         if not cand.cas and not resolver.offline:
             cas_hits = resolver.lookup_cas_from_smiles(cand.smiles)
             if cas_hits:

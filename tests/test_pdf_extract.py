@@ -12,7 +12,7 @@ import pytest
 from trendb.batch import build_batch, build_batch_from_review, validate_batch_rows
 from trendb.cli import main_extract, main_scrape
 from trendb.models import BATCH_ROW_KEYS
-from trendb.pdf_extract import extract_pdf
+from trendb.pdf_extract import extract_markdown, extract_pdf
 from trendb.resolvers import Resolver
 
 
@@ -191,3 +191,116 @@ def test_cli_extract_and_scrape(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert len(scraped) == 1
     assert scraped[0]["name"].lower() == "thioxanthone"
     assert scraped[0]["et_kcal"] == 65.5
+
+
+def test_markdown_and_classic_jacs_patterns(tmp_path: Path) -> None:
+    md_path = tmp_path / "ja00973a001.md"
+    md_text = """# Mechanisms of Photochemical Reactions in Solution. XXXIX.
+
+<!-- page 1 -->
+
+Mechanisms of Photochemical Reactions in Solution. XXXIX.
+Downloaded from pubs.acs.org/jacsat/article-pdf/88/21/4769/6554755/ja00973a001.pdf by reader
+
+---
+
+<!-- page 6 -->
+
+The behavior of the compound with sensitizers having excitation energies between 42 and 58 kcal/mole is definitely nonclassical.
+cis-Stilbene has a vertical excitation energy of 57 kcal/mole.
+
+---
+
+<!-- page 7 -->
+
+The triplet energy of benzil was taken as 50.9 kcal/mole rather than 53.7 kcal/mole.
+
+---
+
+<!-- page 8 -->
+
+Table VII. Phosphorescence in Rigid and Fluid Solvents
+
+| Substance | E_T,a | Solvent | Temp | Ref |
+| --- | --- | --- | --- | --- |
+| | kcal/mole | | | |
+| 2,2'-Binaphthyl | 55.9 | EPA | 77 °K | c |
+| Benzil | 50.9 | Benzene | 20 °C | h, i |
+
+Table VIII. Triplet Excitation Energies of Sensitizers
+
+| Sensitizer | E_T,a kcal/mole | Solvent | Ref |
+| --- | --- | --- | --- |
+| Triphenylene | 66.6 | MCIP | 32 |
+| 3,4-Benzpyrene | 41.9h | Ethanol | 38i |
+
+Triplet energy assignments are based on the position of the 0-0 band in phosphorescence spectra at 77 °K.
+
+The triplet energy of duroquinone was estimated from singlet-triplet absorption spectra in n-heptane and have 0-0 bands at 51.6 kcal/mole.
+Acridine was assigned a triplet energy of 45.3 kcal/mole on the basis of its singlet-triplet absorption spectrum taken with chloroform solvent in the presence of a high oxygen pressure.
+Assignment of triplet energy values of these sensitizers is based upon Figures 1-5, where it appears that triplet energies of 47.0 kcal/mole for benzanthrone and 45.5 kcal/mole for 3-acetylpyrene are in harmony with the different plots.
+That these triplet energies are reasonably accurate is demonstrated by the fact that 3-bromobenzanthrone and pyrene have phosphorescence 0-0 bands (77°K) at 45.7 and 48.2 kcal/mole, respectively.
+"""
+    md_path.write_text(md_text, encoding="utf-8")
+
+    batches_dir = tmp_path / "batches"
+    batches_dir.mkdir()
+    (batches_dir / "index.json").write_text('{"files": ["batch-001.json"]}\n', encoding="utf-8")
+    # Seed batch-001 with an IUPAC name for triphenylene to verify local IUPAC upgrade
+    (batches_dir / "batch-001.json").write_text(
+        json.dumps([{"import_key": "existing:1", "name": "triphenylene", "smiles": "c1ccc2c(c1)c1ccccc1c1ccccc21", "et_kcal": 66.0, "origin": "calc"}]),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "stage_md"
+
+    with Resolver(cache_path=None, batches_dir=batches_dir, offline=True) as resolver:
+        cands = extract_markdown(md_path, resolver=resolver)
+        by_name = {(c.name.lower(), c.et_kcal): c for c in cands}
+
+        # ACS DOI recovered cleanly (and no URL leaked into fields)
+        assert all(c.doi == "10.1021/ja00973a001" for c in cands)
+        # Range "between 42 and 58" and rejected "rather than 53.7" must not be extracted
+        assert not any(c.et_kcal in (42.0, 58.0, 53.7) for c in cands)
+        # Multi-row header + Roman numeral caption + Temp/Ref/footnote extracted
+        binap = by_name[("2,2'-binaphthyl", 55.9)]
+        assert "Table VII" in binap.location
+        assert binap.conditions == "EPA, 77 K"
+        assert binap.et_type == "Spectroscopic, 0-0 band"
+        assert "Cited ref in table: c" in binap.verify_note
+
+        # Table VIII (second table on page 8) + footnote-suffixed number 41.9h
+        bp = by_name[("3,4-benzpyrene", 41.9)]
+        assert "Table VIII" in bp.location
+        assert bp.smiles is not None
+
+        # Multi-molecule prose sentence paired accurately
+        assert ("benzanthrone", 47.0) in by_name
+        assert ("3-acetylpyrene", 45.5) in by_name
+        assert ("duroquinone", 51.6) in by_name
+        assert ("acridine", 45.3) in by_name
+        assert ("cis-stilbene", 57.0) in by_name
+        assert by_name[("cis-stilbene", 57.0)].origin == "exp"
+        assert ("3-bromobenzanthrone", 45.7) in by_name
+        assert ("pyrene", 48.2) in by_name
+        assert by_name[("acridine", 45.3)].method == "S0→T1 absorption (O2 or heavy-atom perturbed)"
+
+    rc = main_extract(
+        [
+            "extract",
+            str(md_path),
+            "--batches-dir",
+            str(batches_dir),
+            "--out-dir",
+            str(out_dir),
+            "--offline",
+            "--write-batch",
+        ]
+    )
+    assert rc == 0
+    batch2 = batches_dir / "batch-002.json"
+    assert batch2.is_file()
+    rows = json.loads(batch2.read_text(encoding="utf-8"))
+    assert len(rows) >= 8
+    assert validate_batch_rows(rows) == []
+    assert json.loads((batches_dir / "index.json").read_text(encoding="utf-8"))["files"] == ["batch-001.json", "batch-002.json"]
+

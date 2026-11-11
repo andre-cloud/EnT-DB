@@ -14,6 +14,13 @@ from .models import Entry, MoleculeGroup
 from .query import QueryBuilder, SearchResult, filter_entries, group_by_molecule
 
 PAGE_SIZE = 1000
+# Exact columns exposed by public.public_entries in supabase/schema.sql (curators' working notes stay private).
+PUBLIC_ENTRY_COLUMNS = (
+    "id,created_at,name,cas,smiles,idcode,structure_note,cls,role,"
+    "origin,et_kcal,et_unc,et_reported,et_type,method,conditions,"
+    "citation,doi,location,quote,evidence,"
+    "uv_lmax,uv_eps,uv_cond,direct_exc,score,uses"
+)
 
 
 class TrEnDBError(RuntimeError):
@@ -24,8 +31,9 @@ class TrEnDBClient:
     """Read-only client for the public TrEnDB database (approved entries only).
 
     Connects to Supabase ``POST /rest/v1/rpc/list_entries`` with automatic 1000-row
-    pagination and supports optional ``site_access`` shared login credentials, file
-    caching with TTL, or offline querying against ``docs/batches/*.json``.
+    pagination and supports optional ``site_access`` shared login credentials,
+    curator email/password sign-in via Supabase Auth, file caching with TTL, or
+    offline querying against ``docs/batches/*.json``.
     """
 
     def __init__(
@@ -35,6 +43,8 @@ class TrEnDBClient:
         supabase_anon_key: str | None = None,
         site_user: str | None = None,
         site_pass: str | None = None,
+        curator_email: str | None = None,
+        curator_pass: str | None = None,
         repo_root: str | Path | None = None,
         cache_path: str | Path | None = None,
         cache_ttl_seconds: float = 0.0,
@@ -46,6 +56,8 @@ class TrEnDBClient:
             supabase_anon_key=supabase_anon_key,
             site_user=site_user,
             site_pass=site_pass,
+            curator_email=curator_email,
+            curator_pass=curator_pass,
             repo_root=repo_root,
         )
         self._owns_client = http_client is None
@@ -86,11 +98,13 @@ class TrEnDBClient:
     def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, bearer_token: str | None = None) -> dict[str, str]:
         key = self.config.supabase_anon_key
         h = {"apikey": key, "Content-Type": "application/json"}
-        # Mirror docs/assets/common.js: sb_* publishable keys are not JWTs.
-        if key and not key.startswith("sb_"):
+        # Mirror docs/assets/common.js: sb_* publishable keys are not JWTs, whereas curator tokens are.
+        if bearer_token:
+            h["Authorization"] = f"Bearer {bearer_token}"
+        elif key and not key.startswith("sb_"):
             h["Authorization"] = f"Bearer {key}"
         return h
 
@@ -137,22 +151,7 @@ class TrEnDBClient:
         payload = {"fetched_at": time.time(), "entries": [e.to_dict() for e in entries]}
         self._cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    def fetch_entries(self, *, force_refresh: bool = False) -> list[Entry]:
-        """Fetch all approved entries from public.list_entries (paginated by 1000)."""
-        if self._offline_entries is not None:
-            return list(self._offline_entries)
-
-        if not force_refresh:
-            if self._memory_cache is not None:
-                ts, cached = self._memory_cache
-                if self._cache_ttl <= 0 or (time.time() - ts) <= self._cache_ttl:
-                    return list(cached)
-            disk = self._read_disk_cache()
-            if disk is not None:
-                self._memory_cache = (time.time(), disk)
-                return list(disk)
-
-        self._require_configured()
+    def _fetch_public_entries(self) -> list[Entry]:
         entries: list[Entry] = []
         offset = 0
         while True:
@@ -170,13 +169,99 @@ class TrEnDBClient:
             if len(rows) < PAGE_SIZE:
                 break
             offset += PAGE_SIZE
+        return entries
 
-        if not entries and not self.check_access():
+    def _sign_in_curator(self, email: str, password: str) -> str:
+        resp = self._http.post(
+            f"{self.config.supabase_url}/auth/v1/token?grant_type=password",
+            headers=self._headers(),
+            json={"email": email, "password": password},
+        )
+        if resp.status_code in (400, 401):
             raise TrEnDBError(
-                "Public database is gated by site_access (private preview) and credentials were missing or rejected. "
-                "Pass site_user=... and site_pass=... to TrEnDBClient(...), set TRENDB_USER / TRENDB_PASS "
-                "(or add them to .env), or use TrEnDBClient.from_batches('docs/batches') for offline batch data."
+                "Public database is gated by site_access (private preview), and credentials were rejected "
+                "by both site_access and curator auth. Pass site_user=.../site_pass=... (or TRENDB_USER/TRENDB_PASS) "
+                "for site_access, curator_email=.../curator_pass=... (or TRENDB_CURATOR_EMAIL/TRENDB_CURATOR_PASS) "
+                "for curator login, or use TrEnDBClient.from_batches('docs/batches') for offline batch data."
             )
+        if not resp.is_success:
+            raise TrEnDBError(f"Curator sign-in failed ({resp.status_code}): {resp.text}")
+        token = (resp.json() or {}).get("access_token")
+        if not token:
+            raise TrEnDBError("Curator sign-in succeeded without returning an access_token.")
+        return str(token)
+
+    def _fetch_curator_entries(self, email: str, password: str) -> list[Entry]:
+        token = self._sign_in_curator(email, password)
+        auth_headers = self._headers(bearer_token=token)
+        adm = self._http.post(
+            f"{self.config.supabase_url}/rest/v1/rpc/is_admin",
+            headers=auth_headers,
+            json={},
+        )
+        if not adm.is_success:
+            raise TrEnDBError(f"is_admin failed ({adm.status_code}): {adm.text}")
+        if not bool(adm.json()):
+            raise TrEnDBError(
+                "Public database is gated by site_access, and the signed-in account is not listed as a curator in public.admins."
+            )
+
+        entries: list[Entry] = []
+        offset = 0
+        while True:
+            url = (
+                f"{self.config.supabase_url}/rest/v1/entries"
+                f"?select={PUBLIC_ENTRY_COLUMNS}&status=eq.approved"
+                f"&order=created_at.asc,id.asc&limit={PAGE_SIZE}&offset={offset}"
+            )
+            resp = self._http.get(url, headers=auth_headers)
+            if resp.status_code == 401:
+                raise TrEnDBError("Curator session rejected (401) while fetching entries.")
+            if not resp.is_success:
+                raise TrEnDBError(f"Curator entries fetch failed ({resp.status_code}): {resp.text}")
+            rows = resp.json() or []
+            entries.extend(Entry.from_dict(r) for r in rows)
+            if len(rows) < PAGE_SIZE:
+                break
+            offset += PAGE_SIZE
+        return entries
+
+    def fetch_entries(self, *, force_refresh: bool = False) -> list[Entry]:
+        """Fetch all approved entries from public.list_entries (or authenticated curator view)."""
+        if self._offline_entries is not None:
+            return list(self._offline_entries)
+
+        if not force_refresh:
+            if self._memory_cache is not None:
+                ts, cached = self._memory_cache
+                if self._cache_ttl <= 0 or (time.time() - ts) <= self._cache_ttl:
+                    return list(cached)
+            disk = self._read_disk_cache()
+            if disk is not None:
+                self._memory_cache = (time.time(), disk)
+                return list(disk)
+
+        self._require_configured()
+        if bool(self.config.curator_email) != bool(self.config.curator_pass):
+            raise TrEnDBError(
+                "Both curator_email and curator_pass (or TRENDB_CURATOR_EMAIL / TRENDB_CURATOR_PASS) "
+                "must be provided together."
+            )
+        if self.config.curator_email and self.config.curator_pass:
+            entries = self._fetch_curator_entries(self.config.curator_email, self.config.curator_pass)
+        else:
+            entries = self._fetch_public_entries()
+            if not entries and not self.check_access():
+                # Users often place their curator email/password in TRENDB_USER/TRENDB_PASS; fall back to Supabase Auth.
+                if "@" in self.config.site_user and self.config.site_pass:
+                    entries = self._fetch_curator_entries(self.config.site_user, self.config.site_pass)
+                else:
+                    raise TrEnDBError(
+                        "Public database is gated by site_access (private preview) and credentials were missing or rejected. "
+                        "Pass site_user=... and site_pass=... to TrEnDBClient(...), set TRENDB_USER / TRENDB_PASS "
+                        "(or add them to .env), pass curator_email=... and curator_pass=... (or TRENDB_CURATOR_EMAIL / TRENDB_CURATOR_PASS), "
+                        "or use TrEnDBClient.from_batches('docs/batches') for offline batch data."
+                    )
 
         self._memory_cache = (time.time(), entries)
         self._write_disk_cache(entries)
