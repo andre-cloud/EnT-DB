@@ -44,8 +44,10 @@ create table if not exists public.entries (
   verify_level   text,
   verify_note    text,
   -- absorption
-  uv             text,
-  direct_exc     text,
+  uv_lmax        int,
+  uv_eps         int,
+  uv_cond        text,
+  direct_exc     jsonb,
   -- review
   source_kind    text not null default 'form',
   score          int,
@@ -62,6 +64,69 @@ create unique index if not exists entries_import_key_idx on public.entries (impo
 alter table public.entries add column if not exists uses jsonb;
 -- CAS registry number, the first key used to recognise the same molecule.
 alter table public.entries add column if not exists cas text;
+-- Structured UV-vis columns (replacing legacy free-text uv).
+alter table public.entries add column if not exists uv_lmax int;
+alter table public.entries add column if not exists uv_eps int;
+alter table public.entries add column if not exists uv_cond text;
+
+-- Drop dependent view/function before migrating legacy uv / direct_exc columns (recreated below).
+drop function if exists public.list_entries(text, text);
+drop view if exists public.public_entries;
+
+do $$
+declare
+  v_direct_type text;
+  v_has_uv boolean;
+begin
+  select data_type into v_direct_type
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'entries' and column_name = 'direct_exc';
+
+  if v_direct_type = 'text' then
+    alter table public.entries
+      alter column direct_exc type jsonb
+      using (
+        case
+          when direct_exc is null or btrim(direct_exc) = '' then null
+          when direct_exc ~ '^\s*\{' then direct_exc::jsonb
+          when direct_exc ~ '([0-9]{3,4})' then jsonb_build_object(
+            coalesce(
+              nullif(btrim(regexp_replace(regexp_replace(direct_exc, '^.*?(with\s+(a\s+)?|at\s+)', '', 'i'), '[0-9]+\s*nm\.?', '', 'gi')), ''),
+              'irradiation'
+            ),
+            substring(direct_exc from '([0-9]{3,4})')::int
+          )
+          else null
+        end
+      );
+  end if;
+
+  select exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'entries' and column_name = 'uv'
+  ) into v_has_uv;
+
+  if v_has_uv then
+    update public.entries
+    set
+      uv_lmax = coalesce(uv_lmax, nullif(substring(uv from '([0-9]{3,4})\s*nm'), '')::int),
+      uv_eps  = coalesce(uv_eps,  nullif(replace(substring(uv from 'ε[^0-9]{0,12}([0-9][0-9,]*)'), ',', ''), '')::int),
+      uv_cond = coalesce(uv_cond, nullif(btrim(substring(uv from '\(([^()]+)\)\s*$')), ''))
+    where uv is not null and btrim(uv) <> '' and uv_lmax is null and uv_cond is null;
+
+    alter table public.entries drop column uv;
+  end if;
+end $$;
+
+alter table public.entries drop constraint if exists entries_uv_lmax_range;
+alter table public.entries add constraint entries_uv_lmax_range
+  check (uv_lmax is null or (uv_lmax >= 100 and uv_lmax <= 1500)) not valid;
+alter table public.entries drop constraint if exists entries_uv_eps_nonneg;
+alter table public.entries add constraint entries_uv_eps_nonneg
+  check (uv_eps is null or uv_eps >= 0) not valid;
+alter table public.entries drop constraint if exists entries_direct_exc_object;
+alter table public.entries add constraint entries_direct_exc_object
+  check (direct_exc is null or jsonb_typeof(direct_exc) = 'object') not valid;
 create index if not exists entries_cas_idx on public.entries (cas);
 create index if not exists entries_status_idx on public.entries (status);
 create index if not exists entries_idcode_idx on public.entries (idcode);
@@ -156,13 +221,11 @@ grant select, update, delete on public.suggestions to authenticated;
 -- although they have no access to the table. (Supabase's linter flags this as a
 -- "security definer view"; here it is the intended design.)
 -- (Dropped and recreated, together with list_entries below, because its columns change.)
-drop function if exists public.list_entries(text, text);
-drop view if exists public.public_entries;
 create view public.public_entries as
 select id, created_at, name, cas, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
        citation, doi, location, quote, evidence,
-       uv, direct_exc, score, uses
+       uv_lmax, uv_eps, uv_cond, direct_exc, score, uses
        -- verify_level and verify_note are curators' working notes: never public
 from public.entries
 where status = 'approved';

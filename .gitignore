@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments & local caches
+.venv/
+.env
+.cache/
+*.sqlite
+*.sqlite3
+
+# Staging output defaults
+extracted/

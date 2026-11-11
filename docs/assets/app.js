@@ -36,7 +36,8 @@
 
   /* ---------- submission form ---------- */
   var FIELDS = ["name", "cas", "cls", "smiles", "role", "et", "unit", "unc", "origin", "kind", "tech", "solvent", "temp",
-                "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv", "direct", "usedoi", "usenote", "by", "website"];
+                "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv_lmax", "uv_eps", "uv_cond", "direct_src", "direct_nm",
+                "usedoi", "usenote", "by", "website"];
   function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); return p; }
   function context(f) {
     var ok = Ent.structureOk(f.smiles), same = null;
@@ -100,13 +101,21 @@
   /* ---------- suggesting a correction to an entry in the database ----------
      Every field is shown with its current value; the reader changes any number of them at once.
      Only the fields that differ from the entry are sent, and a curator sees them old against new. */
-  var LONG = { quote: 1, conditions: 1, method: 1, citation: 1, uv: 1, evidence: 1, et_type: 1 };
-  function curText(d, k) { var v = d[k]; return v == null ? "" : String(v); }
+  var LONG = { quote: 1, conditions: 1, method: 1, citation: 1, evidence: 1, et_type: 1 };
+  function curText(d, k) {
+    var v = d[k];
+    if (v == null) return "";
+    if (k === "direct_exc" && typeof v === "object") return EntScore.formatDirectExc(v);
+    return String(v);
+  }
   function differs(type, now, val) {
     var t = String(val).trim();
-    if (type === "et" || type === "unc") {
+    if (type === "et" || type === "unc" || type === "lmax" || type === "eps") {
       if (t === "" || now === "") return t !== now;
       return EntScore.num(t) !== Number(now);
+    }
+    if (type === "direct_map") {
+      return JSON.stringify(EntScore.parseDirectExc(t).map) !== JSON.stringify(EntScore.parseDirectExc(now).map);
     }
     if (type === "cas") return EntScore.cleanCas(t) !== now;
     if (type === "doi") return EntScore.cleanDoi(t).toLowerCase() !== now.toLowerCase();

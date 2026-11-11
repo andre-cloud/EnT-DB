@@ -11,7 +11,8 @@ const S = globalThis.EntScore;
 const full = {
   name: "Styrene", smiles: "C=Cc1ccccc1", role: "acceptor", et: "2.69", unit: "ev", unc: "0.02",
   origin: "exp", kind: "Spectroscopic, 0-0 band", tech: "Electron-energy-loss spectroscopy", solvent: "Solid argon", temp: "15 K",
-  cite: "Example J. 2000, 1, 1", doi: "https://doi.org/10.1234/example.5678", loc: "Abstract", quote: "0-0 transition at 2.69 eV", uv: "248 nm",
+  cite: "Example J. 2000, 1, 1", doi: "https://doi.org/10.1234/example.5678", loc: "Abstract", quote: "0-0 transition at 2.69 eV",
+  uv_lmax: "248", uv_eps: "15000", uv_cond: "MeCN", direct_src: "LED", direct_nm: "415",
 };
 const okCtx = { structureOk: true, doiResolves: true, same: [] };
 
@@ -51,6 +52,10 @@ const doc = S.toDoc(f, S.scoreEntry(f, okCtx));
 assert.equal(doc.et_kcal, 62);
 assert.equal(doc.et_reported, "2.69 ± 0.02 eV");
 assert.equal(doc.et_unc, 0.46);   // 0.02 eV, kept to two decimals
+assert.equal(doc.uv_lmax, 248);
+assert.equal(doc.uv_eps, 15000);
+assert.equal(doc.uv_cond, "MeCN");
+assert.deepEqual(doc.direct_exc, { LED: 415 });
 assert.equal(doc.score, 100);
 assert.ok(!("status" in doc) && !("ip_hash" in doc));
 
@@ -116,10 +121,15 @@ assert.equal(S.cleanCas(" 100–42–5 "), "100-42-5");
 assert.ok(S.requiredError(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-6" }), {}).startsWith("The CAS number"));
 assert.equal(S.toDoc(S.normalize({ smiles: "C=C", et: "60", cite: "x", cas: "100-42-5" }), { total: 0, items: [] }).cas, "100-42-5");
 // reader corrections
-let cs = S.checkSuggestion({ et_kcal: "61,2", doi: "https://doi.org/10.1021/jacs.0c05069", uses_add: { doi: "10.1021/jacs.3c07678", note: "sensitizer" } });
+let cs = S.checkSuggestion({ et_kcal: "61,2", doi: "https://doi.org/10.1021/jacs.0c05069", uv_lmax: "354", uv_eps: "12000", direct_exc: "LED: 415, Kessil: 427", uses_add: { doi: "10.1021/jacs.3c07678", note: "sensitizer" } });
 assert.equal(cs.error, null);
 assert.equal(cs.clean.et_kcal, 61.2);
 assert.equal(cs.clean.doi, "10.1021/jacs.0c05069");
+assert.equal(cs.clean.uv_lmax, 354);
+assert.equal(cs.clean.uv_eps, 12000);
+assert.deepEqual(cs.clean.direct_exc, { LED: 415, Kessil: 427 });
+assert.ok(S.checkSuggestion({ uv_lmax: "50" }).error);
+assert.ok(S.checkSuggestion({ direct_exc: "bad value" }).error);
 assert.ok(S.checkSuggestion({ ip_hash: "x" }).error);
 assert.ok(S.checkSuggestion({ et_kcal: "500" }).error);
 assert.ok(S.checkSuggestion({ doi: "https://example.org/x" }).error);
