@@ -209,17 +209,61 @@
       .reduce(function (p, d) { return p.then(function () { return api.adminPatch(d.id, { idcode: Ent.idCode(d.smiles) }).catch(function () {}); }); }, Promise.resolve());
   }
 
+  /* ---------- CAS numbers looked up on PubChem ---------- */
+  /* One request at a time with a pause, under PubChem's limit of 5 per second.
+     Entries PubChem has no CAS number for are skipped for the rest of this visit. */
+  var casRun = null, casMiss = {};
+  function casTodo() { return state.docs.filter(function (d) { return !d.cas && d.smiles && !casMiss[d.id]; }); }
+  function drawCas() {
+    if (casRun) return;
+    var n = casTodo().length;
+    $("cas").hidden = !n; $("cas-go").hidden = false; $("cas-stop").hidden = true;
+    $("cas-text").textContent = n + (n === 1 ? " entry has" : " entries have") + " no CAS number. PubChem can fill the ones it knows; check doubtful ones in the editor.";
+  }
+  $("cas-go").addEventListener("click", function () {
+    var todo = casTodo(), run = casRun = { stop: false, out: false, found: 0, miss: 0, fail: 0, inRow: 0 };
+    $("cas-go").hidden = true; $("cas-stop").hidden = false; $("cas-stop").disabled = false;
+    function finish(why) {
+      casRun = null;
+      if (run.out) return;   /* signed out meanwhile: the panel is gone */
+      dupCache = {}; render(); drawCas();   /* new CAS numbers change which entries are duplicates */
+      var left = casTodo().length;
+      $("cas").hidden = false; $("cas-go").hidden = !left;
+      $("cas-text").textContent = why + " Filled " + run.found + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") + "."
+        + (left ? " " + left + " can still be tried." : "");
+    }
+    (function step(i) {
+      if (run.stop) return finish("Stopped.");
+      if (i >= todo.length) return finish("Done.");
+      if (run.inRow >= 5) return finish("Stopped after five errors in a row (PubChem or the database did not answer).");
+      $("cas-text").textContent = "Looking up " + (i + 1) + " / " + todo.length + " · filled " + run.found + " · not on PubChem " + run.miss + (run.fail ? " · failed " + run.fail : "");
+      var d = todo[i], wait = 250;
+      Ent.lookupCas(d.smiles).then(function (list) {
+        run.inRow = 0;
+        if (!list.length) { casMiss[d.id] = 1; run.miss++; return; }
+        return api.adminPatch(d.id, { cas: list[0] }).then(function (rows) {
+          if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); run.found++; }
+          else run.fail++;
+        });
+      }).catch(function (err) {
+        if (err && err.status === 401) { run.stop = run.out = true; signedOut("Your session ended. Sign in again."); return; }
+        run.fail++; run.inRow++; wait = 2000;   /* PubChem busy or offline, or the save failed: back off */
+      }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
+    })(0);
+  });
+  $("cas-stop").addEventListener("click", function () { if (casRun) { casRun.stop = true; $("cas-stop").disabled = true; } });
+
   function load() {
     state.loaded = false; state.loadErr = ""; render();
     return Promise.all([api.adminList(), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
-        state.docs = r[0] || []; state.sugg = r[1] || []; dupCache = {}; state.loaded = true; render(); backfill(); checkBatches();
+        state.docs = r[0] || []; state.sugg = r[1] || []; dupCache = {}; state.loaded = true; render(); backfill(); checkBatches(); drawCas();
       },
       function (err) {
         if (err.status === 401) signedOut("Your session ended. Sign in again.");
         else { state.loadErr = "The entries could not be loaded. Use Refresh to try again."; render(); }
       });
   }
-  function signedOut(msg) { Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
+  function signedOut(msg) { if (casRun) casRun.stop = casRun.out = true; $("cas").hidden = true; Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
 
   function start() {
     if (!api.configured) { show(""); banner("The backend is not configured yet, so there is nothing to review. See the setup steps in the repository README."); return; }
