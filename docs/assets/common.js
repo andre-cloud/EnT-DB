@@ -332,8 +332,8 @@
     row(dl, "What it says", d.evidence);
     if (d.doi) row(dl, "DOI", doiLink(d.doi, d.doi));
     row(dl, "Verification", d.verify_note);
-    row(dl, "UV-vis", d.uv || "Not recorded");
-    row(dl, "Direct excitation", d.direct_exc || "Not recorded");
+    row(dl, "UV-vis", EntScore.formatUv(d) || "Not recorded");
+    row(dl, "Direct excitation", EntScore.formatDirectExc(d.direct_exc) || "Not recorded");
     if (adm) {
       if (d.score_items && d.score_items.length) {
         var lost = d.score_items.filter(function (i) { return i.got < i.max; });
@@ -490,9 +490,11 @@
     items.forEach(function (d) { c.appendChild(valueBlock(d, o, many)); });
 
     var first = function (k) { return items.map(function (d) { return d[k]; }).filter(Boolean)[0]; };
+    var firstUv = items.map(EntScore.formatUv).filter(Boolean)[0];
+    var firstDir = items.map(function (d) { return EntScore.formatDirectExc(d.direct_exc); }).filter(Boolean)[0];
     var dl = el("dl");
-    row(dl, "UV-vis", first("uv") || "Not recorded");
-    row(dl, "Direct excitation", first("direct_exc") || "Not recorded");
+    row(dl, "UV-vis", firstUv || "Not recorded");
+    row(dl, "Direct excitation", firstDir || "Not recorded");
     c.appendChild(dl);
     var seen = {}, usesList = [];
     items.forEach(function (d) {
@@ -620,7 +622,10 @@
   var SUGG_LABEL = {}; EntScore.SUGGEST_FIELDS.forEach(function (f) { SUGG_LABEL[f[0]] = f[1]; });
   function shown(v) {
     if (v == null || v === "") return "(empty)";
-    if (typeof v === "object") return (v.doi || "") + (v.note ? " · " + v.note : "");
+    if (typeof v === "object") {
+      if ("doi" in v) return (v.doi || "") + (v.note ? " · " + v.note : "");
+      return EntScore.formatDirectExc(v);
+    }
     return String(v);
   }
   /* s: suggestion row, entry: current entry or null, h = {busy, approve(s), reject(s)} */
@@ -660,11 +665,12 @@
     ["method", "Method", "area"], ["conditions", "Conditions", "text"],
     ["citation", "Citation", "area"], ["doi", "DOI", "text"], ["location", "Where in the paper", "text"],
     ["quote", "Verbatim line", "text"], ["evidence", "What it says", "area"],
-    ["uv", "UV-vis", "text"], ["direct_exc", "Direct excitation", "text"],
+    ["uv_lmax", "UV-vis λmax (nm)", "number"], ["uv_eps", "UV-vis ε (M⁻¹ cm⁻¹)", "number"], ["uv_cond", "UV-vis conditions", "text"],
+    ["direct_exc", "Direct excitation (e.g. LED: 415, Kessil: 427)", "direct_map"],
     ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
   ];
   /* Fields the score was computed from: editing one marks the score as older than the entry. */
-  var SCORED = ["name", "origin", "et_kcal", "et_unc", "et_type", "method", "conditions", "citation", "doi", "location", "quote", "uv", "direct_exc"];
+  var SCORED = ["name", "origin", "et_kcal", "et_unc", "et_type", "method", "conditions", "citation", "doi", "location", "quote", "uv_lmax", "uv_eps", "uv_cond", "direct_exc"];
   function useRow(u) {
     var r = el("div", "ed-use");
     var a = el("label", "field", "DOI of a paper where it was used"), ai = el("input"); ai.type = "text"; ai.className = "mono ed-use-doi"; ai.value = (u && u.doi) || ""; a.appendChild(ai);
@@ -715,7 +721,8 @@
         if (f[2] === "select") { inp = el("select"); f[3].forEach(function (o) { inp.appendChild(new Option(o[1], o[0])); }); }
         else if (f[2] === "area") { inp = el("textarea"); inp.rows = 2; }
         else { inp = el("input"); inp.type = f[2] === "number" ? "number" : "text"; if (f[2] === "number") inp.step = "any"; }
-        inp.id = "ed-" + f[0]; inp.value = d[f[0]] == null ? "" : d[f[0]];
+        inp.id = "ed-" + f[0];
+        inp.value = f[2] === "direct_map" ? EntScore.formatDirectExc(d[f[0]]) : (d[f[0]] == null ? "" : d[f[0]]);
         lab.appendChild(inp); box.appendChild(lab);
         if (f[0] === "cas") box.appendChild(casLookup(inp, d.smiles));
         if (f[0] === "name") box.appendChild(iupacLookup(inp, function () { var sm = document.getElementById("ed-smiles"); return sm ? sm.value : d.smiles; }));
@@ -734,6 +741,13 @@
         var patch = {}, bad = "";
         EDIT.forEach(function (f) {
           var v = $("ed-" + f[0]).value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
+          if (f[2] === "direct_map") {
+            var dm = EntScore.parseDirectExc(v);
+            if (dm.bad) { bad = f[1] + " must be like \"LED: 415, Kessil: 427\" or JSON {\"LED\": 415}."; return; }
+            out = dm.map;
+            if (JSON.stringify(out) === JSON.stringify(old)) return;
+            patch[f[0]] = out; return;
+          }
           if (f[2] === "number") {
             out = v === "" ? null : EntScore.num(v);
             if (v !== "" && isNaN(out)) bad = f[1] + " must be a number.";

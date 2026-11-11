@@ -179,8 +179,13 @@
     <fieldset>
       <legend>Absorption (optional)</legend>
       <div class="frow">
-        <label class="field">UV-vis, if measured<input id="fm-uv" type="text" placeholder="λmax, ε, solvent" autocomplete="off"></label>
-        <label class="field">Direct excitation wavelength<input id="fm-direct" type="text" placeholder="e.g. below 320 nm" autocomplete="off"></label>
+        <label class="field">UV-vis λ<sub>max</sub> (nm)<input id="fm-uv_lmax" type="number" min="100" max="1500" step="1" placeholder="e.g. 354" autocomplete="off"></label>
+        <label class="field">ε (M⁻¹ cm⁻¹)<input id="fm-uv_eps" type="number" min="0" step="1" placeholder="e.g. 20000" autocomplete="off"></label>
+        <label class="field">UV-vis conditions<input id="fm-uv_cond" type="text" maxlength="120" placeholder="e.g. MeCN, 10⁻⁴ M" autocomplete="off"></label>
+      </div>
+      <div class="frow">
+        <label class="field">Direct excitation source<input id="fm-direct_src" type="text" maxlength="40" placeholder="e.g. LED or Kessil" autocomplete="off"></label>
+        <label class="field">Direct excitation (nm)<input id="fm-direct_nm" type="number" min="100" max="1500" step="1" placeholder="e.g. 415" autocomplete="off"></label>
       </div>
       <div class="frow">
         <label class="field">Used in photocatalysis: DOI of a paper (optional)<input id="fm-usedoi" class="mono" type="text" placeholder="10.xxxx/…" spellcheck="false" autocomplete="off"></label>

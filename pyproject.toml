@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trendb"
+version = "0.1.0"
+description = "Python public DB scraping/query client and deterministic PDF batch extractor for TrEnDB"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+chem = ["rdkit"]
+data = ["pandas>=2.0"]
+pdf = ["pymupdf>=1.24", "pdfplumber>=0.11"]
+ocsr = ["decimer>=2.7", "decimer-segmentation>=1.4"]
+all = ["rdkit", "pandas>=2.0", "pymupdf>=1.24", "pdfplumber>=0.11"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+trendb-scrape = "trendb.cli:main_scrape"
+trendb-extract = "trendb.cli:main_extract"
+trendb-stats = "trendb.cli:main_stats"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

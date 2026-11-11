@@ -1,0 +1,17 @@
+name: trendb
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - httpx>=0.27
+  - rdkit
+  - pandas>=2.0
+  - pymupdf>=1.24
+  - pdfplumber>=0.11
+  - poppler
+  - pytest>=8.0
+  - pip
+  - pip:
+      - -e .
+      - decimer 
+      - decimer-segmentation

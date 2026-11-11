@@ -1,0 +1,879 @@
+"""Deterministic, no-LLM PDF extraction pipeline for TrEnDB."""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from . import clean_fields, scoring
+from .models import KCAL_PER_EV, KJ_PER_KCAL
+from .resolvers import Resolver, looks_like_anonymous_label, normalize_name_key
+
+# Optional PyMuPDF / pdfplumber backends
+try:  # pragma: no cover - optional runtime dependency
+    import fitz  # type: ignore
+except ImportError:  # pragma: no cover
+    fitz = None
+
+try:  # pragma: no cover - optional runtime dependency
+    import pdfplumber  # type: ignore
+except ImportError:  # pragma: no cover
+    pdfplumber = None
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_ANY_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>\]\[),;]+")
+_CAS_INLINE_RE = re.compile(r"\b(\d{2,7}-\d{2}-\d)\b")
+
+# Energy extraction patterns
+_UNIT_PATTERN = r"(kcal\s*/\s*mol|kcal\s*mol\s*[-−]1|kJ\s*/\s*mol|kJ\s*mol\s*[-−]1|eV)"
+_ET_AFTER_CUE_RE = re.compile(
+    r"(?:triplet(?:\s+state)?(?:\s+excitation)?\s+energy|E_?\s*T\b|T_?\s*1(?:\s+energy)?|"
+    r"0\s*[-–]\s*0\s+transition(?:\s+to\s+the\s+lowest\s+triplet\s+state)?)"
+    r"[^.;\n]{0,70}?(?:=|is|of|at|:|~|≈)?\s*"
+    rf"(\d+(?:[.,]\d+)?)\s*(?:±\s*(\d+(?:[.,]\d+)?)\s*)?{_UNIT_PATTERN}\b",
+    re.IGNORECASE,
+)
+_ET_BEFORE_CUE_RE = re.compile(
+    rf"(\d+(?:[.,]\d+)?)\s*(?:±\s*(\d+(?:[.,]\d+)?)\s*)?{_UNIT_PATTERN}"
+    r"[^.;\n]{0,45}?\b(?:triplet(?:\s+state)?\s+energy|E_?\s*T|T_?\s*1)\b",
+    re.IGNORECASE,
+)
+_PHOS_NM_RE = re.compile(
+    r"(?:triplet\s+emission|phosphorescence(?:\s+0\s*[-–]\s*0)?(?:\s+band|\s+maximum|\s+peak|\s+onset)?)"
+    r"[^.;\n]{0,45}?\b(\d{3}(?:\.\d+)?)\s*nm\b",
+    re.IGNORECASE,
+)
+_VAL_ONLY_RE = re.compile(
+    rf"^\s*(\d+(?:[.,]\d+)?)\s*(?:±\s*(\d+(?:[.,]\d+)?))?\s*(?:{_UNIT_PATTERN}|(nm))?\s*$",
+    re.IGNORECASE,
+)
+
+# Method / condition / UV regexes
+_CALC_HINT_RE = re.compile(
+    r"\b(?:DFT|TD-?DFT|B3LYP|ωB97X-?D4?|wB97X-?D4?|M06-?2X|CAM-B3LYP|PBE0|MN15|TPSSh|r2SCAN-3c|"
+    r"CASSCF|CCSD\(T\)|MRCI|comput(?:ed|ational)|calculat(?:ed|ion)|adiabatic|vertical)\b",
+    re.IGNORECASE,
+)
+_EXP_HINT_RE = re.compile(
+    r"\b(?:phosphorescence|photoacoustic|PAC\b|EELS|electron-energy-loss|quenching|bracketing|"
+    r"sensitization|emission|77\s*K|glass|measured|experimental|luminescence|TRIR)\b",
+    re.IGNORECASE,
+)
+_FUNC_RE = re.compile(
+    r"\b(ωB97X-?D4?|wB97X-?D4?|CAM-B3LYP|B3LYP(?:-D3(?:BJ)?)?|M06-?2X|PBE0|MN15|TPSSh|r2SCAN-3c|CCSD\(T\)|CASSCF)\b",
+    re.IGNORECASE,
+)
+_BASIS_RE = re.compile(
+    r"\b(aug-cc-pV[DTQ]Z|cc-pV[DTQ]Z|def2-[STQ]ZVPP?D?|6-311\+?G\([^)]+\)|6-31\+?\+?G\([^)]+\)|6-31G\*+|LANL2DZ)\b"
+)
+_SOLV_MODEL_RE = re.compile(r"\b(IEF-?PCM|CPCM|PCM|SMD|COSMO|gas\s+phase)\b", re.IGNORECASE)
+_TEMP_RE = re.compile(r"\b(\d{1,3}(?:\.\d+)?\s*K|room\s+temperature|r\.?t\.?)\b", re.IGNORECASE)
+_SOLVENT_RE = re.compile(
+    r"\b(methylcyclohexane(?:\s+glass)?|2-?MeTHF|MCH|EPA|solid\s+argon|MeCN|acetonitrile|"
+    r"CD3CN|CH2Cl2|DCM|dichloromethane|THF|toluene|benzene|cyclohexane|methanol|MeOH|ethanol|EtOH|DMSO|DMF|hexane|water)\b",
+    re.IGNORECASE,
+)
+_UV_RE = re.compile(
+    r"(?:UV[-–\s]?vis|absorption(?:\s+max(?:imum)?)?|λ_?\s*max)\s*(?:at|=|:|of)?\s*[^.;\n]{0,45}?\b\d{3}(?:\.\d+)?\s*nm\b",
+    re.IGNORECASE,
+)
+_SECTION_RE = re.compile(
+    r"^\s*(Abstract|Introduction|Results(?:\s+and\s+Discussion)?|Discussion|Conclusion[s]?|"
+    r"Experimental(?:\s+Section)?|Computational\s+Details|Methods|Supporting\s+Information|"
+    r"Table\s+S?\d+[^:\n]*|Scheme\s+S?\d+[^:\n]*|Figure\s+S?\d+[^:\n]*)\b",
+    re.IGNORECASE,
+)
+_CHEM_NAME_RE = re.compile(
+    r"\b(?:[EZRS]-|\([EZRS]\)-|(?:\d+,)*\d+-)?[A-Za-z0-9,'′′\[\]()\-]*"
+    r"(?:thioxanthone|xanthone|benzophenone|acetophenone|fluorenone|coumarin|chalcone|"
+    r"stilbene|styrene|anthracene|naphthalene|phenanthrene|pyrene|perylene|carbazole|"
+    r"quinone|flavin|enone|boronate|biphenyl|biacetyl|azide|oxime|acrylate|"
+    r"Ir\([^)]+\)[^,\s;]*|Ru\([^)]+\)[^,\s;]*)\b"
+)
+
+
+@dataclass
+class PageText:
+    page_num: int
+    text: str
+    layout_text: str
+    tables: list[list[list[str]]] = field(default_factory=list)
+
+
+@dataclass
+class PdfDocument:
+    path: Path
+    metadata_doi: str | None
+    pages: list[PageText]
+    backend: str
+
+
+@dataclass
+class ExtractedCandidate:
+    """Intermediate extracted entry before or after chemical resolution."""
+
+    name: str
+    et_kcal: float
+    et_unc: float | None
+    et_reported: str
+    origin: str
+    et_type: str
+    method: str
+    conditions: str
+    doi: str | None
+    citation: str | None
+    location: str
+    quote: str | None
+    evidence: str | None
+    verify_level: str
+    verify_note: str
+    uv_lmax: int | None = None
+    uv_eps: int | None = None
+    uv_cond: str | None = None
+    cas: str | None = None
+    smiles: str | None = None
+    smiles_checked: bool = False
+    structure_note: str | None = None
+    cls: str | None = None
+    role: str = "acceptor"
+    direct_exc: dict[str, int] | None = None
+    source_kind: str = "literature"
+    unit: str = "kcal"
+    raw_et: float | None = None
+    raw_unc: float | None = None
+    # Review / diagnostic metadata (never leaked into final batch JSON rows)
+    tech: str | None = None
+    solvent: str | None = None
+    temp: str | None = None
+    func: str | None = None
+    basis: str | None = None
+    solv: str | None = None
+    resolution_source: str = ""
+    warnings: list[str] = field(default_factory=list)
+    pdf_file: str = ""
+    page_num: int = 1
+
+
+def _strip_urls(text: str | None) -> str | None:
+    if text is None:
+        return None
+    cleaned = _URL_RE.sub("", text)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _truncate_quote(text: str | None, max_words: int = 22) -> str | None:
+    if not text:
+        return None
+    cleaned = _strip_urls(re.sub(r"\s+", " ", text).strip())
+    if not cleaned:
+        return None
+    words = cleaned.split()
+    if len(words) > max_words:
+        cleaned = " ".join(words[:max_words])
+    return cleaned[:300]
+
+
+def _normalize_unit(unit_raw: str | None) -> str:
+    u = (unit_raw or "").lower().replace(" ", "")
+    if "kj" in u:
+        return "kj"
+    if "ev" in u:
+        return "ev"
+    if "nm" in u:
+        return "nm"
+    return "kcal"
+
+
+def _convert_energy(val: float, unc: float | None, unit: str) -> tuple[float | None, float | None, str]:
+    if unit == "kcal":
+        kcal = scoring.round1(val)
+        unc_kcal = scoring.round2(abs(unc)) if unc is not None else None
+        rep = f"{val:g}" + (f" ± {unc:g}" if unc is not None else "") + " kcal/mol"
+        return kcal, unc_kcal, rep
+    if unit == "kj":
+        kcal = scoring.round1(val / KJ_PER_KCAL)
+        unc_kcal = scoring.round2(abs(unc) / KJ_PER_KCAL) if unc is not None else None
+        rep = f"{val:g}" + (f" ± {unc:g}" if unc is not None else "") + " kJ/mol"
+        return kcal, unc_kcal, rep
+    if unit == "ev":
+        kcal = scoring.round1(val * KCAL_PER_EV)
+        unc_kcal = scoring.round2(abs(unc) * KCAL_PER_EV) if unc is not None else None
+        rep = f"{val:g}" + (f" ± {unc:g}" if unc is not None else "") + " eV"
+        return kcal, unc_kcal, rep
+    if unit == "nm":
+        if val <= 0:
+            return None, None, ""
+        kcal = scoring.round1(28591.5 / val)
+        rep = f"{val:g} nm (phosphorescence)"
+        return kcal, None, rep
+    return None, None, ""
+
+
+def _parse_layout_tables(layout_text: str) -> list[list[list[str]]]:
+    """Heuristically extract whitespace-aligned tables from pdftotext -layout output."""
+    tables: list[list[list[str]]] = []
+    cur: list[list[str]] = []
+    blank_run = 0
+    for raw in layout_text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            blank_run += 1
+            if blank_run >= 2 and len(cur) >= 2:
+                tables.append(cur)
+                cur = []
+            continue
+        blank_run = 0
+        cols = [c.strip() for c in re.split(r"\s{2,}", line.strip()) if c.strip()]
+        if len(cols) >= 2:
+            cur.append(cols)
+        else:
+            if len(cur) >= 2:
+                tables.append(cur)
+            cur = []
+    if len(cur) >= 2:
+        tables.append(cur)
+    return tables
+
+
+def read_pdf(path: str | Path) -> PdfDocument:
+    """Read a PDF using PyMuPDF+pdfplumber when installed, else Poppler pdftotext+pdfinfo."""
+    pdf_path = Path(path)
+    if not pdf_path.is_file():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    if fitz is not None:  # pragma: no cover - used when pymupdf is installed
+        doc = fitz.open(str(pdf_path))
+        meta = doc.metadata or {}
+        meta_doi = None
+        for v in meta.values():
+            if isinstance(v, str):
+                m = _ANY_DOI_RE.search(v)
+                if m:
+                    cand = scoring.clean_doi(m.group(0))
+                    if scoring.is_doi(cand):
+                        meta_doi = cand
+                        break
+        plumber_doc = pdfplumber.open(str(pdf_path)) if pdfplumber is not None else None
+        pages: list[PageText] = []
+        try:
+            for idx, page in enumerate(doc):
+                text = page.get_text("text") or ""
+                layout_text = page.get_text("text", sort=True) or text
+                tables: list[list[list[str]]] = []
+                if plumber_doc is not None:
+                    for tb in plumber_doc.pages[idx].extract_tables() or []:
+                        cleaned = [[(c or "").replace("\n", " ").strip() for c in row] for row in tb if row]
+                        if len(cleaned) >= 2:
+                            tables.append(cleaned)
+                if not tables and hasattr(page, "find_tables"):
+                    try:
+                        for tb in page.find_tables().tables:
+                            ext = tb.extract()
+                            cleaned = [[(c or "").replace("\n", " ").strip() for c in row] for row in ext if row]
+                            if len(cleaned) >= 2:
+                                tables.append(cleaned)
+                    except Exception:
+                        pass
+                if not tables:
+                    tables = _parse_layout_tables(layout_text)
+                pages.append(PageText(page_num=idx + 1, text=text, layout_text=layout_text, tables=tables))
+        finally:
+            if plumber_doc is not None:
+                plumber_doc.close()
+            doc.close()
+        return PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="pymupdf")
+
+    # Poppler fallback (`pdftotext` + `pdfinfo`)
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        raise RuntimeError(
+            "No PDF backend available. Install `pymupdf` & `pdfplumber` (via conda/pip) or ensure Poppler `pdftotext` is on PATH."
+        )
+    meta_doi = None
+    pdfinfo = shutil.which("pdfinfo")
+    if pdfinfo:
+        info_out = subprocess.run([pdfinfo, str(pdf_path)], capture_output=True, text=True, check=False).stdout
+        m = _ANY_DOI_RE.search(info_out)
+        if m:
+            cand = scoring.clean_doi(m.group(0))
+            if scoring.is_doi(cand):
+                meta_doi = cand
+
+    raw_plain = subprocess.run([pdftotext, str(pdf_path), "-"], capture_output=True, text=True, check=True).stdout
+    raw_layout = subprocess.run(
+        [pdftotext, "-layout", str(pdf_path), "-"], capture_output=True, text=True, check=True
+    ).stdout
+
+    plain_pages = raw_plain.split("\f")
+    layout_pages = raw_layout.split("\f")
+    # pdftotext trails with an empty string after the final form feed
+    if plain_pages and not plain_pages[-1].strip():
+        plain_pages.pop()
+    if layout_pages and not layout_pages[-1].strip():
+        layout_pages.pop()
+
+    n_pages = max(len(plain_pages), len(layout_pages), 1)
+    pages = []
+    for i in range(n_pages):
+        p_txt = plain_pages[i] if i < len(plain_pages) else ""
+        l_txt = layout_pages[i] if i < len(layout_pages) else p_txt
+        pages.append(PageText(page_num=i + 1, text=p_txt, layout_text=l_txt, tables=_parse_layout_tables(l_txt)))
+    return PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="poppler")
+
+
+def detect_doi(doc: PdfDocument) -> str | None:
+    """Detect the paper's primary DOI from metadata, filename, or opening pages."""
+    if doc.metadata_doi and scoring.is_doi(doc.metadata_doi):
+        return doc.metadata_doi
+
+    for p in doc.pages[:2]:
+        # Ignore the bibliography section if page 2 already reaches References
+        head = re.split(r"\b(?:References|Bibliography|Notes and References)\b", p.text, maxsplit=1)[0]
+        for m in _ANY_DOI_RE.finditer(head):
+            cand = scoring.clean_doi(m.group(0))
+            if scoring.is_doi(cand):
+                return cand
+
+    m_fn = _ANY_DOI_RE.search(doc.path.stem.replace("_", "/"))
+    if m_fn:
+        cand = scoring.clean_doi(m_fn.group(0))
+        if scoring.is_doi(cand):
+            return cand
+    return None
+
+
+def _classify_origin(text: str, default: str = "exp") -> str:
+    calc_hits = len(_CALC_HINT_RE.findall(text))
+    exp_hits = len(_EXP_HINT_RE.findall(text))
+    if calc_hits > exp_hits:
+        return "calc"
+    if exp_hits > calc_hits:
+        return "exp"
+    return default
+
+
+def _extract_method_and_conditions(text: str, origin: str) -> tuple[str, str, str, str | None, str | None, str | None]:
+    """Return (et_type, method, conditions, func, basis, solv) for TrEnDB & scoring."""
+    func_m = _FUNC_RE.search(text)
+    basis_m = _BASIS_RE.search(text)
+    solv_model_m = _SOLV_MODEL_RE.search(text)
+    solv_m = _SOLVENT_RE.search(text)
+    temp_m = _TEMP_RE.search(text)
+
+    if origin == "calc":
+        func = func_m.group(1) if func_m else None
+        basis = basis_m.group(1) if basis_m else None
+        solv_parts = [x for x in (solv_model_m.group(1) if solv_model_m else None, solv_m.group(1) if solv_m else None) if x]
+        solv = ", ".join(solv_parts) if solv_parts else None
+        if re.search(r"\badiabatic\b", text, re.IGNORECASE):
+            et_type = "Computed, adiabatic"
+        elif re.search(r"\bvertical\b", text, re.IGNORECASE):
+            et_type = "Computed, vertical"
+        else:
+            et_type = "Computed; vertical or adiabatic not specified"
+        method = ", ".join([x for x in ("TD-DFT" if re.search(r"TD-?DFT", text, re.IGNORECASE) else "DFT", func, basis) if x])
+        conditions = solv or "Solvent model not stated"
+        return et_type, method, conditions, func, basis, solv
+
+    low = text.lower()
+    if "phosphorescence" in low:
+        tech = "Phosphorescence"
+    elif "photoacoustic" in low or re.search(r"\bpac\b", text):
+        tech = "Photoacoustic calorimetry"
+    elif "electron-energy-loss" in low or "eels" in low:
+        tech = "Electron-energy-loss spectroscopy"
+    elif "absorption" in low and ("o2" in low or "oxygen" in low or "heavy-atom" in low):
+        tech = "S0→T1 absorption (O2 or heavy-atom perturbed)"
+    elif "quenching" in low or "bracketing" in low or "kinetics" in low:
+        tech = "Energy-transfer bracketing or quenching kinetics"
+    else:
+        tech = "Phosphorescence" if "77 k" in low or "emission" in low else ""
+
+    if re.search(r"\b0\s*[-–]\s*0\b", text):
+        et_type = "Spectroscopic, 0-0 band"
+    elif re.search(r"\b(?:onset|maximum|vertical)\b", text, re.IGNORECASE):
+        et_type = "Spectroscopic, vertical (band onset or maximum)"
+    elif re.search(r"\brelaxed\b", text, re.IGNORECASE) or tech == "Photoacoustic calorimetry":
+        et_type = "Relaxed triplet"
+    elif tech == "Energy-transfer bracketing or quenching kinetics":
+        et_type = "From energy-transfer kinetics"
+    else:
+        et_type = "Other or not stated"
+
+    solvent = solv_m.group(1) if solv_m else None
+    temp = temp_m.group(1) if temp_m else None
+    conditions = ", ".join(x for x in (solvent, temp) if x) or "Not stated"
+    return et_type, (tech or "Not stated"), conditions, solvent, temp, None
+
+
+_DIRECT_EXC_RE = re.compile(
+    r"(?:irradiat(?:ed|ion)|excit(?:ed|ation)|LED|Kessil|laser)\s*(?:at|with|using|:)?\s*(?:a\s+)?(\d{3,4})\s*nm"
+    r"|(\d{3,4})\s*nm\s*(LED|Kessil|laser)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_uv(text: str) -> tuple[int | None, int | None, str | None]:
+    m = _UV_RE.search(text)
+    if not m:
+        return None, None, None
+    return clean_fields.parse_uv_fields(_strip_urls(m.group(0).strip()))
+
+
+def _extract_direct_exc(text: str) -> dict[str, int] | None:
+    out: dict[str, int] = {}
+    for m in _DIRECT_EXC_RE.finditer(text):
+        if m.group(1):
+            nm = int(m.group(1))
+            src = "LED" if "led" in m.group(0).lower() else ("Kessil" if "kessil" in m.group(0).lower() else ("laser" if "laser" in m.group(0).lower() else "irradiation"))
+        else:
+            nm = int(m.group(2))
+            src = m.group(3)
+        if 100 <= nm <= 1500:
+            out[src] = nm
+    return out or None
+
+
+def _detect_header_unit(header: str) -> str | None:
+    low = header.lower()
+    if "kcal" in low:
+        return "kcal"
+    if "kj" in low:
+        return "kj"
+    if "ev" in low:
+        return "ev"
+    if "nm" in low:
+        return "nm"
+    return None
+
+
+def _extract_from_tables(
+    doc: PdfDocument,
+    *,
+    doi: str | None,
+    citation: str | None,
+    resolver: Resolver,
+    default_role: str,
+    default_cls: str | None,
+) -> list[ExtractedCandidate]:
+    results: list[ExtractedCandidate] = []
+    for page in doc.pages:
+        caption_m = re.search(r"(Table\s+S?\d+[^\n]*)", page.text, re.IGNORECASE)
+        table_label = caption_m.group(1).strip()[:80] if caption_m else f"p. {page.page_num}"
+        page_ctx = caption_m.group(1) if caption_m else page.text[:500]
+
+        for tb in page.tables:
+            if len(tb) < 2:
+                continue
+            header = tb[0]
+            name_col: int | None = None
+            cas_col: int | None = None
+            smiles_col: int | None = None
+            method_col: int | None = None
+            cond_col: int | None = None
+            uv_col: int | None = None
+            et_cols: list[tuple[int, str | None, str | None]] = []  # (idx, unit_hint, origin_hint)
+
+            for ci, h in enumerate(header):
+                hl = h.lower()
+                if name_col is None and any(
+                    k in hl for k in ("compound", "molecule", "name", "sensitizer", "catalyst", "substrate", "donor", "acceptor", "entry")
+                ):
+                    name_col = ci
+                elif cas_col is None and "cas" in hl:
+                    cas_col = ci
+                elif smiles_col is None and "smiles" in hl:
+                    smiles_col = ci
+                elif method_col is None and any(k in hl for k in ("method", "functional", "basis", "technique")):
+                    method_col = ci
+                elif cond_col is None and any(k in hl for k in ("solvent", "condition", "matrix", "temp")):
+                    cond_col = ci
+                elif any(k in hl for k in ("uv", "λmax", "lambda", "abs")) and uv_col is None:
+                    uv_col = ci
+                elif re.search(r"\b(?:e_?t\d*|t_?1|Δe|de)\b", hl) or any(k in hl for k in ("triplet", "kcal", "kj", "ev")):
+                    origin_hint = "calc" if any(k in hl for k in ("calc", "comp", "dft")) else ("exp" if any(k in hl for k in ("exp", "meas", "obs")) else None)
+                    et_cols.append((ci, _detect_header_unit(h), origin_hint))
+
+            if not et_cols:
+                continue
+            if name_col is None:
+                name_col = 0
+
+            for r_idx, row in enumerate(tb[1:], start=1):
+                if name_col >= len(row):
+                    continue
+                raw_name = row[name_col].strip()
+                if not raw_name or raw_name.lower() in ("entry", "compound", "name", "-", "—"):
+                    continue
+
+                row_text = " | ".join(row)
+                cas_inline = row[cas_col].strip() if (cas_col is not None and cas_col < len(row)) else None
+                if not cas_inline:
+                    cm = _CAS_INLINE_RE.search(row_text)
+                    cas_inline = cm.group(1) if cm and scoring.cas_valid(cm.group(1)) else None
+                raw_smi = row[smiles_col].strip() if (smiles_col is not None and smiles_col < len(row)) else None
+
+                res = resolver.resolve_molecule(raw_name, cas=cas_inline, raw_smiles=raw_smi)
+
+                for ci, unit_hint, origin_hint in et_cols:
+                    if ci >= len(row):
+                        continue
+                    cell = row[ci].strip()
+                    vm = _VAL_ONLY_RE.match(cell)
+                    if not vm:
+                        continue
+                    val = scoring.num(vm.group(1))
+                    unc = scoring.num(vm.group(2)) if vm.group(2) else None
+                    unit = _normalize_unit(vm.group(3) or vm.group(4) or unit_hint)
+                    et_kcal, unc_kcal, rep = _convert_energy(val, None if unc is None or unc != unc else unc, unit)
+                    if et_kcal is None or not (10.0 <= et_kcal <= scoring.ET_MAX):
+                        continue
+
+                    ctx_blob = " ".join(
+                        [
+                            page_ctx,
+                            header[ci],
+                            row[method_col] if method_col is not None and method_col < len(row) else "",
+                            row[cond_col] if cond_col is not None and cond_col < len(row) else "",
+                        ]
+                    )
+                    origin = origin_hint or _classify_origin(ctx_blob, default="exp")
+                    et_type, method, conditions, f_or_solv, b_or_temp, solv_model = _extract_method_and_conditions(ctx_blob, origin)
+                    if method_col is not None and method_col < len(row) and row[method_col].strip():
+                        method = _strip_urls(row[method_col].strip()) or method
+                    if cond_col is not None and cond_col < len(row) and row[cond_col].strip():
+                        conditions = _strip_urls(row[cond_col].strip()) or conditions
+                    if uv_col is not None and uv_col < len(row) and row[uv_col].strip():
+                        uv_lmax, uv_eps, uv_cond = clean_fields.parse_uv_fields(_strip_urls(row[uv_col].strip()))
+                    else:
+                        uv_lmax, uv_eps, uv_cond = _extract_uv(row_text)
+                    direct_exc = _extract_direct_exc(row_text)
+
+                    results.append(
+                        ExtractedCandidate(
+                            name=raw_name[:200],
+                            et_kcal=et_kcal,
+                            et_unc=unc_kcal,
+                            et_reported=rep,
+                            origin=origin,
+                            et_type=et_type,
+                            method=method,
+                            conditions=conditions,
+                            doi=doi,
+                            citation=citation,
+                            location=f"{table_label}, row {r_idx} (p. {page.page_num})",
+                            quote=_truncate_quote(f"{raw_name}: {header[ci]} = {cell}"),
+                            evidence=_strip_urls(f"Extracted from table row: {row_text}"[:400]),
+                            verify_level="primaria",
+                            verify_note="Automatically extracted from PDF table without LLM; verify structure and values.",
+                            uv_lmax=uv_lmax,
+                            uv_eps=uv_eps,
+                            uv_cond=uv_cond,
+                            direct_exc=direct_exc,
+                            cas=res.cas,
+                            smiles=res.smiles,
+                            smiles_checked=False,
+                            structure_note=(
+                                "Automatically resolved; verify against paper."
+                                if res.smiles
+                                else "Structure could not be resolved automatically from label/name."
+                            ),
+                            cls=default_cls or res.cls_hint,
+                            role=res.role_hint or default_role,
+                            unit="kcal" if unit == "nm" else unit,
+                            raw_et=val,
+                            raw_unc=None if unc is None or unc != unc else unc,
+                            tech=None if origin == "calc" else (None if method == "Not stated" else method),
+                            solvent=None if origin == "calc" else f_or_solv,
+                            temp=None if origin == "calc" else b_or_temp,
+                            func=f_or_solv if origin == "calc" else None,
+                            basis=b_or_temp if origin == "calc" else None,
+                            solv=solv_model if origin == "calc" else None,
+                            resolution_source=res.source,
+                            warnings=list(res.warnings),
+                            pdf_file=doc.path.name,
+                            page_num=page.page_num,
+                        )
+                    )
+    return results
+
+
+def _find_molecule_in_sentence(sentence: str, resolver: Resolver) -> tuple[str, str | None]:
+    """Identify candidate molecule name and optional inline CAS in a sentence."""
+    cas_found: str | None = None
+    for cm in _CAS_INLINE_RE.finditer(sentence):
+        if scoring.cas_valid(cm.group(1)):
+            cas_found = cm.group(1)
+            break
+
+    # 1. Check known names from local TrEnDB / builtin dictionary (longest first)
+    low = sentence.lower().replace("′", "'").replace("’", "'")
+    best_name = ""
+    for nk in sorted(resolver._by_name.keys(), key=len, reverse=True):
+        if len(nk) < 3 or looks_like_anonymous_label(nk):
+            continue
+        # Match space-tolerant name token
+        if nk in re.sub(r"\s+", "", low):
+            # Recover original casing slice if simple substring matches
+            m = re.search(rf"\b{re.escape(nk)}\b", low)
+            if m:
+                best_name = sentence[m.start() : m.end()]
+                break
+            if len(nk) >= 6:
+                best_name = nk
+                break
+
+    if not best_name:
+        m_chem = _CHEM_NAME_RE.search(sentence)
+        if m_chem:
+            best_name = m_chem.group(0).strip(" ,.;:()")
+
+    if not best_name:
+        # Look for compound labels like "compound 4a" or "sensitizer 1"
+        m_lbl = re.search(
+            r"\b((?:compound|compd|substrate|sensitizer|donor|acceptor|complex|catalyst)\s+\d+[a-z]{0,2})\b",
+            sentence,
+            re.IGNORECASE,
+        )
+        if m_lbl:
+            best_name = m_lbl.group(1)
+
+    return best_name, cas_found
+
+
+def _extract_from_prose(
+    doc: PdfDocument,
+    *,
+    doi: str | None,
+    citation: str | None,
+    resolver: Resolver,
+    default_role: str,
+    default_cls: str | None,
+) -> list[ExtractedCandidate]:
+    results: list[ExtractedCandidate] = []
+    for page in doc.pages:
+        cur_section = f"p. {page.page_num}"
+        text = re.sub(r"-\n([a-z])", r"\1", page.text)
+
+        # Group consecutive non-blank lines into paragraphs while preserving section headings.
+        paragraphs: list[tuple[str, str]] = []
+        buf: list[str] = []
+        for raw_ln in text.splitlines():
+            ln = raw_ln.strip()
+            if not ln:
+                if buf:
+                    paragraphs.append((cur_section, " ".join(buf)))
+                    buf = []
+                continue
+            sec_m = _SECTION_RE.match(ln)
+            if sec_m and len(ln) <= 120:
+                if buf:
+                    paragraphs.append((cur_section, " ".join(buf)))
+                    buf = []
+                cur_section = sec_m.group(1).strip()
+                # If the heading line carries extra text (e.g. "Abstract: Styrene..."), keep it in buf
+                rest = ln[sec_m.end() :].lstrip(" :.—-")
+                if rest:
+                    buf.append(rest)
+                continue
+            buf.append(ln)
+        if buf:
+            paragraphs.append((cur_section, " ".join(buf)))
+
+        for sec_label, para in paragraphs:
+            joined = re.sub(r"\s+", " ", para)
+            sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", joined)
+
+            for sent in sentences:
+                matches: list[tuple[float, float | None, str, str]] = []
+                for rx, is_nm in ((_ET_AFTER_CUE_RE, False), (_ET_BEFORE_CUE_RE, False), (_PHOS_NM_RE, True)):
+                    for m in rx.finditer(sent):
+                        if is_nm:
+                            val = scoring.num(m.group(1))
+                            if val == val:
+                                matches.append((val, None, "nm", m.group(0)))
+                        else:
+                            val = scoring.num(m.group(1))
+                            unc = scoring.num(m.group(2)) if m.group(2) else None
+                            unit = _normalize_unit(m.group(3))
+                            if val == val:
+                                matches.append((val, None if unc is None or unc != unc else unc, unit, m.group(0)))
+                    if matches:
+                        break
+
+                if not matches:
+                    continue
+
+                mol_name, cas_inline = _find_molecule_in_sentence(sent, resolver)
+                if not mol_name and not cas_inline:
+                    mol_name = "(unnamed candidate)"
+
+                res = (
+                    resolver.resolve_molecule(mol_name, cas=cas_inline)
+                    if mol_name != "(unnamed candidate)"
+                    else resolver.resolve_molecule("", cas=cas_inline)
+                )
+
+                origin = _classify_origin(sent, default="exp")
+                et_type, method, conditions, f_or_solv, b_or_temp, solv_model = _extract_method_and_conditions(sent, origin)
+                uv_lmax, uv_eps, uv_cond = _extract_uv(sent)
+                direct_exc = _extract_direct_exc(sent)
+                is_abs = "abstract" in sec_label.lower() or (page.page_num == 1 and "abstract" in sent[:40].lower())
+
+                for val, unc, unit, snippet in matches:
+                    et_kcal, unc_kcal, rep = _convert_energy(val, unc, unit)
+                    if et_kcal is None or not (10.0 <= et_kcal <= scoring.ET_MAX):
+                        continue
+                    results.append(
+                        ExtractedCandidate(
+                            name=mol_name[:200],
+                            et_kcal=et_kcal,
+                            et_unc=unc_kcal,
+                            et_reported=rep,
+                            origin=origin,
+                            et_type=et_type,
+                            method=method,
+                            conditions=conditions,
+                            doi=doi,
+                            citation=citation,
+                            location="Abstract" if is_abs else f"{sec_label}, p. {page.page_num}",
+                            quote=_truncate_quote(snippet),
+                            evidence=_strip_urls(sent[:400]),
+                            verify_level="abstract" if is_abs else "primaria",
+                            verify_note="Automatically extracted from PDF text without LLM; verify structure and values.",
+                            uv_lmax=uv_lmax,
+                            uv_eps=uv_eps,
+                            uv_cond=uv_cond,
+                            direct_exc=direct_exc,
+                            cas=res.cas,
+                            smiles=res.smiles,
+                            smiles_checked=False,
+                            structure_note=(
+                                "Automatically resolved; verify against paper."
+                                if res.smiles
+                                else "Structure could not be resolved automatically from text."
+                            ),
+                            cls=default_cls or res.cls_hint,
+                            role=res.role_hint or default_role,
+                            unit="kcal" if unit == "nm" else unit,
+                            raw_et=val,
+                            raw_unc=unc,
+                            tech=None if origin == "calc" else (None if method == "Not stated" else method),
+                            solvent=None if origin == "calc" else f_or_solv,
+                            temp=None if origin == "calc" else b_or_temp,
+                            func=f_or_solv if origin == "calc" else None,
+                            basis=b_or_temp if origin == "calc" else None,
+                            solv=solv_model if origin == "calc" else None,
+                            resolution_source=res.source,
+                            warnings=list(res.warnings),
+                            pdf_file=doc.path.name,
+                            page_num=page.page_num,
+                        )
+                    )
+    return results
+
+
+def extract_pdf(
+    pdf_path: str | Path,
+    *,
+    resolver: Resolver,
+    doi_override: str | None = None,
+    citation_override: str | None = None,
+    default_role: str = "acceptor",
+    default_cls: str | None = None,
+    enable_ocr: bool = True,
+    save_markdown_dir: str | Path | None = None,
+    use_decimer: bool = False,
+    figures_dir: str | Path | None = None,
+    ocsr_predictor: Any = None,
+) -> list[ExtractedCandidate]:
+    """Extract candidate TrEnDB entries from a single PDF without an LLM."""
+    from .ocsr import decimer_available, run_ocsr_on_pdf
+    from .pdf_markdown import pdf_to_markdown
+
+    p_path = Path(pdf_path)
+    md_out = Path(save_markdown_dir) / f"{p_path.stem}.md" if save_markdown_dir else None
+    doc, _md, _md_pages = pdf_to_markdown(p_path, enable_ocr=enable_ocr, save_path=md_out)
+
+    doi = scoring.clean_doi(doi_override) if doi_override else detect_doi(doc)
+    if doi and not scoring.is_doi(doi):
+        doi = None
+
+    citation = _strip_urls(citation_override)
+    if not citation and doi:
+        citation = _strip_urls(resolver.fetch_citation(doi))
+    if not citation and doc.pages:
+        first_line = next((ln.strip() for ln in doc.pages[0].text.splitlines() if len(ln.strip()) > 12), "")
+        citation = _strip_urls(first_line[:200])
+
+    table_hits = _extract_from_tables(
+        doc,
+        doi=doi,
+        citation=citation,
+        resolver=resolver,
+        default_role=default_role,
+        default_cls=default_cls,
+    )
+    prose_hits = _extract_from_prose(
+        doc,
+        doi=doi,
+        citation=citation,
+        resolver=resolver,
+        default_role=default_role,
+        default_cls=default_cls,
+    )
+
+    # Deduplicate table vs prose hits on the same page/molecule/origin/energy
+    combined: list[ExtractedCandidate] = list(table_hits)
+    seen = {
+        (normalize_name_key(c.name), c.origin, round(c.et_kcal, 1))
+        for c in table_hits
+    }
+    for p in prose_hits:
+        key = (normalize_name_key(p.name), p.origin, round(p.et_kcal, 1))
+        if key not in seen:
+            seen.add(key)
+            combined.append(p)
+
+    # Optional OCSR via DECIMER-Image_Transformer for unresolved structures
+    unresolved = [c for c in combined if not c.smiles]
+    if unresolved and (use_decimer or ocsr_predictor is not None or figures_dir is not None):
+        target_pages = {c.page_num for c in unresolved}
+        fig_out = Path(figures_dir) / p_path.stem if figures_dir else p_path.parent / f".figures_{p_path.stem}"
+        run_pred = ocsr_predictor if (ocsr_predictor is not None or (use_decimer and decimer_available())) else None
+        figs = run_ocsr_on_pdf(p_path, fig_out, pages=target_pages, predictor=run_pred)
+        figs_by_page: dict[int, list[Any]] = {}
+        for f in figs:
+            figs_by_page.setdefault(f.page_num, []).append(f)
+
+        for cand in unresolved:
+            page_figs = figs_by_page.get(cand.page_num, [])
+            if not page_figs:
+                continue
+            matched = None
+            cand_tokens = set(re.findall(r"[A-Za-z0-9\-]+", cand.name.lower()))
+            for fig in page_figs:
+                if fig.label and fig.label.lower() in cand_tokens and fig.predicted_smiles:
+                    matched = fig
+                    break
+            if matched is None:
+                pred_figs = [f for f in page_figs if f.predicted_smiles]
+                if len(pred_figs) == 1:
+                    matched = pred_figs[0]
+            if matched and matched.predicted_smiles:
+                cand.smiles = matched.predicted_smiles
+                cand.resolution_source = "decimer_image_transformer"
+                cand.structure_note = (
+                    f"Predicted from PDF figure ({matched.image_path.name}) via DECIMER-Image_Transformer; verify drawing."
+                )
+            else:
+                cand.warnings.append(
+                    "Cropped figure(s) available for review: " + ", ".join(str(f.image_path) for f in page_figs)
+                )
+
+    return combined
