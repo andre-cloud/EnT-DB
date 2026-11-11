@@ -87,7 +87,7 @@
     if (ctx.structureOk == null) add("Structure parses", 0, 15, "Not checked: the structure library was unavailable");
     else add("Structure parses", ctx.structureOk ? 15 : 0, 15, ctx.structureOk ? "" : (f.smiles ? "The SMILES could not be read" : "No structure given"));
 
-    add("Name given", f.name ? 3 : 0, 3);
+    add("IUPAC name given", f.name ? 3 : 0, 3);
 
     var okEt = !isNaN(f.kcal) && f.kcal >= 20 && f.kcal <= 120;
     add("E_T in a plausible range", okEt ? 12 : 0, 12, isNaN(f.kcal) ? "No value given" : okEt ? "" : "Outside 20–120 kcal/mol: check the unit");
@@ -189,7 +189,7 @@
      Fields a reader may propose a new value for, with how the value is checked. "uses_add"
      adds a paper (DOI + note) in which the molecule was used. Shared with the server. */
   var SUGGEST_FIELDS = [
-    ["name", "Name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
+    ["name", "IUPAC name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
     ["cls", "Class", "text"], ["role", "Role", "role"], ["origin", "Origin (experimental or computed)", "origin"],
     ["et_kcal", "E_T (kcal/mol)", "et"], ["et_unc", "± Uncertainty (kcal/mol)", "unc"],
     ["et_reported", "Value as reported in the paper", "text"], ["et_type", "Value type", "text"],

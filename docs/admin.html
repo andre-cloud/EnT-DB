@@ -8,13 +8,16 @@
 <meta name="description" content="Curator review queue for TrEnDB.">
 <meta name="robots" content="noindex">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fredoka:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta name="theme-color" content="#12301F">
 </head>
 <body>
 <div class="wrap">
   <header class="topbar">
-    <h1>TrEnDB review</h1>
+    <h1 class="brand"><img src="assets/logo.svg" alt="" width="40" height="40"><span>Tr<span class="en">En</span>DB <span class="sub">review</span></span></h1>
     <span><a href="./">Public site</a> · <a href="#" id="signout" hidden>Sign out</a></span>
   </header>
 
@@ -22,6 +25,14 @@
   <div class="banner" id="imp" hidden>
     <span id="imp-text"></span>
     <div class="actions" style="margin-top:8px"><button class="btn primary" id="imp-go" type="button">Import into the queue</button></div>
+  </div>
+  <div class="banner" id="iupac" hidden>
+    <span id="iupac-text" aria-live="polite"></span>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn primary" id="iupac-go" type="button">Use IUPAC names</button>
+      <button class="btn" id="iupac-pc" type="button" hidden>Look up the others on PubChem</button>
+      <button class="btn" id="iupac-stop" type="button" hidden>Stop</button>
+    </div>
   </div>
   <div class="banner" id="cas" hidden>
     <span id="cas-text" aria-live="polite"></span>
@@ -110,10 +121,15 @@
       </details>
     </aside>
 
-    <div class="actions" id="bulk">
-      <button class="btn" id="bulk-approve" type="button" hidden></button>
-      <button class="btn primary" id="bulk-confirm" type="button" hidden></button>
-      <button class="btn" id="bulk-cancel" type="button" hidden>Cancel</button>
+    <div class="selbar" id="selbar" role="toolbar" aria-label="Selected entries">
+      <span id="sel-n" aria-live="polite">0 selected</span>
+      <button class="btn small" id="sel-all" type="button">Select all listed</button>
+      <button class="btn small" id="sel-none" type="button" hidden>Clear selection</button>
+      <span class="grow"></span>
+      <button class="btn small primary" id="sel-approve" type="button" hidden>Approve selected</button>
+      <button class="btn small reject" id="sel-reject" type="button" hidden>Reject selected</button>
+      <button class="btn small" id="sel-queue" type="button" hidden>Back to queue</button>
+      <button class="btn small danger" id="sel-delete" type="button" hidden>Delete selected permanently</button>
     </div>
     <p class="err" id="bulk-err" role="alert" hidden></p>
     <div id="status" class="status">Loading…</div>

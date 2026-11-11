@@ -162,7 +162,8 @@ create view public.public_entries as
 select id, created_at, name, cas, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
        citation, doi, location, quote, evidence,
-       verify_level, verify_note, uv, direct_exc, score, uses
+       uv, direct_exc, score, uses
+       -- verify_level and verify_note are curators' working notes: never public
 from public.entries
 where status = 'approved';
 

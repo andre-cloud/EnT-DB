@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   var $ = Ent.$, api = Ent.api;
-  var state = { docs: [], sugg: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, search: Ent.newSearch("review") };
+  var state = { docs: [], sugg: [], view: "pending", loaded: false, loadErr: "", busy: {}, drafts: {}, selected: {}, search: Ent.newSearch("review") };
   var dupCache = {};   /* pending id -> duplicates result, recomputed on every load */
   function approvedDocs() { return state.docs.filter(function (d) { return d.status === "approved"; }); }
   function pendingDocs() { return state.docs.filter(function (d) { return d.status === "pending"; }); }
@@ -45,7 +45,8 @@
     Ent.searchInfo(res, inView.length);
     Ent.drawList(list, res.rows, function (d) {
       return Ent.card(d, { scores: res.scores, simMode: state.search.ss.mode === "sim", dup: dupOf(d),
-        admin: { busy: state.busy, drafts: state.drafts, onPatch: onPatch, approve: approve } });
+        admin: { busy: state.busy, drafts: state.drafts, onPatch: onPatch, approve: approve,
+                 selected: state.selected, onSelect: onSelect, onDelete: confirmDelete } });
     }, state.search.pager, render);
     /* corrections proposed by readers come first in the queue */
     if (state.view === "pending" && state.sugg.length) {
@@ -151,27 +152,89 @@
   }
 
   /* ---------- approve everything the current filters show (duplicates excluded) ---------- */
-  var bulkIds = [], bulkArmed = false, bulkSkipped = 0;
-  function drawBulk(rows) {
-    var listed = state.view === "pending" ? rows : [];
-    bulkIds = listed.filter(function (d) { var x = dupOf(d); return !(x && x.flag); }).map(function (d) { return d.id; });
-    bulkSkipped = listed.length - bulkIds.length;
-    var n = bulkIds.length, skip = bulkSkipped ? " (" + bulkSkipped + " possible duplicates left for one-by-one review)" : "";
-    $("bulk-approve").hidden = !n || bulkArmed; $("bulk-approve").textContent = "Approve all " + n + " listed" + skip;
-    $("bulk-confirm").hidden = !n || !bulkArmed; $("bulk-confirm").textContent = "Confirm: approve " + n + " entries";
-    $("bulk-cancel").hidden = !n || !bulkArmed;
+  /* ---------- selection: approve, reject, re-queue or delete several entries at once ---------- */
+  var listed = [];   /* entries shown under the current tab, search and filters */
+  function onSelect(id, on) { if (on) state.selected[id] = true; else delete state.selected[id]; drawSel(); }
+  function selectedDocs() {
+    var byId = {}; state.docs.forEach(function (d) { byId[d.id] = d; });
+    return Object.keys(state.selected).map(function (id) { return byId[id]; })
+      .filter(function (d) { return d && d.status === state.view; });
   }
-  function bulkReset() { bulkArmed = false; $("bulk-confirm").disabled = false; }
-  $("bulk-approve").addEventListener("click", function () { bulkArmed = true; $("bulk-err").hidden = true; render(); });
-  $("bulk-cancel").addEventListener("click", function () { bulkReset(); render(); });
-  $("bulk-confirm").addEventListener("click", function () {
-    var ids = bulkIds.slice(); $("bulk-confirm").disabled = true;
-    api.adminPatchMany(ids, { status: "approved", decided_at: new Date().toISOString() }).then(function () {
-      bulkReset(); load();
-    }, function () {
-      bulkReset(); $("bulk-err").textContent = "Not all entries could be approved. Refresh to see which ones went through."; $("bulk-err").hidden = false; load();
+  function drawBulk(rows) { listed = rows || []; drawSel(); }
+  function drawSel() {
+    var sel = selectedDocs(), n = sel.length, v = state.view;
+    $("sel-n").textContent = n + " selected";
+    $("sel-all").hidden = !listed.length; $("sel-all").textContent = "Select all " + listed.length + " listed";
+    $("sel-none").hidden = !n;
+    $("sel-approve").hidden = !n || v === "approved";
+    $("sel-reject").hidden = !n || v === "rejected";
+    $("sel-queue").hidden = !n || v === "pending";
+    $("sel-delete").hidden = !n || v !== "rejected";
+    $("selbar").hidden = !state.loaded || (!listed.length && !n);
+  }
+  function clearSel() { state.selected = {}; }
+  $("sel-all").addEventListener("click", function () { listed.forEach(function (d) { state.selected[d.id] = true; }); render(); });
+  $("sel-none").addEventListener("click", function () { clearSel(); render(); });
+  function bulkError(t) { $("bulk-err").textContent = t; $("bulk-err").hidden = false; }
+  function runPatch(docs, patch, verb) {
+    $("bulk-err").hidden = true;
+    var ids = docs.map(function (d) { return d.id; });
+    return api.adminPatchMany(ids, patch).then(function (n) {
+      clearSel(); if (n < ids.length) bulkError((ids.length - n) + " of " + ids.length + " entries could not be " + verb + ".");
+      load();
+    }, function () { bulkError("Not all entries could be " + verb + ". Refresh to see which ones went through."); load(); });
+  }
+  function askThen(title, text, label, cls, go) {
+    Ent.dialog(title, function (box) {
+      box.appendChild(Ent.el("p", null, text));
+      var act = Ent.el("div", "actions"), ok = Ent.el("button", "btn " + cls, label), no = Ent.el("button", "btn", "Cancel");
+      ok.type = no.type = "button"; act.appendChild(ok); act.appendChild(no); box.appendChild(act);
+      no.addEventListener("click", Ent.closeDialog);
+      ok.addEventListener("click", function () { ok.disabled = true; Ent.closeDialog(); go(); });
+      setTimeout(function () { no.focus(); }, 0);
     });
+  }
+  $("sel-approve").addEventListener("click", function () {
+    var sel = selectedDocs();
+    /* the same value already in the database (yellow) must be resolved one by one */
+    var ok = sel.filter(function (d) { var x = dupOf(d); return !(x && x.flag); }), skipped = sel.length - ok.length;
+    if (!ok.length) { bulkError("All selected entries are possible duplicates: approve them one by one."); return; }
+    askThen("Approve " + ok.length + " entries?", "They become public at once." + (skipped ? " " + skipped + " possible duplicates (yellow) are left selected for one-by-one review." : ""),
+      "Approve " + ok.length, "primary", function () {
+        var now = new Date().toISOString();
+        runPatch(ok, { status: "approved", decided_at: now }, "approved").then(function () {
+          sel.filter(function (d) { return ok.indexOf(d) < 0; }).forEach(function (d) { state.selected[d.id] = true; }); render();
+        });
+      });
   });
+  $("sel-reject").addEventListener("click", function () {
+    var sel = selectedDocs();
+    askThen("Reject " + sel.length + " entries?", "They move to the Rejected tab, where they can be restored or deleted.", "Reject " + sel.length, "reject",
+      function () { runPatch(sel, { status: "rejected", decided_at: new Date().toISOString() }, "rejected"); });
+  });
+  $("sel-queue").addEventListener("click", function () {
+    var sel = selectedDocs();
+    runPatch(sel, { status: "pending", decided_at: null }, "moved back to the queue");
+  });
+  $("sel-delete").addEventListener("click", function () { confirmDelete(selectedDocs()); });
+  /* Permanent deletion: only rejected entries, always after a confirmation that says it cannot be undone. */
+  function confirmDelete(docs) {
+    docs = docs.filter(function (d) { return d.status === "rejected"; });
+    if (!docs.length) return;
+    var what = docs.length === 1 ? "“" + (docs[0].name || "this entry") + "”" : docs.length + " rejected entries";
+    askThen("Delete " + what + " permanently?", (docs.length === 1 ? "This removes it" : "This removes them") + " from the database for good, together with any corrections suggested for " + (docs.length === 1 ? "it" : "them") + ". It cannot be undone.",
+      "Delete permanently", "danger primary", function () {
+        $("bulk-err").hidden = true;
+        api.adminDeleteMany(docs.map(function (d) { return d.id; })).then(function (n) {
+          docs.forEach(function (d) { delete state.selected[d.id]; });
+          if (n < docs.length) bulkError((docs.length - n) + " of " + docs.length + " entries could not be deleted.");
+          load();
+        }, function (e) {
+          if (e && e.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+          bulkError("The entries could not be deleted. Try again."); load();
+        });
+      });
+  }
 
   /* ---------- literature batches published with the site ---------- */
   var pendingImport = [];
@@ -179,6 +242,8 @@
     api.batches().then(function (rows) {
       var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
       pendingImport = rows.filter(function (r) { return r.import_key && !have[r.import_key]; });
+      batchRows = rows;
+      drawNames();
       $("imp").hidden = !pendingImport.length;
       $("imp-text").textContent = pendingImport.length + " new literature entries are ready to add to the queue.";
     }, function () { $("imp").hidden = true; });   /* no batches published: nothing to offer */
@@ -208,6 +273,70 @@
     state.docs.filter(function (d) { return !d.idcode && Ent.idCode(d.smiles); })
       .reduce(function (p, d) { return p.then(function () { return api.adminPatch(d.id, { idcode: Ent.idCode(d.smiles) }).catch(function () {}); }); }, Promise.resolve());
   }
+
+  /* ---------- IUPAC names ----------
+     Entry names are IUPAC names only. The literature batches carry them (checked by hand where PubChem
+     has none): entries whose structure is in a batch take that name in one go; the others can be
+     looked up on PubChem, one request at a time. */
+  var nameMap = {}, batchRows = [], nameRun = null, nameTried = {};
+  function buildNames() { nameMap = {}; batchRows.forEach(function (r) { if (r.smiles && r.name) nameMap[nameKey(r.smiles)] = r.name; }); }
+  /* the same structure written as a different SMILES still matches (structure code, when the library is loaded) */
+  function nameKey(smi) { return (window.OCL && Ent.idCode(smi)) || smi; }
+  function nameOf(d) { return d.smiles ? nameMap[nameKey(d.smiles)] : ""; }
+  function nameFix() { return state.docs.filter(function (d) { var n = nameOf(d); return n && d.name !== n; }); }
+  function namePc() { return state.docs.filter(function (d) { return d.smiles && !nameOf(d) && !nameTried[d.id]; }); }
+  function drawNames(msg) {
+    if (nameRun) return;
+    buildNames();
+    var a = nameFix().length, b = namePc().length;
+    $("iupac").hidden = !a && !b && !msg;
+    $("iupac-go").hidden = !a; $("iupac-pc").hidden = !b; $("iupac-stop").hidden = true;
+    $("iupac-text").textContent = (msg ? msg + " " : "") +
+      (a ? a + (a === 1 ? " entry has" : " entries have") + " a name that is not the IUPAC name of its structure. " : "") +
+      (b ? b + " other " + (b === 1 ? "entry" : "entries") + " (not from a literature batch) can be checked against PubChem." : "");
+  }
+  $("iupac-go").addEventListener("click", function () {
+    var byName = {}; nameFix().forEach(function (d) { var n = nameOf(d); (byName[n] = byName[n] || []).push(d.id); });
+    var names = Object.keys(byName), done = 0, fail = 0;
+    $("iupac-go").disabled = true; nameRun = {};
+    names.reduce(function (p, n) {
+      return p.then(function () {
+        $("iupac-text").textContent = "Renaming… " + done + " / " + names.length + " structures";
+        return api.adminPatchMany(byName[n], { name: n }).then(function () { done++; }, function (e) { fail++; if (e && e.status === 401) throw e; });
+      });
+    }, Promise.resolve()).then(function () {
+      nameRun = null; $("iupac-go").disabled = false;
+      load().then(function () { drawNames(fail ? fail + " structures could not be renamed; try again." : "Names updated."); });
+    }, function () { nameRun = null; $("iupac-go").disabled = false; signedOut("Your session ended. Sign in again."); });
+  });
+  $("iupac-pc").addEventListener("click", function () {
+    var todo = namePc(), run = nameRun = { stop: false, set: 0, same: 0, miss: 0, fail: 0, inRow: 0 };
+    $("iupac-go").hidden = $("iupac-pc").hidden = true; $("iupac-stop").hidden = false; $("iupac-stop").disabled = false;
+    function finish(why) {
+      nameRun = null; render();
+      drawNames(why + " Renamed " + run.set + ", already IUPAC " + run.same + ", not on PubChem " + run.miss + (run.fail ? ", failed " + run.fail : "") +
+        (run.miss ? ". Entries PubChem does not know need their IUPAC name written in the editor." : "."));
+    }
+    (function step(i) {
+      if (run.stop) return finish("Stopped.");
+      if (i >= todo.length) return finish("Done.");
+      if (run.inRow >= 5) return finish("Stopped after five errors in a row.");
+      $("iupac-text").textContent = "Checking " + (i + 1) + " / " + todo.length + " on PubChem…";
+      var d = todo[i], wait = 250;
+      Ent.lookupIupac(d.smiles).then(function (n) {
+        run.inRow = 0; nameTried[d.id] = 1;
+        if (!n) { run.miss++; return; }
+        if (n === d.name) { run.same++; return; }
+        return api.adminPatch(d.id, { name: n }).then(function (rows) {
+          if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); run.set++; } else run.fail++;
+        });
+      }).catch(function (err) {
+        if (err && err.status === 401) { run.stop = true; signedOut("Your session ended. Sign in again."); return; }
+        run.fail++; run.inRow++; wait = 2000;
+      }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
+    })(0);
+  });
+  $("iupac-stop").addEventListener("click", function () { if (nameRun) { nameRun.stop = true; $("iupac-stop").disabled = true; } });
 
   /* ---------- CAS numbers looked up on PubChem ---------- */
   /* One request at a time with a pause, under PubChem's limit of 5 per second.
@@ -263,7 +392,7 @@
         else { state.loadErr = "The entries could not be loaded. Use Refresh to try again."; render(); }
       });
   }
-  function signedOut(msg) { if (casRun) casRun.stop = casRun.out = true; $("cas").hidden = true; Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
+  function signedOut(msg) { if (casRun) casRun.stop = casRun.out = true; if (nameRun) nameRun.stop = true; $("cas").hidden = true; $("iupac").hidden = true; Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || ""); }
 
   function start() {
     if (!api.configured) { show(""); banner("The backend is not configured yet, so there is nothing to review. See the setup steps in the repository README."); return; }
@@ -297,11 +426,11 @@
   $("signout").addEventListener("click", function (e) { e.preventDefault(); signedOut(""); });
   $("reload").addEventListener("click", load);
   ["pending", "approved", "rejected"].forEach(function (k) {
-    $("tab-" + k).addEventListener("click", function () { state.view = k; state.search.pager.shown = 0; bulkReset(); render(); });
+    $("tab-" + k).addEventListener("click", function () { state.view = k; state.search.pager.shown = 0; clearSel(); render(); });
   });
   /* Changing the search or filters disarms a pending bulk approval: it must cover what was confirmed. */
-  Ent.bindSearch(state.search, function () { bulkReset(); render(); });
+  Ent.bindSearch(state.search, function () { render(); });
   Ent.sketcher.bind();
-  Ent.loadOCL(function () { dupCache = {}; if (state.loaded) render(); backfill(); });
+  Ent.loadOCL(function () { dupCache = {}; if (state.loaded) { render(); drawNames(); } backfill(); });
   start();
 })();

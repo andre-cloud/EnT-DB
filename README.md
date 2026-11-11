@@ -21,6 +21,12 @@ Site: https://nuniwo-source.github.io/TrEnDB/
   computed, and from the same paper within 1 kcal/mol, or any paper within 0.1 kcal/mol) is marked in yellow; approving
   it asks which existing entry to overwrite (the old one moves to *Rejected*). A *different* value for a known molecule
   is not a duplicate: it is approved normally and appears on the same card. Bulk approval skips yellow entries.
+- **IUPAC names only.** Entries are named by their IUPAC name, never by a label from the paper. The literature batches carry
+  checked IUPAC names; on the review page, *Use IUPAC names* renames existing entries to match, and other entries can be checked
+  against PubChem. The editor and the submission form have an *IUPAC name from PubChem* button.
+- **Curator-only notes.** The verification level and note are visible on the review page only; the public view does not include them.
+- **Selection.** On the review page, entries can be selected and approved, rejected or moved back to the queue together;
+  rejected entries can be deleted permanently (after a confirmation).
 - **Corrections.** Readers can suggest corrections to any value in the database, changing any number of fields at
   once in one form. It reaches the queue as a purple card showing old and new values; approving it writes only the changed fields into the entry.
 - **CAS numbers from PubChem.** A CAS number cannot be derived from a structure, so curators look it up on PubChem

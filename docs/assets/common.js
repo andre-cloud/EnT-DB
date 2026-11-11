@@ -87,6 +87,22 @@
     });
   };
 
+  /* IUPAC name of a structure from PubChem; "" when PubChem does not know it. Rejects on network errors. */
+  Ent.lookupIupac = function (smiles) {
+    if (!smiles) return Promise.resolve("");
+    return fetch("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/property/IUPACName/JSON", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "smiles=" + encodeURIComponent(smiles)
+    }).then(function (r) {
+      if (r.status === 404 || r.status === 400) return null;
+      if (!r.ok) { var e = new Error("PubChem answered " + r.status); e.status = r.status; throw e; }
+      return r.json();
+    }).then(function (j) {
+      var p = j && j.PropertyTable && j.PropertyTable.Properties && j.PropertyTable.Properties[0];
+      return (p && p.CID && p.IUPACName) ? String(p.IUPACName) : "";
+    });
+  };
+
   function fpIndex(searcher, smiles) {
     if (smiles in idxCache) return idxCache[smiles];
     var m = molOf(smiles), ix = null;
@@ -252,6 +268,12 @@
   Ent.card = function (d, o) {
     o = o || {}; var adm = o.admin || null, dup = o.dup || null;
     var c = el("article", "card" + (dup && dup.flag ? " dup" : "")), head = el("div", "head");
+    if (adm && adm.selected) {
+      var pick = el("label", "selpick"), selBox = el("input"), card = c; selBox.type = "checkbox"; selBox.checked = !!adm.selected[d.id];
+      if (selBox.checked) card.classList.add("picked");
+      selBox.addEventListener("change", function () { adm.onSelect(d.id, selBox.checked); card.classList.toggle("picked", selBox.checked); });
+      pick.appendChild(selBox); pick.appendChild(document.createTextNode("Select")); head.appendChild(pick);
+    }
     head.appendChild(el("h2", null, d.name || "(unnamed)"));
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
@@ -360,6 +382,11 @@
       if (d.status === "pending") { decide("Approve", "primary", "approved"); decide("Reject", "reject", "rejected"); }
       else { decide("Back to queue", "", "pending"); if (d.status === "approved") decide("Reject", "reject", "rejected"); else decide("Approve", "primary", "approved"); }
       act.appendChild(eb);
+      if (d.status === "rejected" && adm.onDelete) {
+        var db = el("button", "btn danger", "Delete permanently"); db.type = "button"; db.disabled = busy;
+        db.addEventListener("click", function () { adm.onDelete([d]); });
+        act.appendChild(db);
+      }
       c.appendChild(act);
       if (adm.busy[d.id] === "err") c.appendChild(el("p", "err", "Could not save. Try again."));
     }
@@ -402,8 +429,6 @@
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
     if (d.score != null) { var g = EntScore.gradeOf(d.score); chips.appendChild(el("span", "chip " + g.cls, "Score " + d.score + " · " + g.label)); }
-    if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
-    if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
     top.appendChild(chips); v.appendChild(top);
     if (!many) v.appendChild(scale(d));
     var dl = el("dl");
@@ -416,7 +441,6 @@
     if (d.quote) { var qd = el("span"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
     row(dl, "What it says", d.evidence);
     if (d.doi) row(dl, "DOI", doiLink(d.doi, d.doi));
-    row(dl, "Verification", d.verify_note);
     v.appendChild(dl);
     if (o.onSuggest) {
       var sa = el("div", "actions"), sb = el("button", "btn small", many ? "Suggest a correction to this value" : "Suggest a correction"); sb.type = "button";
@@ -628,7 +652,7 @@
 
   /* ---------- entry editor (review page) ---------- */
   var EDIT = [
-    ["name", "Name", "text"], ["cas", "CAS number", "text"], ["cls", "Class", "text"],
+    ["name", "IUPAC name", "text"], ["cas", "CAS number", "text"], ["cls", "Class", "text"],
     ["role", "Role", "select", [["acceptor", "Acceptor"], ["donor", "Donor"], ["both", "Donor and acceptor"]]],
     ["origin", "Origin", "select", [["exp", "Experimental"], ["calc", "Computed"]]],
     ["et_kcal", "E_T (kcal/mol)", "number"], ["et_unc", "± Uncertainty (kcal/mol)", "number"],
@@ -663,6 +687,23 @@
     });
     wrap.appendChild(b); wrap.appendChild(msg); return wrap;
   }
+  /* "IUPAC name from PubChem" under a name field (editor and submission form). */
+  var iupacLookup = Ent.iupacLookup = function (inp, getSmiles) {
+    var wrap = el("div", "actions"), b = el("button", "btn small", "IUPAC name from PubChem"), msg = el("span", "hint");
+    b.type = "button"; msg.setAttribute("aria-live", "polite");
+    b.addEventListener("click", function () {
+      var smi = (getSmiles() || "").trim();
+      if (!smi) { msg.textContent = "Give the SMILES first."; return; }
+      b.disabled = true; msg.textContent = "Asking PubChem…";
+      Ent.lookupIupac(smi).then(function (n) {
+        b.disabled = false;
+        if (!n) { msg.textContent = "PubChem does not know this structure: write the IUPAC name by hand."; return; }
+        inp.value = n; inp.dispatchEvent(new Event("input", { bubbles: true }));
+        msg.textContent = "From PubChem; check stereodescriptors (E/Z, R/S) against the structure.";
+      }, function () { b.disabled = false; msg.textContent = "PubChem could not be reached. Try again."; });
+    });
+    wrap.appendChild(b); wrap.appendChild(msg); return wrap;
+  };
   Ent.editor = {
     open: function (d, onSave) {
       var box = el("div", "sk-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
@@ -677,6 +718,7 @@
         inp.id = "ed-" + f[0]; inp.value = d[f[0]] == null ? "" : d[f[0]];
         lab.appendChild(inp); box.appendChild(lab);
         if (f[0] === "cas") box.appendChild(casLookup(inp, d.smiles));
+        if (f[0] === "name") box.appendChild(iupacLookup(inp, function () { var sm = document.getElementById("ed-smiles"); return sm ? sm.value : d.smiles; }));
       });
       box.appendChild(el("p", "hint", "Papers in which this molecule was used in photocatalysis"));
       var uses = el("div", "stack"); uses.id = "ed-uses";
@@ -943,6 +985,19 @@
     return authed(function (t) {
       return fetch(base + "/rest/v1/suggestions?id=eq." + encodeURIComponent(id),
         { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) }).then(asJson);
+    });
+  };
+  /* Permanent removal (curators only; RLS allows delete to admins). -> Promise<number deleted> */
+  api.adminDeleteMany = function (ids) {
+    var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    return authed(function (t) {
+      return chunks.reduce(function (p, c) {
+        return p.then(function (n) {
+          return fetch(base + "/rest/v1/entries?id=in.(" + c.join(",") + ")",
+            { method: "DELETE", headers: headers(t, { Prefer: "return=representation" }) })
+            .then(asJson).then(function (rows) { return n + (rows ? rows.length : 0); });
+        });
+      }, Promise.resolve(0));
     });
   };
   api.adminPatch = function (id, patch) {

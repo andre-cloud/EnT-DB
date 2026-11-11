@@ -71,6 +71,7 @@
 
   $("form").addEventListener("input", function () { fmMsg(); updateForm(); });
   $("form").addEventListener("change", function () { updateForm(); });
+  $("fm-iupac").appendChild(Ent.iupacLookup($("fm-name"), function () { return $("fm-smiles").value; }));
   $("fm-draw").addEventListener("click", function () {
     Ent.sketcher.open({
       title: "Sketcher · new entry", smiles: $("fm-smiles").value.trim(), saveLabel: "Use this structure",
