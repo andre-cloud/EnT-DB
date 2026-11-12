@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; worker-src blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov https://api.crossref.org https://doi.org https://cdn.jsdelivr.net data:; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>TrEnDB · Review</title>
 <meta name="description" content="Curator review queue for TrEnDB.">
 <meta name="robots" content="noindex">
@@ -150,6 +150,51 @@
           <div class="actions"><button class="btn small primary" id="imp-go" type="button">Import into the queue</button></div>
         </section>
 
+        <section class="tool-card" id="pdf-box" aria-labelledby="pdf-title">
+          <h3 id="pdf-title">Upload PDF of articles</h3>
+          <div class="dropzone" id="pdf-drop">
+            <input id="pdf-file" type="file" accept=".pdf,application/pdf" multiple hidden>
+            <p class="hint">Drop article PDFs here, with their Supporting Information if you have it, to extract triplet energies into batch JSON.</p>
+            <div class="tools">
+              <button class="btn small" id="pdf-pick" type="button">Choose PDF(s)…</button>
+              <button class="btn small primary" id="pdf-go" type="button" hidden>Extract JSON</button>
+              <button class="btn small" id="pdf-clear" type="button" hidden>Clear</button>
+            </div>
+          </div>
+          <details class="pdf-opts">
+            <summary>Optional extraction defaults</summary>
+            <div class="pdf-opts-grid">
+              <label class="pdf-check"><input id="pdf-ocr" type="checkbox" checked> Read scanned pages with OCR</label>
+              <label class="pdf-check"><input id="pdf-ocr-img" type="checkbox"> Also read tables that are pictures (slow: several seconds per page)</label>
+              <label class="field">DOI override (optional)<input id="pdf-doi" class="mono" type="text" placeholder="e.g. 10.1021/jacs.0c05069" spellcheck="false" autocomplete="off"></label>
+              <div class="frow">
+                <label class="field">Default role
+                  <select id="pdf-role">
+                    <option value="acceptor">Acceptor</option>
+                    <option value="donor">Donor</option>
+                    <option value="both">Both</option>
+                  </select>
+                </label>
+                <label class="field">Default class<input id="pdf-cls" type="text" placeholder="e.g. Thioxanthones"></label>
+              </div>
+            </div>
+          </details>
+          <progress id="pdf-prog" class="tool-prog" value="0" max="1" hidden></progress>
+          <p class="hint" id="pdf-info" aria-live="polite">Generates a <code>trendb-extract</code> JSON you can download or load straight into the queue.</p>
+          <div class="err" id="pdf-err" role="alert" hidden></div>
+          <div class="up-report" id="pdf-result" hidden>
+            <div class="up-sec" id="pdf-summary-box">
+              <p class="hint" id="pdf-summary"></p>
+              <ul class="up-list pdf-file-list" id="pdf-files" aria-label="Result for each file"></ul>
+              <div class="actions">
+                <button class="btn small primary" id="pdf-load-up" type="button" hidden>Import into queue</button>
+                <button class="btn small" id="pdf-dl-json" type="button" hidden>Download JSON</button>
+                <button class="btn small" id="pdf-review-open" type="button" hidden>Fix unresolved…</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section class="tool-card" id="up-box" aria-labelledby="up-title">
           <h3 id="up-title">Upload batch JSON</h3>
           <div class="dropzone" id="up-drop">
@@ -284,6 +329,24 @@
     </div>
   </div>
 </div>
+<div class="sk ei-overlay" id="pdf-modal" hidden>
+  <div class="sk-box ed-box ei-box" role="dialog" aria-modal="true" aria-labelledby="pdf-modal-title">
+    <div class="ed-head">
+      <div class="ei-modal-title-wrap">
+        <h2 id="pdf-modal-title">PDF extraction · Unresolved candidates</h2>
+        <span class="hint" id="pdf-modal-meta"></span>
+      </div>
+      <div class="ed-head-actions">
+        <button class="btn small" id="pdf-modal-dl" type="button">Download unresolved JSON</button>
+        <button class="btn small" id="pdf-modal-close" type="button">Close</button>
+      </div>
+    </div>
+    <div class="ed-body ei-modal-body">
+      <p class="hint" id="pdf-modal-empty" hidden>All extracted candidates have been resolved.</p>
+      <ul id="pdf-modal-list" class="ei-modal-list"></ul>
+    </div>
+  </div>
+</div>
 <div class="sk" id="ed" hidden></div>
 
 <div class="sk" id="sk" hidden>
@@ -307,6 +370,7 @@
 <script src="assets/score.js"></script>
 <script src="assets/chem-render.js"></script>
 <script src="assets/common.js"></script>
+<script src="assets/pdf-extract.js"></script>
 <script src="assets/admin.js"></script>
 </body>
 </html>

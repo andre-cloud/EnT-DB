@@ -130,9 +130,40 @@ offered for import as *pending*; each carries an `import_key`, so importing twic
 - EnTdecker dataset (Schlosser et al., J. Am. Chem. Soc. 2024, 146, 13266), Zenodo doi:10.5281/zenodo.10391170, CC BY 4.0
 - DvTE benchmark data (Popescu, Paton, Chem 2024, 10, 3428), github.com/patonlab/DvTE, MIT licence
 
+## Loading papers from PDFs
+
+Put the PDFs in a folder (papers and, when you have them, their Supporting Information, in any sub-folder and
+under any file name) and run, from anywhere inside the repository:
+
+```
+pip install -e .        # once
+trendb path/to/folder
+```
+
+Nothing else is needed. The command:
+
+- matches each Supporting Information file to its paper — by file name (`paper_si.pdf`, `paper-SI_001.pdf`), else by
+  the paper's DOI or title printed in the SI, else because it is the only paper in the folder; when a paper has no
+  local SI it looks for one online;
+- extracts triplet energies from tables and text without an LLM, resolves structures (local dictionary, OPSIN,
+  PubChem) and skips values already present in `docs/batches`;
+- writes `docs/batches/batch-NNN.json` and updates `index.json`; entries it could not complete (usually a missing
+  structure) go to `extracted/needs_review.json`;
+- writes `extracted/report.md`: what was read, how each SI was matched, and every file that could not be processed.
+  One unreadable PDF (corrupt, password-protected, scanned with no OCR) never stops the others.
+
+Running it again on the same folder adds nothing. `--dry-run` writes only a preview in `extracted/`; `--offline`
+skips every network request. What stays manual: check the report, commit and push the batch, then import it from
+`admin.html`. To promote reviewed entries: fill in `smiles` in `extracted/needs_review.json` and run
+`trendb-extract build-batch extracted/needs_review.json --write-batch` from the repository root.
+
+Requirements: Poppler (`pdftotext`) or PyMuPDF; Tesseract for scanned pages; RDKit recommended.
+`trendb-extract` remains available for single files and fine control (`trendb-extract extract --help`).
+
 ## Development
 
 ```
+pytest                             # Python extraction pipeline
 node tools/test-score.mjs          # scoring rules
 node tools/build-function.mjs      # regenerate the server function after editing score.js or the template
 node tools/check-links.mjs         # published data carries DOIs only

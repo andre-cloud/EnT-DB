@@ -450,8 +450,8 @@
     return row;
   }
   var syncModalOpen = Ent.syncModalOpen = function () {
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
-    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden));
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
+    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden) || (pm && !pm.hidden));
     document.body.classList.toggle("modal-open", open);
   };
 

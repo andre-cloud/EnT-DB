@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -26,6 +26,8 @@ class BatchBuildResult:
     batch_path: Path | None = None
     review_path: Path | None = None
     report_path: Path | None = None
+    failures: list[dict[str, str]] = field(default_factory=list)  # [{"file": ..., "error": ...}]
+    notes: list[str] = field(default_factory=list)
 
 
 def _same_value(a_origin: str, a_et: float, a_doi: str | None, b_origin: str, b_et: float, b_doi: str | None) -> bool:
@@ -36,6 +38,16 @@ def _same_value(a_origin: str, a_et: float, a_doi: str | None, b_origin: str, b_
     x = scoring.clean_doi(a_doi or "").lower()
     y = scoring.clean_doi(b_doi or "").lower()
     return dv <= 1.0 if (x and x == y) else dv <= 0.1
+
+
+_GENERIC_CONDITIONS = {"", "not stated", "solvent model not stated"}
+
+
+def _different_conditions(a: str | None, b: str | None) -> bool:
+    """True when both entries state their conditions and they differ (other solvent, temperature...)."""
+    x = re.sub(r"\s+", " ", (a or "").strip().lower())
+    y = re.sub(r"\s+", " ", (b or "").strip().lower())
+    return x not in _GENERIC_CONDITIONS and y not in _GENERIC_CONDITIONS and x != y
 
 
 def _load_existing_batch_rows(batches_dir: Path) -> list[dict[str, Any]]:
@@ -247,6 +259,8 @@ def build_batch(
     out_dir: str | Path = "extracted",
     append: bool = True,
     merge_review: bool = True,
+    failures: list[dict[str, str]] | None = None,
+    notes: list[str] | None = None,
 ) -> BatchBuildResult:
     """Validate, score, deduplicate, and package extracted candidates into batch/review files."""
     bdir = Path(batches_dir)
@@ -338,6 +352,11 @@ def build_batch(
         is_dup = False
         for ref in same_refs:
             if _same_value(cand.origin, cand.et_kcal, cand.doi, ref.get("origin", "exp"), float(ref["et_kcal"]), ref.get("doi")):
+                # Two close values from one paper measured under different conditions are both kept.
+                if abs(float(cand.et_kcal) - float(ref["et_kcal"])) > 0.1 and _different_conditions(
+                    cand.conditions, ref.get("conditions")
+                ):
+                    continue
                 is_dup = True
                 skipped_duplicates.append(
                     {
@@ -400,6 +419,8 @@ def build_batch(
         ready_rows=ready_rows,
         review_items=review_items,
         skipped_duplicates=skipped_duplicates,
+        failures=list(failures or []),
+        notes=list(notes or []),
     )
 
     if write_batch and ready_rows:
@@ -499,8 +520,17 @@ def render_report(res: BatchBuildResult) -> str:
         f"- **Ready for batch**: {len(res.ready_rows)}",
         f"- **Needs manual review**: {len(res.review_items)}",
         f"- **Skipped duplicates**: {len(res.skipped_duplicates)}",
+        f"- **Files that could not be processed**: {len(res.failures)}",
         "",
     ]
+    if res.failures:
+        lines.extend(["## Failed Files", ""])
+        lines.extend(f"- `{f['file']}`: {f['error']}" for f in res.failures)
+        lines.append("")
+    if res.notes:
+        lines.extend(["## Notes", ""])
+        lines.extend(f"- {n}" for n in res.notes)
+        lines.append("")
     if res.batch_path:
         lines.append(f"Batch JSON written to: `{res.batch_path}`")
     if res.review_path:

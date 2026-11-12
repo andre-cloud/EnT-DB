@@ -227,6 +227,7 @@
     rel.textContent = state.refreshing ? "Refreshing…" : "Refresh";
     $("last-sync").textContent = state.lastSync ? ("Synced " + state.lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) : "";
     $("up-pick").disabled = !state.loaded;
+    if ($("pdf-pick")) $("pdf-pick").disabled = !state.loaded || pdfBusy;
     if (!state.loaded) { status.hidden = false; status.textContent = state.loadErr || "Loading…"; list.replaceChildren(); drawBulk([]); return; }
 
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
@@ -1132,6 +1133,369 @@
     });
   });
 
+  /* ---------- Upload PDF of articles -> batch JSON ---------- */
+  var pdfFiles = [], pdfResult = null, pdfBusy = false, pdfModalReturn = null, pdfAbort = null;
+  function downloadJsonFile(data, filename) {
+    var blob = new Blob([JSON.stringify(data, null, 1) + "\n"], { type: "application/json" });
+    var a = document.createElement("a"), url = URL.createObjectURL(blob);
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function drawPdfResult() {
+    var box = $("pdf-result");
+    if (!pdfResult) { box.hidden = true; return; }
+    var readyN = pdfResult.readyRows.length;
+    var unresN = pdfResult.reviewItems.length;
+    var dupN = pdfResult.skippedDuplicates.length;
+    var fileCount = pdfResult.fileReports.length;
+    var parts = [
+      plural(fileCount, "PDF", "PDFs") + " processed",
+      plural(readyN, "ready entry", "ready entries")
+    ];
+    if (unresN) parts.push(unresN + " unresolved");
+    if (dupN) parts.push(dupN + " duplicate" + (dupN === 1 ? "" : "s") + " skipped");
+    var failedN = pdfResult.fileReports.filter(function (r) { return r.error; }).length;
+    parts[0] = plural(fileCount - failedN, "PDF", "PDFs") + " processed";
+    if (failedN) parts.push(failedN + " could not be read");
+    var summary = parts.join(" · ") + "." + (pdfResult.cancelled ? " Cancelled before the end: results are partial." : "");
+    $("pdf-summary").textContent = summary;
+    var ul = $("pdf-files");
+    ul.replaceChildren();
+    pdfResult.fileReports.forEach(function (r) {
+      var warns = r.warnings || [];
+      var li = el("li", r.error ? "bad" : (warns.length ? "warn" : ""));
+      li.appendChild(el("strong", null, r.file));
+      if (r.error) {
+        li.appendChild(el("span", "pdf-file-note", r.error));
+      } else {
+        var bits = [r.pages + " page" + (r.pages === 1 ? "" : "s"), r.ready + " ready", r.review + " unresolved"];
+        if (r.duplicates) bits.push(r.duplicates + " duplicate" + (r.duplicates === 1 ? "" : "s"));
+        if (!r.extracted) bits.push("no triplet energy found");
+        li.appendChild(el("span", "pdf-file-note", bits.join(" · ")));
+        if (r.isSi) li.appendChild(el("span", "pdf-file-note", r.pairedWith
+          ? "Supporting Information of " + r.pairedWith + " (matched by " + r.matchedBy + ")"
+          : "Supporting Information with no matching paper"));
+        if (r.ocrPages && r.ocrPages.length) li.appendChild(el("span", "pdf-file-note",
+          "OCR used on page" + (r.ocrPages.length === 1 ? " " : "s ") + r.ocrPages.join(", ") + ": check those values against the PDF"));
+        if (!r.doi) li.appendChild(el("span", "pdf-file-note", "No DOI found: entries will need one before approval"));
+        warns.forEach(function (w) { li.appendChild(el("span", "pdf-file-note", w)); });
+      }
+      ul.appendChild(li);
+    });
+    $("pdf-load-up").hidden = !readyN;
+    $("pdf-load-up").disabled = pdfBusy;
+    $("pdf-load-up").textContent = "Import " + readyN + " into queue";
+    $("pdf-dl-json").hidden = !readyN;
+    $("pdf-review-open").hidden = !unresN;
+    $("pdf-review-open").textContent = "Fix unresolved (" + unresN + ")…";
+    box.hidden = false;
+  }
+  function resetPdfUpload(msg, err) {
+    pdfFiles = []; pdfResult = null; pdfBusy = false;
+    if ($("pdf-file")) $("pdf-file").value = "";
+    if ($("pdf-prog")) $("pdf-prog").hidden = true;
+    if ($("pdf-go")) { $("pdf-go").hidden = true; $("pdf-go").disabled = false; }
+    if ($("pdf-clear")) { $("pdf-clear").hidden = true; $("pdf-clear").disabled = false; $("pdf-clear").textContent = "Clear"; }
+    if ($("pdf-err")) { $("pdf-err").textContent = err || ""; $("pdf-err").hidden = !err; }
+    if ($("pdf-result")) $("pdf-result").hidden = true;
+    if ($("pdf-info")) $("pdf-info").textContent = msg || "Generates a trendb-extract JSON you can download or load straight into the queue.";
+    closePdfModal();
+  }
+  function handlePdfFiles(fileList) {
+    if (pdfBusy) return;
+    var all = Array.prototype.slice.call(fileList || []), seenPdf = {};
+    var list = all.filter(function (f) {
+      if (!f || !(/\.pdf$/i.test(f.name || "") || f.type === "application/pdf")) return false;
+      var k = f.name + "|" + f.size;
+      if (seenPdf[k]) return false;
+      seenPdf[k] = 1;
+      return true;
+    });
+    if (!list.length) {
+      resetPdfUpload(null, "Select one or more .pdf files.");
+      return;
+    }
+    if (!state.loaded) {
+      resetPdfUpload(null, "The database is still loading; drop the PDF(s) again in a moment.");
+      return;
+    }
+    pdfFiles = list;
+    pdfResult = null;
+    $("pdf-err").hidden = true;
+    $("pdf-result").hidden = true;
+    $("pdf-prog").hidden = true;
+    $("pdf-go").hidden = false; $("pdf-go").disabled = false;
+    $("pdf-go").textContent = "Extract JSON (" + plural(list.length, "PDF", "PDFs") + ")";
+    $("pdf-clear").hidden = false;
+    $("pdf-info").textContent = "Ready: " + list.map(function (f) { return f.name; }).join(", ");
+  }
+  function openPdfModal() {
+    if (!pdfResult || !pdfResult.reviewItems.length) return;
+    pdfModalReturn = document.activeElement;
+    $("pdf-modal").hidden = false;
+    Ent.syncModalOpen();
+    drawPdfModal();
+  }
+  function closePdfModal() {
+    var m = $("pdf-modal");
+    if (!m || m.hidden) return;
+    m.hidden = true;
+    Ent.syncModalOpen();
+    if (pdfModalReturn && pdfModalReturn.focus) pdfModalReturn.focus();
+    pdfModalReturn = null;
+  }
+  function drawPdfModal() {
+    var ul = $("pdf-modal-list"), empty = $("pdf-modal-empty"), items = (pdfResult && pdfResult.reviewItems) || [];
+    $("pdf-modal-meta").textContent = plural(items.length, "unresolved candidate", "unresolved candidates") +
+      " · " + (pdfResult ? plural(pdfResult.readyRows.length, "ready row", "ready rows") : "");
+    empty.hidden = items.length > 0;
+    ul.replaceChildren.apply(ul, items.map(function (it, idx) {
+      var cand = it.cand;
+      var li = el("li", "ei-card pdf-unres-card");
+      var infoCol = el("div", "ei-col-info");
+      var thumb = el("div", "ei-thumb");
+      var drawThumb = function (smi) {
+        var minfo = smi ? Ent.molInfo(smi) : null;
+        if (minfo) thumb.innerHTML = minfo.svg;
+        else thumb.textContent = smi ? (window.OCL ? "Invalid SMILES" : "No preview") : "No SMILES";
+      };
+      drawThumb(it.draftSmiles || "");
+      infoCol.appendChild(thumb);
+
+      var meta = el("div", "ei-meta pdf-unres-meta");
+      var head = el("div", "ei-head");
+      head.appendChild(el("strong", "ei-name", cand.name || "(unnamed)"));
+      var badges = el("span", "ei-badges");
+      badges.appendChild(el("span", "ei-status", Ent.fmt(Number(cand.et_kcal), 1) + " kcal/mol"));
+      badges.appendChild(el("span", "ei-tool", cand.origin === "calc" ? "Computed" : "Experimental"));
+      if (cand.location) badges.appendChild(el("span", "ei-status", cand.location));
+      head.appendChild(badges);
+      meta.appendChild(head);
+      meta.appendChild(el("div", "ei-reason", it.reason));
+      if (cand.quote) meta.appendChild(el("div", "pdf-unres-quote", cand.quote));
+      if (cand.evidence) meta.appendChild(el("div", "hint", cand.evidence));
+      if (cand.doi) meta.appendChild(el("div", "hint mono", "DOI: " + cand.doi));
+      infoCol.appendChild(meta);
+      li.appendChild(infoCol);
+
+      var fixCol = el("div", "ei-col-fix");
+      var nameRow = el("div", "ei-fix-row");
+      var nameInp = el("input"); nameInp.type = "text"; nameInp.className = "grow";
+      nameInp.placeholder = "Compound or IUPAC name";
+      nameInp.value = it.draftName != null ? it.draftName : (cand.name || "");
+      nameInp.addEventListener("input", function () { it.draftName = nameInp.value; });
+      var lookupBtn = el("button", "btn small", "Lookup SMILES"); lookupBtn.type = "button";
+      nameRow.appendChild(nameInp); nameRow.appendChild(lookupBtn);
+      fixCol.appendChild(nameRow);
+
+      var smiRow = el("div", "ei-fix-row");
+      var smiInp = el("input"); smiInp.type = "text"; smiInp.className = "mono grow";
+      smiInp.placeholder = "Enter SMILES or use Sketcher…";
+      smiInp.value = it.draftSmiles || "";
+      smiInp.addEventListener("input", function () { it.draftSmiles = smiInp.value; drawThumb(smiInp.value.trim()); });
+      var skBtn = el("button", "btn small", "Sketcher…"); skBtn.type = "button";
+      var addBtn = el("button", "btn small primary", "Add to JSON"); addBtn.type = "button";
+      var dropBtn = el("button", "btn small reject", "Dismiss"); dropBtn.type = "button";
+      smiRow.appendChild(smiInp); smiRow.appendChild(skBtn); smiRow.appendChild(addBtn); smiRow.appendChild(dropBtn);
+      fixCol.appendChild(smiRow);
+
+      var noteEl = el("div", "ei-note " + (it.noteIsErr ? "err" : "hint"), it.note || "");
+      noteEl.hidden = !it.note;
+      fixCol.appendChild(noteEl);
+      li.appendChild(fixCol);
+
+      lookupBtn.addEventListener("click", function () {
+        var q = nameInp.value.trim();
+        if (!q) { it.note = "Enter a compound name or CAS first."; it.noteIsErr = true; drawPdfModal(); return; }
+        lookupBtn.disabled = true;
+        EntPdf.lookupSmilesByName(q).then(function (found) {
+          lookupBtn.disabled = false;
+          if (!found) { it.note = "Not found on PubChem; draw it in Sketcher."; it.noteIsErr = true; drawPdfModal(); return; }
+          it.draftSmiles = found;
+          it.note = "Found SMILES on PubChem — verify preview and click Add to JSON.";
+          it.noteIsErr = false;
+          drawPdfModal();
+        }, function () {
+          lookupBtn.disabled = false;
+          it.note = "PubChem lookup failed."; it.noteIsErr = true; drawPdfModal();
+        });
+      });
+
+      skBtn.addEventListener("click", function () {
+        Ent.sketcher.open({
+          title: "Sketcher · " + (nameInp.value.trim() || cand.name || "Structure"),
+          smiles: smiInp.value.trim(),
+          saveLabel: "Use structure",
+          hint: "Draw the structure or paste SMILES, then click Use structure.",
+          onSave: function (s) {
+            it.draftSmiles = s;
+            it.note = "Structure set — click Add to JSON.";
+            it.noteIsErr = false;
+            drawPdfModal();
+            return true;
+          }
+        });
+      });
+
+      addBtn.addEventListener("click", function () {
+        var smi = smiInp.value.trim();
+        if (!smi || Ent.structureOk(smi) === false) {
+          it.note = "Enter a valid SMILES first."; it.noteIsErr = true; drawPdfModal(); return;
+        }
+        var paperName = cand.name || "";
+        cand.name = (nameInp.value.trim() || cand.name || "").slice(0, 200);
+        // The same compound usually comes back with other values: offer this structure there too.
+        var twins = 0;
+        if (paperName && paperName !== "(unnamed candidate)") {
+          items.forEach(function (other) {
+            if (other === it || other.draftSmiles || other.cand.name !== paperName || other.cand.pdf_file !== cand.pdf_file) return;
+            other.draftSmiles = smi;
+            other.draftName = cand.name;
+            other.note = "Same name as an entry just added: structure copied from it. Check it and click Add to JSON.";
+            other.noteIsErr = false;
+            twins++;
+          });
+        }
+        addBtn.disabled = true;
+        Promise.all([
+          Ent.lookupIupac ? Ent.lookupIupac(smi).catch(function () { return ""; }) : Promise.resolve(""),
+          Ent.lookupCas ? Ent.lookupCas(smi).catch(function () { return []; }) : Promise.resolve([])
+        ]).then(function (metaRes) {
+          return pdfResult.resolveCandidate(cand, smi, (metaRes[1] && metaRes[1][0]) || null, metaRes[0] || cand.name);
+        }).then(function (row) {
+          pdfResult.readyRows.push(row);
+          pdfResult.reviewItems.splice(idx, 1);
+          drawPdfResult();
+          if (!pdfResult.reviewItems.length) closePdfModal();
+          else drawPdfModal();
+          toast("Added “" + (row.name || "entry") + "” to batch JSON." +
+            (twins ? " Structure copied to " + plural(twins, "other candidate", "other candidates") + " with the same name." : ""));
+        }, function () {
+          addBtn.disabled = false;
+          it.note = "Could not build entry row."; it.noteIsErr = true; drawPdfModal();
+        });
+      });
+      dropBtn.addEventListener("click", function () {
+        pdfResult.reviewItems.splice(idx, 1);
+        drawPdfResult();
+        if (!pdfResult.reviewItems.length) closePdfModal();
+        else drawPdfModal();
+      });
+      return li;
+    }));
+  }
+
+  if ($("pdf-pick")) {
+    $("pdf-pick").addEventListener("click", function () { $("pdf-file").click(); });
+    $("pdf-clear").addEventListener("click", function () {
+      if (pdfBusy && pdfAbort) {
+        pdfAbort.aborted = true;
+        $("pdf-clear").disabled = true;
+        $("pdf-info").textContent = "Cancelling after the current page…";
+        return;
+      }
+      resetPdfUpload();
+    });
+    $("pdf-file").addEventListener("change", function (e) { handlePdfFiles(e.target.files); });
+    var pdfDrop = $("pdf-drop");
+    ["dragenter", "dragover"].forEach(function (ev) {
+      pdfDrop.addEventListener(ev, function (e) { e.preventDefault(); pdfDrop.classList.add("dragover"); });
+    });
+    ["dragleave", "drop"].forEach(function (ev) {
+      pdfDrop.addEventListener(ev, function (e) { e.preventDefault(); pdfDrop.classList.remove("dragover"); });
+    });
+    pdfDrop.addEventListener("drop", function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) handlePdfFiles(e.dataTransfer.files);
+    });
+    $("pdf-go").addEventListener("click", function () {
+      if (!pdfFiles.length || !window.EntPdf) return;
+      pdfBusy = true;
+      pdfAbort = { aborted: false };
+      $("pdf-go").disabled = true; $("pdf-pick").disabled = true;
+      $("pdf-clear").disabled = false; $("pdf-clear").textContent = "Cancel";
+      $("pdf-err").hidden = true; $("pdf-result").hidden = true;
+      var prog = $("pdf-prog"); prog.hidden = false; prog.max = Math.max(1, pdfFiles.length); prog.value = 0;
+      EntPdf.extractFromPdfFiles(pdfFiles, {
+        refEntries: state.docs.concat(batchRows),
+        doiOverride: $("pdf-doi").value.trim() || null,
+        defaultRole: $("pdf-role").value || "acceptor",
+        defaultCls: $("pdf-cls").value.trim() || null,
+        ocr: !$("pdf-ocr") || $("pdf-ocr").checked,
+        ocrImages: !!($("pdf-ocr-img") && $("pdf-ocr-img").checked),
+        signal: pdfAbort,
+        onStatus: function (msg, fi, tot) {
+          $("pdf-info").textContent = msg;
+          prog.max = Math.max(1, tot || 1);
+          prog.value = Math.min(prog.max, fi || 0);
+        }
+      }).then(function (res) {
+        pdfBusy = false; pdfResult = res;
+        prog.value = prog.max; prog.hidden = true;
+        $("pdf-pick").disabled = false; $("pdf-clear").disabled = false; $("pdf-go").disabled = false;
+        $("pdf-clear").textContent = "Clear";
+        $("pdf-info").textContent = res.cancelled ? "Extraction cancelled." : "Extraction complete.";
+        drawPdfResult();
+        addToolLog("PDF extraction (" + res.fileReports.length + " file" + (res.fileReports.length === 1 ? "" : "s") + "): " +
+          res.readyRows.length + " ready, " + res.reviewItems.length + " unresolved, " + res.skippedDuplicates.length + " duplicates skipped.");
+        if (!res.readyRows.length && !res.reviewItems.length) {
+          var bad = res.fileReports.filter(function (r) { return r.error; }).length;
+          $("pdf-err").textContent = res.cancelled ? "Cancelled before any value was extracted."
+            : bad === res.fileReports.length ? "None of the selected PDFs could be read; see the reason next to each file."
+            : "No triplet energy values could be extracted from the selected PDF(s).";
+          $("pdf-err").hidden = false;
+        } else {
+          toast("Extracted " + plural(res.readyRows.length, "entry", "entries") + " from PDF.");
+        }
+      }, function (err) {
+        pdfBusy = false; prog.hidden = true;
+        $("pdf-pick").disabled = false; $("pdf-clear").disabled = false; $("pdf-go").disabled = false;
+        $("pdf-clear").textContent = "Clear";
+        $("pdf-info").textContent = "PDF extraction failed.";
+        $("pdf-err").textContent = (err && err.message) || "Could not read PDF.";
+        $("pdf-err").hidden = false;
+      });
+    });
+    $("pdf-dl-json").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.readyRows.length) return;
+      downloadJsonFile(pdfResult.readyRows, pdfResult.slug + ".batch.json");
+    });
+    $("pdf-load-up").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.readyRows.length) return;
+      var res = parseAndValidateUpload(pdfResult.readyRows, pdfResult.slug + ".batch.json");
+      if (res.fatal || !res.rows.length) {
+        $("pdf-err").textContent = res.fatal || "All extracted entries are already in the database.";
+        $("pdf-err").hidden = false;
+        return;
+      }
+      var rows = toImportRows(res.rows);
+      pdfBusy = true; $("pdf-load-up").disabled = true; $("pdf-pick").disabled = true;
+      $("pdf-info").textContent = "Importing " + rows.length + " extracted entries…";
+      api.adminImport(rows).then(function () {
+        pdfBusy = false; $("pdf-pick").disabled = false;
+        addToolLog("Imported " + rows.length + " PDF-extracted entries into the queue.");
+        toast("Imported " + rows.length + (rows.length === 1 ? " entry" : " entries") + " into the queue.");
+        pdfResult.readyRows = [];
+        drawPdfResult();
+        $("pdf-info").textContent = "Imported " + plural(rows.length, "entry", "entries") + " into the review queue.";
+        load({ silent: true });
+      }, function (err) {
+        pdfBusy = false; $("pdf-load-up").disabled = false; $("pdf-pick").disabled = false;
+        if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+        $("pdf-err").textContent = "Import failed: " + ((err && err.message) || "unknown error");
+        $("pdf-err").hidden = false;
+        load({ silent: true });
+      });
+    });
+    $("pdf-review-open").addEventListener("click", openPdfModal);
+    $("pdf-modal-close").addEventListener("click", closePdfModal);
+    $("pdf-modal").addEventListener("click", function (e) { if (e.target === $("pdf-modal")) closePdfModal(); });
+    $("pdf-modal-dl").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.reviewItems.length) return;
+      downloadJsonFile(pdfResult.reviewItems.map(function (it) { return it.cand; }), pdfResult.slug + ".needs_review.json");
+    });
+  }
+
   /* Backfill OpenChemLib structure codes silently once OCL loads. */
   var backfilled = false;
   function backfill() {
@@ -1602,8 +1966,9 @@
   $("ei-modal-clear").addEventListener("click", clearEnrichIssues);
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
     if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    if (pm && !pm.hidden) { closePdfModal(); return; }
     if (ei && !ei.hidden) closeEnrichModal();
   });
 
@@ -1956,7 +2321,7 @@
     $("tools-aside").classList.remove("open");
     $("toggle-tools").setAttribute("aria-expanded", "false");
     state.activeId = ""; state.triage = "";
-    resetUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || "");
+    resetUpload(); resetPdfUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || "");
   }
 
   function start() {
@@ -2028,8 +2393,8 @@
   document.addEventListener("keydown", function (e) {
     if ($("panel").hidden || !state.loaded) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
-    if ((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden)) return;
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden) || (pm && !pm.hidden)) return;
     var tag = document.activeElement && document.activeElement.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (document.activeElement && document.activeElement.isContentEditable)) return;
 
