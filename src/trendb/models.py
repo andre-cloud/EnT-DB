@@ -73,6 +73,7 @@ class Entry:
     et_kcal: float
     id: str | None = None
     created_at: str | None = None
+    commercial_name: str | None = None
     cas: str | None = None
     idcode: str | None = None
     structure_note: str | None = None
@@ -102,6 +103,10 @@ class Entry:
     score_items: list[dict[str, Any]] | None = None
     # Optional runtime annotation (e.g., similarity search score)
     similarity: float | None = field(default=None, repr=False)
+
+    @property
+    def display_name(self) -> str:
+        return self.commercial_name or self.name
 
     @property
     def et_kj(self) -> float:
@@ -161,6 +166,7 @@ class Entry:
             id=data.get("id"),
             created_at=data.get("created_at"),
             name=str(data.get("name") or ""),
+            commercial_name=data.get("commercial_name"),
             cas=data.get("cas"),
             smiles=str(data.get("smiles") or ""),
             idcode=data.get("idcode"),
@@ -199,6 +205,7 @@ class Entry:
             "id": self.id,
             "created_at": self.created_at,
             "name": self.name,
+            "commercial_name": self.commercial_name,
             "cas": self.cas,
             "smiles": self.smiles,
             "idcode": self.idcode,
@@ -248,6 +255,11 @@ class MoleculeGroup:
     smiles: str
     idcode: str | None
     entries: list[Entry]
+    commercial_name: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        return self.commercial_name or self.name
 
     @property
     def et_min(self) -> float:

@@ -49,6 +49,50 @@ BUILTIN_MOLECULES: dict[str, str] = {
     "acetone": "CC(C)=O",
     "coumarin": "O=c1ccc2ccccc2o1",
     "chalcone": "O=C(/C=C/c1ccccc1)c1ccccc1",
+    "triphenylene": "c1ccc2c(c1)c1ccccc1c1ccccc21",
+    "chrysene": "c1ccc2c(c1)ccc1c3ccccc3ccc21",
+    "benzil": "O=C(C(=O)c1ccccc1)c1ccccc1",
+    "acridine": "c1ccc2nc3ccccc3cc2c1",
+    "duroquinone": "CC1=C(C)C(=O)C(C)=C(C)C1=O",
+    "2,3-dimethyl-1,4-benzoquinone": "CC1=C(C)C(=O)C=CC1=O",
+    "2,5-dimethyl-1,4-benzoquinone": "CC1=CC(=O)C(C)=CC1=O",
+    "1,4-benzoquinone": "O=C1C=CC(=O)C=C1",
+    "1,4-naphthoquinone": "O=C1C=CC(=O)c2ccccc21",
+    "benzanthrone": "O=C1c2ccccc2-c2cccc3cccc1c23",
+    "2,2'-binaphthyl": "c1ccc2cc(-c3ccc4ccccc4c3)ccc2c1",
+    "1-chloronaphthalene": "Clc1cccc2ccccc12",
+    "1-bromonaphthalene": "Brc1cccc2ccccc12",
+    "2-acetonaphthone": "CC(=O)c1ccc2ccccc2c1",
+    "1-naphthyl phenyl ketone": "O=C(c1ccccc1)c1cccc2ccccc12",
+    "cis-1,2-diphenylpropene": "C/C(=C/c1ccccc1)c1ccccc1",
+    "trans-1,2-diphenylpropene": "C/C(=C\\c1ccccc1)c1ccccc1",
+    "9,10-dibromoanthracene": "Brc1c2ccccc2c(Br)c2ccccc12",
+    "chloranil": "O=C1C(Cl)=C(Cl)C(=O)C(Cl)=C1Cl",
+    "benz[a]anthracene": "c1ccc2cc3c(ccc4ccccc43)cc2c1",
+    "1,2-benzanthracene": "c1ccc2cc3c(ccc4ccccc43)cc2c1",
+    "dibenz[a,h]anthracene": "c1ccc2c(c1)ccc1cc3c(ccc4ccccc43)cc12",
+    "1,2,5,6-dibenzanthracene": "c1ccc2c(c1)ccc1cc3c(ccc4ccccc43)cc12",
+    "dibenz[a,c]anthracene": "c1ccc2cc3c4ccccc4c4ccccc4c3cc2c1",
+    "1,2,3,4-dibenzanthracene": "c1ccc2cc3c4ccccc4c4ccccc4c3cc2c1",
+    "benzo[a]pyrene": "c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34",
+    "3,4-benzpyrene": "c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34",
+    "7,12-dimethylbenz[a]anthracene": "Cc1c2ccccc2c(C)c2c1ccc1ccccc12",
+    "9,10-dimethyl-1,2-benzanthracene": "Cc1c2ccccc2c(C)c2c1ccc1ccccc12",
+    "1-acetylpyrene": "CC(=O)c1ccc2ccc3cccc4ccc1c2c34",
+    "3-acetylpyrene": "CC(=O)c1ccc2ccc3cccc4ccc1c2c34",
+    "trans,trans-1,4-diphenyl-1,3-butadiene": "C(/C=C/c1ccccc1)=C\\c1ccccc1",
+    "michler's ketone": "CN(C)c1ccc(C(=O)c2ccc(N(C)C)cc2)cc1",
+    "ir(ppy)3": "[Ir]123(c4ccccc4-c4ccccn->14)(c1ccccc1-c1ccccn->21)c1ccccc1-c1ccccn->31",
+    "fac-ir(ppy)3": "[Ir]123(c4ccccc4-c4ccccn->14)(c1ccccc1-c1ccccn->21)c1ccccc1-c1ccccn->31",
+    "ir(dfppy)3": "[Ir]123(c4cc(F)cc(F)c4-c4ccccn->14)(c1cc(F)cc(F)c1-c1ccccn->21)c1cc(F)cc(F)c1-c1ccccn->31",
+    "fac-ir(dfppy)3": "[Ir]123(c4cc(F)cc(F)c4-c4ccccn->14)(c1cc(F)cc(F)c1-c1ccccn->21)c1cc(F)cc(F)c1-c1ccccn->31",
+    "ru(bpy)3": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "[ru(bpy)3]2+": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "ru(bpy)3(pf6)2": "[Ru+2]123(<-n4ccccc4-c4ccccn->14)(<-n1ccccc1-c1ccccn->21)<-n1ccccc1-c1ccccn->31",
+    "[ir(df(cf3)ppy)2(dtbbpy)]+": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C(F)(F)F)cn->14)(c1cc(F)cc(F)c1-c1ccc(C(F)(F)F)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(cf3)ppy)2(dtbbpy)]pf6": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C(F)(F)F)cn->14)(c1cc(F)cc(F)c1-c1ccc(C(F)(F)F)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(me)ppy)2(dtbbpy)]+": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C)cn->14)(c1cc(F)cc(F)c1-c1ccc(C)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
+    "[ir(df(me)ppy)2(dtbbpy)]pf6": "[Ir+]123(c4cc(F)cc(F)c4-c4ccc(C)cn->14)(c1cc(F)cc(F)c1-c1ccc(C)cn->21)(<-n1ccc(C(C)(C)C)cc1-c1cc(C(C)(C)C)ccn->31)",
 }
 
 _TRAILING_LABEL_RE = re.compile(r"\s*\((?![ezrs]\)|[ezrs],)[^()]*\)\s*$", re.IGNORECASE)
@@ -82,6 +126,7 @@ class ResolvedMolecule:
     source: str = ""
     cls_hint: str | None = None
     role_hint: str | None = None
+    iupac_name: str | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -166,6 +211,8 @@ class Resolver:
         )
         self._by_name: dict[str, dict[str, Any]] = {}
         self._by_cas: dict[str, dict[str, Any]] = {}
+        self._iupac_by_can: dict[str, str] = {}
+        self._info_by_can: dict[str, dict[str, Any]] = {}
         self._seed_local_dictionaries(batches_dir=batches_dir, extra_entries=extra_entries)
 
     def close(self) -> None:
@@ -209,6 +256,17 @@ class Resolver:
             name = (r.get("name") or "").strip()
             cas = clean_cas(r.get("cas")) if r.get("cas") else None
             info = {"smiles": smi, "cas": cas if cas_valid(cas) else None, "cls": r.get("cls"), "role": r.get("role")}
+            can = self._canonicalize(smi) or smi
+            if name and can:
+                self._iupac_by_can.setdefault(can, name)
+            if can:
+                existing = self._info_by_can.get(can)
+                if existing is None:
+                    self._info_by_can[can] = dict(info)
+                else:
+                    for k in ("cas", "cls", "role"):
+                        if not existing.get(k) and info.get(k):
+                            existing[k] = info[k]
             if name:
                 nk = normalize_name_key(name)
                 if nk:
@@ -311,6 +369,64 @@ class Resolver:
         self._cache.set("pubchem_cas", can, out)
         return out
 
+    def resolve_iupac(self, smiles: str) -> str | None:
+        """Return curated local IUPAC name or look up IUPACName on PubChem."""
+        if not smiles:
+            return None
+        can = self._canonicalize(smiles) or smiles.strip()
+        if can in self._iupac_by_can:
+            return self._iupac_by_can[can]
+        if self.offline:
+            return None
+        hit, val = self._cache.get("pubchem_iupac", can)
+        if hit:
+            return val
+        self._pubchem_rl.wait()
+        iupac: str | None = None
+        try:
+            resp = self._http.post(
+                "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/property/IUPACName/JSON",
+                data={"smiles": can},
+            )
+            if resp.status_code in (400, 404):
+                self._cache.set("pubchem_iupac", can, None)
+                return None
+            if resp.is_success:
+                props = (resp.json().get("PropertyTable") or {}).get("Properties") or []
+                if props and props[0].get("CID") and props[0].get("IUPACName"):
+                    iupac = str(props[0]["IUPACName"]).strip() or None
+        except Exception:
+            return None
+        self._cache.set("pubchem_iupac", can, iupac)
+        return iupac
+
+    def _finish_resolved(
+        self,
+        smiles: str,
+        *,
+        cas: str | None,
+        source: str,
+        cls_hint: str | None = None,
+        role_hint: str | None = None,
+        lookup_cas: bool = True,
+        warnings: list[str] | None = None,
+    ) -> ResolvedMolecule:
+        known = self._info_by_can.get(smiles) or {}
+        found_cas = cas or known.get("cas")
+        if not found_cas and lookup_cas:
+            cas_list = self.lookup_cas_from_smiles(smiles)
+            if cas_list:
+                found_cas = cas_list[0]
+        return ResolvedMolecule(
+            smiles=smiles,
+            cas=found_cas,
+            source=source,
+            cls_hint=cls_hint or known.get("cls"),
+            role_hint=role_hint or known.get("role"),
+            iupac_name=self._iupac_by_can.get(smiles),
+            warnings=list(warnings or []),
+        )
+
     def doi_resolves(self, doi: str) -> bool | None:
         d = clean_doi(doi)
         if not is_doi(d):
@@ -370,12 +486,7 @@ class Resolver:
         if raw_smiles:
             can = self._canonicalize(raw_smiles)
             if can:
-                found_cas = clean_c
-                if not found_cas and lookup_cas:
-                    cas_list = self.lookup_cas_from_smiles(can)
-                    if cas_list:
-                        found_cas = cas_list[0]
-                return ResolvedMolecule(smiles=can, cas=found_cas, source="explicit_smiles", warnings=warnings)
+                return self._finish_resolved(can, cas=clean_c, source="explicit_smiles", lookup_cas=lookup_cas, warnings=warnings)
             warnings.append(f"Explicit SMILES failed validation: {raw_smiles}")
 
         # 2. Local dictionary by CAS
@@ -383,12 +494,13 @@ class Resolver:
             info = self._by_cas[clean_c]
             can = self._canonicalize(info["smiles"])
             if can:
-                return ResolvedMolecule(
-                    smiles=can,
+                return self._finish_resolved(
+                    can,
                     cas=clean_c,
                     source="local_cas",
                     cls_hint=info.get("cls"),
                     role_hint=info.get("role"),
+                    lookup_cas=False,
                     warnings=warnings,
                 )
 
@@ -398,17 +510,13 @@ class Resolver:
             info = self._by_name[nk]
             can = self._canonicalize(info["smiles"])
             if can:
-                found_cas = clean_c or info.get("cas")
-                if not found_cas and lookup_cas:
-                    cas_list = self.lookup_cas_from_smiles(can)
-                    if cas_list:
-                        found_cas = cas_list[0]
-                return ResolvedMolecule(
-                    smiles=can,
-                    cas=found_cas,
+                return self._finish_resolved(
+                    can,
+                    cas=clean_c or info.get("cas"),
                     source="local_dict",
                     cls_hint=info.get("cls"),
                     role_hint=info.get("role"),
+                    lookup_cas=lookup_cas,
                     warnings=warnings,
                 )
 
@@ -416,7 +524,7 @@ class Resolver:
         if clean_c:
             smi = self.resolve_pubchem_name(clean_c)
             if smi:
-                return ResolvedMolecule(smiles=smi, cas=clean_c, source="pubchem_cas", warnings=warnings)
+                return self._finish_resolved(smi, cas=clean_c, source="pubchem_cas", lookup_cas=False, warnings=warnings)
 
         # 5. OPSIN (IUPAC) and PubChem (common/trivial names)
         candidates = [name.strip()]
@@ -433,12 +541,7 @@ class Resolver:
                 smi = self.resolve_pubchem_name(cand)
                 src = "pubchem_name"
             if smi:
-                found_cas = clean_c
-                if not found_cas and lookup_cas:
-                    cas_list = self.lookup_cas_from_smiles(smi)
-                    if cas_list:
-                        found_cas = cas_list[0]
-                return ResolvedMolecule(smiles=smi, cas=found_cas, source=src, warnings=warnings)
+                return self._finish_resolved(smi, cas=clean_c, source=src, lookup_cas=lookup_cas, warnings=warnings)
 
         if looks_like_anonymous_label(name):
             warnings.append(f"Name '{name}' looks like a paper-local label; structure cannot be resolved without scheme.")

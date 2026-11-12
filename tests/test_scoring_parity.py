@@ -25,6 +25,7 @@ const out = cases.map(c => {
   const err = S.requiredError(f, c.ctx);
   const sc = S.scoreEntry(f, c.ctx);
   return {
+    commercial_name: f.commercial_name,
     doi: f.doi,
     cas: f.cas,
     kcal: Number.isNaN(f.kcal) ? null : f.kcal,
@@ -117,6 +118,17 @@ def test_score_js_parity() -> None:
             "ctx": {"structureOk": None, "doiResolves": None, "same": None},
         },
         {
+            "payload": {
+                "commercial_name": "Thioxanthone",
+                "smiles": "O=c1c2ccccc2sc2ccccc12",
+                "et": "65.5",
+                "origin": "exp",
+                "kind": "Phosphorescence",
+                "doi": "10.1021/jacs.0c05069",
+            },
+            "ctx": {"structureOk": True, "doiResolves": None, "same": None},
+        },
+        {
             "payload": {},
             "ctx": {"structureOk": False, "doiResolves": None, "same": None},
         },
@@ -135,12 +147,15 @@ def test_score_js_parity() -> None:
         f = scoring.normalize(case["payload"])
         py_err = scoring.required_error(f, case["ctx"])
         py_sc = scoring.score_entry(f, case["ctx"])
+        assert f["commercial_name"] == js_res["commercial_name"]
         assert f["doi"] == js_res["doi"]
         assert f["cas"] == js_res["cas"]
         if js_res["kcal"] is None:
             assert math.isnan(f["kcal"])
         else:
             assert f["kcal"] == pytest.approx(js_res["kcal"])
+        if case["payload"].get("commercial_name") and not case["payload"].get("name"):
+            assert py_err == "Enter the IUPAC name."
         assert py_err == js_res["err"]
         assert py_sc["total"] == js_res["total"]
         assert py_sc["grade"] == js_res["grade"]

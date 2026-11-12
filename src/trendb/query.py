@@ -160,6 +160,7 @@ def group_by_molecule(entries: Iterable[Entry]) -> list[MoleculeGroup]:
             MoleculeGroup(
                 cas=g["cas"] or None,
                 name=first.name,
+                commercial_name=next((x.commercial_name for x in items if x.commercial_name), None),
                 smiles=first.smiles,
                 idcode=first.idcode,
                 entries=items,
@@ -239,7 +240,7 @@ def filter_entries(
 
         haystack = " ".join(
             str(x)
-            for x in (e.name, e.cas, e.smiles, e.citation, e.cls, e.method, e.doi, e.quote, e.evidence)
+            for x in (e.name, e.commercial_name, e.cas, e.smiles, e.citation, e.cls, e.method, e.doi, e.quote, e.evidence)
             if x
         )
         if q_norm and q_norm not in haystack.lower():

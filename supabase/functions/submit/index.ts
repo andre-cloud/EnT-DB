@@ -147,7 +147,7 @@
     var eps = parseIntRange(p.uv_eps, 0, 100000000);
     var dir = parseDirectExc(p.direct_exc != null ? p.direct_exc : p.direct, p.direct_src, p.direct_nm);
     return {
-      name: str(p.name, 200), cas: cleanCas(p.cas), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
+      name: str(p.name, 200), commercial_name: str(p.commercial_name, 200), cas: cleanCas(p.cas), cls: str(p.cls, 80), smiles: str(p.smiles, 400),
       role: pick(p.role, ["acceptor", "donor", "both"], "acceptor"),
       et: et, unit: unit, unc: unc,
       kcal: isNaN(et) ? NaN : et * k,
@@ -248,6 +248,7 @@
     ctx = ctx || {};
     if (!f.smiles) return "Add the structure as a SMILES or draw it.";
     if (ctx.structureOk === false) return "The SMILES could not be read. Fix it or redraw the structure.";
+    if (!f.name) return "Enter the IUPAC name.";
     if (isNaN(f.kcal)) return "Enter the triplet energy value.";
     if (!(f.kcal > 0 && f.kcal <= ET_MAX)) return "The triplet energy must be above 0 and at most " + ET_MAX + " kcal/mol. Check the value and the unit.";
     if (!f.cite && !f.doi) return "Add a citation or a DOI so the value can be traced.";
@@ -278,7 +279,7 @@
     if (!isNaN(f.uv_lmax)) doc.uv_lmax = f.uv_lmax;
     if (!isNaN(f.uv_eps)) doc.uv_eps = f.uv_eps;
     if (f.direct_exc) doc.direct_exc = f.direct_exc;
-    [["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
+    [["commercial_name", f.commercial_name], ["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv_cond", f.uv_cond], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
     if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
     return doc;
@@ -288,7 +289,7 @@
      Fields a reader may propose a new value for, with how the value is checked. "uses_add"
      adds a paper (DOI + note) in which the molecule was used. Shared with the server. */
   var SUGGEST_FIELDS = [
-    ["name", "IUPAC name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
+    ["name", "IUPAC name", "text"], ["commercial_name", "Commercial name", "text"], ["cas", "CAS number", "cas"], ["smiles", "SMILES (structure)", "smiles"],
     ["cls", "Class", "text"], ["role", "Role", "role"], ["origin", "Origin (experimental or computed)", "origin"],
     ["et_kcal", "E_T (kcal/mol)", "et"], ["et_unc", "± Uncertainty (kcal/mol)", "unc"],
     ["et_reported", "Value as reported in the paper", "text"], ["et_type", "Value type", "text"],
@@ -423,9 +424,10 @@ async function notify(row) {
   const site = (Deno.env.get("SITE_URL") || "").replace(/\/+$/, "");
   const reviewUrl = site ? `${site}/admin.html` : "";
   const grade = EntScore.gradeOf(row.score).label;
-  const subject = `TrEnDB: new submission, ${row.name} (${row.score}/100, ${grade})`;
+  const titleName = row.commercial_name || row.name;
+  const subject = `TrEnDB: new submission, ${titleName} (${row.score}/100, ${grade})`;
   const lines = [
-    ["Molecule", row.name], ["CAS", row.cas], ["SMILES", row.smiles], ["ET", `${row.et_kcal} kcal/mol (reported: ${row.et_reported})`],
+    ["Molecule", titleName], ["IUPAC name", row.commercial_name ? row.name : ""], ["CAS", row.cas], ["SMILES", row.smiles], ["ET", `${row.et_kcal} kcal/mol (reported: ${row.et_reported})`],
     ["Value type", row.et_type], ["Method", row.method], ["Conditions", row.conditions],
     ["Source", row.citation], ["DOI", row.doi], ["Where", row.location], ["Submitted by", row.submitted_by],
   ].filter((l) => l[1]);
@@ -434,7 +436,7 @@ async function notify(row) {
 
   const key = Deno.env.get("RESEND_API_KEY"), to = (Deno.env.get("NOTIFY_EMAIL") || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (key && to.length) {
-    const html = `<h2 style="font-family:sans-serif">New submission: ${esc(row.name)}</h2>
+    const html = `<h2 style="font-family:sans-serif">New submission: ${esc(titleName)}</h2>
 <p style="font-family:sans-serif"><b>Score ${row.score}/100 (${grade})</b>${lost.length ? "<br>Points lost on: " + esc(lost.join("; ")) : ""}</p>
 <table style="font-family:sans-serif;border-collapse:collapse">${lines.map((l) => `<tr><td style="padding:2px 12px 2px 0;color:#666">${esc(l[0])}</td><td>${esc(l[1])}</td></tr>`).join("")}</table>
 ${reviewUrl ? `<p style="font-family:sans-serif"><a href="${esc(reviewUrl)}">Open the review queue</a> to approve or reject it.</p>` : ""}`;
@@ -452,7 +454,7 @@ ${reviewUrl ? `<p style="font-family:sans-serif"><a href="${esc(reviewUrl)}">Ope
     if (reviewUrl) headers.Click = reviewUrl;
     jobs.push(fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
       method: "POST", headers,
-      body: `${row.name}: ${row.et_kcal} kcal/mol, score ${row.score}/100 (${grade})`,
+      body: `${titleName}: ${row.et_kcal} kcal/mol, score ${row.score}/100 (${grade})`,
       signal: AbortSignal.timeout(8000),
     }).then((r) => { if (!r.ok) console.error("ntfy failed", r.status); }));
   }
@@ -519,6 +521,26 @@ async function handleSuggestion(payload, ipHash, tooMany) {
   return json({ id: saved.id, suggestion: true });
 }
 
+async function isCuratorAuth(authHeader: string): Promise<boolean> {
+  if (!/^Bearer\s+\S+$/i.test(authHeader)) return false;
+  try {
+    const ur = await fetch(`${SB_URL}/auth/v1/user`, {
+      headers: { apikey: SB_KEY, Authorization: authHeader },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!ur.ok) return false;
+    const u = await ur.json();
+    const email = String(u?.email || "").trim().toLowerCase();
+    if (!email || !u?.email_confirmed_at) return false;
+    const ar = await rest("admins?select=email&limit=200");
+    if (!ar.ok) return false;
+    const admins = await ar.json();
+    return Array.isArray(admins) && admins.some((a) => String(a.email || "").trim().toLowerCase() === email);
+  } catch (_e) {
+    return false;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ error: "Use POST." }, 405);
@@ -537,13 +559,17 @@ Deno.serve(async (req) => {
   // Honeypot: real visitors never see or fill this field. Pretend it worked.
   if (String(payload.website || "").trim()) return json({ id: null, score: 0, grade: "Poor" });
 
-  // Shared site login: enforced by the database, so it cannot be skipped from the browser.
-  const acc = await rest("rpc/check_access", {
-    method: "POST",
-    body: JSON.stringify({ p_user: String(payload.access_user || "").slice(0, 100), p_pass: String(payload.access_pass || "").slice(0, 200) }),
-  });
-  if (!acc.ok) return json({ error: "The server could not check your access." }, 500);
-  if ((await acc.json()) !== true) return json({ error: "Sign in to submit an entry." }, 401);
+  // Shared site login or authenticated curator: enforced on the server, so it cannot be skipped from the browser.
+  let allowed = await isCuratorAuth(req.headers.get("authorization") || "");
+  if (!allowed) {
+    const acc = await rest("rpc/check_access", {
+      method: "POST",
+      body: JSON.stringify({ p_user: String(payload.access_user || "").slice(0, 100), p_pass: String(payload.access_pass || "").slice(0, 200) }),
+    });
+    if (!acc.ok) return json({ error: "The server could not check your access." }, 500);
+    allowed = (await acc.json()) === true;
+  }
+  if (!allowed) return json({ error: "Sign in to submit an entry." }, 401);
 
   const salt = Deno.env.get("IP_SALT");
   if (!salt) return json({ error: "The server is not configured." }, 500);

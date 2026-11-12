@@ -182,6 +182,7 @@ def normalize(p: dict[str, Any] | None) -> dict[str, Any]:
 
     return {
         "name": _str(p.get("name"), 200),
+        "commercial_name": _str(p.get("commercial_name"), 200),
         "cas": clean_cas(p.get("cas")),
         "cls": _str(p.get("cls"), 80),
         "smiles": _str(p.get("smiles"), 400),
@@ -354,6 +355,8 @@ def required_error(f: dict[str, Any], ctx: dict[str, Any] | None = None) -> str 
         return "Add the structure as a SMILES or draw it."
     if ctx.get("structureOk") is False:
         return "The SMILES could not be read. Fix it or redraw the structure."
+    if not f.get("name"):
+        return "Enter the IUPAC name."
     kcal = f.get("kcal", float("nan"))
     if math.isnan(kcal):
         return "Enter the triplet energy value."
