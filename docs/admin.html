@@ -197,7 +197,16 @@
             </div>
           </div>
 
-          <p class="hint" id="enrich-empty" hidden>All entries in this scope have checked IUPAC names and CAS numbers.</p>
+          <div class="tool-sub" id="comm" hidden>
+            <p class="hint" id="comm-text" aria-live="polite"></p>
+            <progress id="comm-prog" class="tool-prog" value="0" max="1" hidden></progress>
+            <div class="actions">
+              <button class="btn small" id="comm-go" type="button">Fill commercial names from CAS</button>
+              <button class="btn small" id="comm-stop" type="button" hidden>Stop</button>
+            </div>
+          </div>
+
+          <p class="hint" id="enrich-empty" hidden>All entries in this scope have checked IUPAC names, CAS numbers and commercial names.</p>
 
           <div class="tool-sub ei-summary-box" id="enrich-issues-bar" hidden>
             <div class="ei-summary-head">
@@ -259,6 +268,7 @@
       <select id="ei-modal-tool" class="compact-select" aria-label="Filter by tool" hidden>
         <option value="">All tools</option>
         <option value="CAS">CAS</option>
+        <option value="Commercial name">Commercial name</option>
         <option value="IUPAC">IUPAC</option>
         <option value="Batch IUPAC">Batch IUPAC</option>
       </select>

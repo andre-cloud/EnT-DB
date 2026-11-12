@@ -31,7 +31,7 @@
     var comm = d ? trimStr(d.commercial_name) : "", iupac = d ? trimStr(d.name) : "";
     var box = el("div", "card-title");
     box.appendChild(el("h2", null, (prefix || "") + (comm || iupac || "(unnamed)")));
-    if (comm && iupac) {
+    if (comm && iupac && comm.toLowerCase() !== iupac.toLowerCase()) {
       var sub = el("p", "iupac-sub", iupac);
       sub.title = "IUPAC name";
       box.appendChild(sub);
@@ -153,6 +153,73 @@
   /* IUPAC name of a structure from PubChem; "" when PubChem does not know it. Rejects on network errors. */
   Ent.lookupIupac = function (smiles) {
     return Ent.lookupIupacDetailed(smiles).then(function (r) { return r.value; });
+  };
+
+  function isUsefulCommercialName(val) {
+    var s = String(val || "").trim();
+    if (!s) return false;
+    if (EntScore.casValid(EntScore.cleanCas(s))) return false;
+    if (/^(?:CID\s*\d+|InChI=|[A-Z]{14}-[A-Z]{10}-[A-Z]$)/i.test(s)) return false;
+    if (/^(?:DTXSID\d|CHEMBL\d|UNII-|EC\s*\d|EINECS|NSC[-\s]?\d|AKOS|MFCD\d|ZINC\d|SCHEMBL\d|BDBM\d)/i.test(s)) return false;
+    return true;
+  }
+
+  function parseSynonymsList(res) {
+    var seen = {}, out = [];
+    ((res && res.json && res.json.InformationList && res.json.InformationList.Information) || []).forEach(function (inf) {
+      (inf.Synonym || []).forEach(function (syn) {
+        var s = String(syn || "").trim();
+        if (!isUsefulCommercialName(s)) return;
+        var k = s.toLowerCase();
+        if (!seen[k]) { seen[k] = 1; out.push(s.slice(0, 200)); }
+      });
+    });
+    return out;
+  }
+
+  /* Detailed commercial/common name lookup by CAS number via PubChem (Title, falling back to Synonyms). */
+  Ent.lookupCommercialNameDetailed = function (cas) {
+    var cleaned = EntScore.cleanCas(cas);
+    if (!cleaned) return Promise.resolve({ value: "", synonyms: [], code: "no_cas", reason: "Missing CAS number" });
+    if (!EntScore.casValid(cleaned)) return Promise.resolve({ value: "", synonyms: [], code: "bad_input", reason: "Invalid CAS number" });
+    return pubchemPost("name", "property/Title", cleaned).then(function (res) {
+      if (res.status === 400) return { value: "", synonyms: [], code: "bad_input", reason: "PubChem could not read this CAS (HTTP 400)" };
+      if (res.status === 404) return { value: "", synonyms: [], code: "not_found", reason: "Not found on PubChem" };
+      var p = res.json && res.json.PropertyTable && res.json.PropertyTable.Properties && res.json.PropertyTable.Properties[0];
+      var title = (p && p.CID && p.Title) ? String(p.Title).trim() : "";
+      if (isUsefulCommercialName(title)) {
+        return { value: title.slice(0, 200), synonyms: [], code: "ok", reason: "" };
+      }
+      return pubchemPost("name", "synonyms", cleaned).then(function (synRes) {
+        if (synRes.status === 400) return { value: "", synonyms: [], code: "bad_input", reason: "PubChem could not read this CAS (HTTP 400)" };
+        if (synRes.status === 404) return { value: "", synonyms: [], code: "not_found", reason: "Not found on PubChem" };
+        var syns = parseSynonymsList(synRes);
+        if (!syns.length) return { value: "", synonyms: [], code: "no_name", reason: "On PubChem, but no commercial name listed" };
+        return { value: syns[0], synonyms: syns.slice(0, 8), code: "ok", reason: "" };
+      });
+    });
+  };
+
+  Ent.lookupCommercialName = function (cas) {
+    return Ent.lookupCommercialNameDetailed(cas).then(function (r) { return r.value; });
+  };
+
+  /* Look up PubChem synonyms for a CAS number or compound name: resolves to { values, code, reason }. */
+  Ent.lookupCommercialSynonyms = function (query, by) {
+    var q = String(query || "").trim();
+    if (!q) return Promise.resolve({ values: [], code: "no_query", reason: "Enter a CAS number or name to look up" });
+    var mode = by === "smiles" ? "smiles" : "name";
+    if (mode === "name" && /^\d[\d\s–—-]*\d$/.test(q)) {
+      var cleaned = EntScore.cleanCas(q);
+      if (EntScore.casValid(cleaned)) q = cleaned;
+    }
+    return pubchemPost(mode, "synonyms", q).then(function (res) {
+      if (res.status === 400) return { values: [], code: "bad_input", reason: mode === "smiles" ? "PubChem could not parse SMILES (HTTP 400)" : "PubChem could not read this query (HTTP 400)" };
+      if (res.status === 404) return { values: [], code: "not_found", reason: "Not found on PubChem" };
+      var syns = parseSynonymsList(res);
+      if (!syns.length) return { values: [], code: "no_name", reason: "On PubChem, but no commercial name listed" };
+      return { values: syns.slice(0, 8), code: "ok", reason: "" };
+    });
   };
 
   function fpIndex(searcher, smiles) {
@@ -365,9 +432,15 @@
     });
     return { dl: dl, cp: cp };
   }
-  function xyzActions(getSmiles, getTitle) {
-    var row = el("div", "sinfo-actions xyz-actions"), btns = xyzBtns(getSmiles, getTitle, "tiny");
-    row.appendChild(btns.dl); row.appendChild(btns.cp);
+  function smilesAndXyzActions(smiles, title) {
+    if (!smiles) return el("span", "hint", "No SMILES");
+    var row = el("div", "sinfo-actions"), smiBtn = el("button", "btn tiny", "Copy SMILES");
+    smiBtn.type = "button";
+    smiBtn.title = "Copy SMILES: " + smiles;
+    smiBtn.setAttribute("aria-label", "Copy SMILES");
+    smiBtn.addEventListener("click", function (ev) { ev.stopPropagation(); Ent.copyText(smiles, smiBtn, "Copied"); });
+    var btns = xyzBtns(smiles, title, "tiny");
+    row.appendChild(smiBtn); row.appendChild(btns.dl); row.appendChild(btns.cp);
     return row;
   }
   var syncModalOpen = Ent.syncModalOpen = function () {
@@ -428,7 +501,7 @@
     if (typeof v === "string") setText(dd, v); else dd.appendChild(v);
     dl.appendChild(dd);
   }
-  /* one entry, or several values of the same molecule (one mark each; computed ones hollow) */
+  /* one entry, or several values of the same molecule (green filled: experimental; purple hollow: computed) */
   function scale(list) {
     list = Array.isArray(list) ? list : [list];
     var s = el("div", "scale"); s.appendChild(el("div", "track"));
@@ -438,12 +511,12 @@
     });
     list.forEach(function (d) {
       if (d.et_unc) {
-        var b = el("div", "band"), a = pct(d.et_kcal - d.et_unc), z = pct(Number(d.et_kcal) + Number(d.et_unc));
+        var b = el("div", "band " + (d.origin === "calc" ? "calc" : "exp")), a = pct(d.et_kcal - d.et_unc), z = pct(Number(d.et_kcal) + Number(d.et_unc));
         b.style.left = a + "%"; b.style.width = (z - a) + "%"; s.appendChild(b);
       }
     });
     list.forEach(function (d) {
-      var m = el("div", "mark" + (list.length > 1 && d.origin === "calc" ? " calc" : "")); m.style.left = pct(d.et_kcal) + "%"; s.appendChild(m);
+      var m = el("div", "mark " + (d.origin === "calc" ? "calc" : "exp")); m.style.left = pct(d.et_kcal) + "%"; s.appendChild(m);
     });
     var e0 = el("div", "end", String(S_MIN)); e0.style.left = "0"; s.appendChild(e0);
     var e1 = el("div", "end", String(S_MAX)); e1.style.right = "0"; s.appendChild(e1);
@@ -567,7 +640,7 @@
     if (dup && (dup.db.length || dup.queue.length || dup.stereo.length)) c.appendChild(dupNote(dup));
 
     var etVal = Number(d.et_kcal);
-    var et = el("div", "et");
+    var et = el("div", "et " + (d.origin === "calc" ? "calc" : "exp"));
     et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
     et.appendChild(el("span", "u", "kcal/mol"));
     et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
@@ -597,15 +670,7 @@
     } else if (adm && d.smiles) {
       si.appendChild(inlineCasLookup(d, adm, busy));
     }
-    if (d.smiles) {
-      var smiRow = el("div", "copy-row");
-      smiRow.appendChild(el("code", "smiles", d.smiles));
-      smiRow.appendChild(copyBtn(d.smiles, "Copy SMILES"));
-      si.appendChild(smiRow);
-      si.appendChild(xyzActions(d.smiles, displayName(d)));
-    } else {
-      si.appendChild(el("code", "smiles", "—"));
-    }
+    si.appendChild(smilesAndXyzActions(d.smiles, displayName(d)));
     if (info && info.formula) si.appendChild(el("span", "formula", info.formula));
     if (d.structure_note) si.appendChild(el("span", "hint", d.structure_note));
     if (adm) {
@@ -740,7 +805,7 @@
     var v = el("section", "val");
     var top = el("div", "valtop");
     var etVal = Number(d.et_kcal);
-    var et = el("div", "et");
+    var et = el("div", "et " + (d.origin === "calc" ? "calc" : "exp"));
     et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
     et.appendChild(el("span", "u", "kcal/mol"));
     et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
@@ -759,9 +824,6 @@
     row(dl, "Method", d.method);
     row(dl, "Conditions", d.conditions);
     row(dl, "Source", d.citation);
-    row(dl, "Where", d.location);
-    if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
-    row(dl, "What it says", d.evidence);
     if (d.doi) {
       var doiRow = el("div", "copy-row"), dw = el("span", "doi-wrap");
       dw.appendChild(doiLink(d.doi, d.doi)); doiRow.appendChild(dw);
@@ -769,6 +831,16 @@
       row(dl, "DOI", doiRow);
     }
     v.appendChild(dl);
+    if (d.location || d.quote || d.evidence) {
+      var det = el("details", "paper-details");
+      det.appendChild(el("summary", null, "Paper details"));
+      var pdl = el("dl");
+      row(pdl, "Where", d.location);
+      if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(pdl, "Verbatim", qd); }
+      row(pdl, "What it says", d.evidence);
+      det.appendChild(pdl);
+      v.appendChild(det);
+    }
     if (o.onSuggest) {
       var sa = el("div", "actions"), sb = el("button", "btn small", many ? "Suggest a correction to this value" : "Suggest a correction"); sb.type = "button";
       sb.addEventListener("click", function () { o.onSuggest(d); });
@@ -840,10 +912,13 @@
 
     if (many) {
       var vals = items.map(function (d) { return Number(d.et_kcal); }), lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-      var et = el("div", "et");
+      var hasExp = items.some(function (d) { return d.origin !== "calc"; });
+      var hasCalc = items.some(function (d) { return d.origin === "calc"; });
+      var rangeCls = (hasExp && !hasCalc) ? " exp" : (!hasExp && hasCalc) ? " calc" : "";
+      var et = el("div", "et" + rangeCls);
       et.appendChild(el("span", "v", lo === hi ? fmt(lo, 1) : fmt(lo, 1) + "–" + fmt(hi, 1)));
       et.appendChild(el("span", "u", "kcal/mol"));
-      et.appendChild(elT("span", "alt", items.length + " E_T values, listed below (filled marks: experimental; hollow: computed)"));
+      et.appendChild(elT("span", "alt", items.length + " E_T values, listed below (filled green: experimental; hollow purple: computed)"));
       c.appendChild(et); c.appendChild(scale(items));
     }
 
@@ -867,15 +942,7 @@
       casRow.appendChild(copyBtn(cas, "Copy CAS number"));
       si.appendChild(casRow);
     }
-    if (p.smiles) {
-      var smiRow = el("div", "copy-row");
-      smiRow.appendChild(el("code", "smiles", p.smiles));
-      smiRow.appendChild(copyBtn(p.smiles, "Copy SMILES"));
-      si.appendChild(smiRow);
-      si.appendChild(xyzActions(p.smiles, comm || iupac));
-    } else {
-      si.appendChild(el("code", "smiles", "—"));
-    }
+    si.appendChild(smilesAndXyzActions(p.smiles, comm || iupac));
     if (info && info.formula) si.appendChild(el("span", "formula", info.formula));
     if (p.structure_note) si.appendChild(el("span", "hint", p.structure_note));
     st.appendChild(si); c.appendChild(st);
@@ -976,7 +1043,7 @@
   };
   function describe(e) {
     var comm = trimStr(e.commercial_name), iupac = trimStr(e.name);
-    var label = comm && iupac ? (comm + " (" + iupac + ")") : (comm || iupac || "(unnamed)");
+    var label = comm && iupac && comm.toLowerCase() !== iupac.toLowerCase() ? (comm + " (" + iupac + ")") : (comm || iupac || "(unnamed)");
     return label + " · " + fmt(Number(e.et_kcal), 1) + " kcal/mol · " + (e.origin === "calc" ? "computed" : "experimental")
       + (e.doi ? " · " + e.doi : "");
   }

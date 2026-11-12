@@ -60,7 +60,7 @@
   $("tool-log-clear").addEventListener("click", function () { toolLogs = []; drawToolLog(); });
 
   function updateToolsBadge() {
-    var n = (pendingImport.length ? 1 : 0) + (smiFix().length ? 1 : 0) + ((nameFix().length || namePc().length) ? 1 : 0) + (casTodo().length ? 1 : 0);
+    var n = (pendingImport.length ? 1 : 0) + (smiFix().length ? 1 : 0) + ((nameFix().length || namePc().length) ? 1 : 0) + (casTodo().length ? 1 : 0) + (commTodo().length ? 1 : 0);
     var b = $("n-tools"); b.textContent = n; b.hidden = !n;
   }
 
@@ -79,9 +79,10 @@
       if (rows && rows[0]) {
         applyUpdatedRows(rows);
         if ("smiles" in patch) { delete casMiss[id]; delete nameTried[id]; }
+        if ("cas" in patch) delete commMiss[id];
       }
       else state.busy[id] = "err";               /* no row returned: not allowed or gone */
-      render(); drawCas(); drawSmiSync(); drawNames(); drawEnrichIssues(); return !!(rows && rows[0]);
+      render(); drawCas(); drawComm(); drawSmiSync(); drawNames(); drawEnrichIssues(); return !!(rows && rows[0]);
     }, function (err) {
       if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
       state.busy[id] = "err"; render(); return false;
@@ -788,7 +789,7 @@
   function scopedDocs() {
     return $("enrich-scope").value === "pending" ? pendingDocs() : state.docs;
   }
-  $("enrich-scope").addEventListener("change", function () { drawSmiSync(); drawNames(); drawCas(); });
+  $("enrich-scope").addEventListener("change", function () { drawSmiSync(); drawNames(); drawCas(); drawComm(); });
 
   var STATUS_LABEL = { pending: "Queue", approved: "Approved", rejected: "Rejected" };
   var enrichIssues = [], eiModalFilter = "all", eiModalTool = "", eiModalQuery = "", eiReturn = null;
@@ -805,6 +806,16 @@
     });
     return order;
   }
+  function groupDocsByCas(docs) {
+    var map = {}, order = [];
+    docs.forEach(function (d) {
+      var cas = EntScore.cleanCas(d.cas || "");
+      var key = cas ? ("cas:" + cas) : ("id:" + d.id);
+      if (!map[key]) { map[key] = { key: key, cas: cas, smiles: d.smiles || "", docs: [] }; order.push(map[key]); }
+      map[key].docs.push(d);
+    });
+    return order;
+  }
   function issueGroup(docs, tool, kind, reason, molKey) {
     var d0 = docs[0] || {};
     var origNames = {};
@@ -815,12 +826,15 @@
       origNames: origNames,
       name: d0.name || "(unnamed)",
       commercialName: d0.commercial_name ? String(d0.commercial_name).trim() : "",
+      cas: d0.cas ? String(d0.cas).trim() : "",
       smiles: d0.smiles || "",
       tool: tool,
       kind: kind,
       reason: reason,
       draftFix: null,
-      draftQuery: (d0.commercial_name && String(d0.commercial_name).trim()) || d0.name || "",
+      draftQuery: tool === "Commercial name"
+        ? ((d0.cas && String(d0.cas).trim()) || d0.name || "")
+        : ((d0.commercial_name && String(d0.commercial_name).trim()) || d0.name || ""),
       candidates: [],
       note: "",
       busy: false
@@ -834,6 +848,7 @@
         var live = byId[id];
         if (!live) return;
         if (it.tool === "CAS" && live.cas) return;
+        if (it.tool === "Commercial name" && live.commercial_name && String(live.commercial_name).trim()) return;
         if (it.tool === "Batch IUPAC" && (!nameOf(live) || live.name === nameOf(live))) return;
         if (it.tool === "IUPAC" && live.name !== it.origNames[id]) return;
         liveDocs.push(live);
@@ -842,8 +857,9 @@
       it.docIds = liveDocs.map(function (d) { return d.id; });
       it.name = liveDocs[0].name || "(unnamed)";
       it.commercialName = liveDocs[0].commercial_name ? String(liveDocs[0].commercial_name).trim() : "";
+      it.cas = liveDocs[0].cas ? String(liveDocs[0].cas).trim() : "";
       it.smiles = liveDocs[0].smiles || "";
-      if (!it.draftQuery) it.draftQuery = it.commercialName || it.name;
+      if (!it.draftQuery) it.draftQuery = it.tool === "Commercial name" ? (it.cas || it.name) : (it.commercialName || it.name);
       return true;
     });
   }
@@ -883,7 +899,10 @@
       if ("smiles" in patch) {
         Object.keys(byUp).forEach(function (id) { delete casMiss[id]; delete nameTried[id]; });
       }
-      render(); drawCas(); drawSmiSync(); drawNames(); drawEnrichIssues();
+      if ("cas" in patch) {
+        Object.keys(byUp).forEach(function (id) { delete commMiss[id]; });
+      }
+      render(); drawCas(); drawComm(); drawSmiSync(); drawNames(); drawEnrichIssues();
       return rows;
     }, function (err) {
       if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
@@ -947,7 +966,7 @@
     var dispTitle = it.commercialName || it.name;
     var nm = el("strong", "ei-name", dispTitle); nm.title = dispTitle;
     titleBox.appendChild(nm);
-    if (it.commercialName && it.name) {
+    if (it.commercialName && it.name && it.commercialName.toLowerCase() !== it.name.toLowerCase()) {
       var subIupac = el("p", "iupac-sub", it.name); subIupac.title = "IUPAC name";
       titleBox.appendChild(subIupac);
     }
@@ -982,15 +1001,15 @@
 
     /* Right column: inline fix + PubChem lookup helpers + structure/card links */
     var fixCol = el("div", "ei-col-fix");
-    var isCas = it.tool === "CAS";
+    var isCas = it.tool === "CAS", isComm = it.tool === "Commercial name";
     var suggestedBatch = it.tool === "Batch IUPAC" ? (nameOf(d0) || "") : "";
     var fixRow = el("div", "ei-fix-row");
     var fixInp = el("input");
     fixInp.type = "text";
     fixInp.className = isCas ? "mono grow" : "grow";
-    fixInp.placeholder = isCas ? "Enter CAS (e.g. 100-42-5)" : "Enter IUPAC name";
-    fixInp.setAttribute("aria-label", isCas ? "CAS number for " + it.name : "IUPAC name for " + it.name);
-    fixInp.value = it.draftFix != null ? it.draftFix : (suggestedBatch || (isCas ? "" : it.name));
+    fixInp.placeholder = isCas ? "Enter CAS (e.g. 100-42-5)" : isComm ? "Enter commercial name" : "Enter IUPAC name";
+    fixInp.setAttribute("aria-label", (isCas ? "CAS number" : isComm ? "Commercial name" : "IUPAC name") + " for " + it.name);
+    fixInp.value = it.draftFix != null ? it.draftFix : (suggestedBatch || ((isCas || isComm) ? "" : it.name));
     fixInp.disabled = it.busy;
     fixInp.addEventListener("input", function () { it.draftFix = fixInp.value; });
 
@@ -1003,26 +1022,29 @@
     var lookupRow = el("div", "ei-lookup-row");
     var qInp = el("input");
     qInp.type = "text"; qInp.className = "grow";
-    qInp.placeholder = "Compound name for PubChem…";
-    qInp.setAttribute("aria-label", "Name to search on PubChem for " + it.name);
+    qInp.placeholder = isComm ? "CAS or compound name for PubChem…" : "Compound name for PubChem…";
+    qInp.setAttribute("aria-label", (isComm ? "CAS or name to search on PubChem for " : "Name to search on PubChem for ") + it.name);
     qInp.value = it.draftQuery; qInp.disabled = it.busy;
     qInp.addEventListener("input", function () { it.draftQuery = qInp.value; });
 
-    var byNameBtn = el("button", "btn small", "By name"); byNameBtn.type = "button"; byNameBtn.disabled = it.busy;
+    var byNameBtn = el("button", "btn small", isComm ? "Synonyms" : "By name"); byNameBtn.type = "button"; byNameBtn.disabled = it.busy;
     lookupRow.appendChild(qInp); lookupRow.appendChild(byNameBtn);
     var retryBtn = null;
-    if (it.smiles) {
+    if (isComm && it.cas) {
+      retryBtn = el("button", "btn small", "Retry CAS"); retryBtn.type = "button"; retryBtn.disabled = it.busy;
+      lookupRow.appendChild(retryBtn);
+    } else if (it.smiles) {
       retryBtn = el("button", "btn small", "Retry SMILES"); retryBtn.type = "button"; retryBtn.disabled = it.busy;
       lookupRow.appendChild(retryBtn);
     }
     fixCol.appendChild(lookupRow);
 
-    if (isCas && it.candidates && it.candidates.length > 1) {
+    if ((isCas || isComm) && it.candidates && it.candidates.length > 1) {
       var candRow = el("div", "ei-candidates");
       candRow.appendChild(el("span", "hint", "Matches:"));
-      it.candidates.forEach(function (casVal) {
-        var cb = el("button", "btn tiny", casVal); cb.type = "button"; cb.disabled = it.busy;
-        cb.addEventListener("click", function () { it.draftFix = casVal; fixInp.value = casVal; fixInp.focus(); });
+      it.candidates.forEach(function (candVal) {
+        var cb = el("button", "btn tiny", candVal); cb.type = "button"; cb.disabled = it.busy;
+        cb.addEventListener("click", function () { it.draftFix = candVal; fixInp.value = candVal; fixInp.focus(); });
         candRow.appendChild(cb);
       });
       fixCol.appendChild(candRow);
@@ -1079,19 +1101,22 @@
     function runLookup(promise, sourceLabel) {
       it.busy = true; it.note = "Asking PubChem…"; it.noteIsErr = false;
       rerenderThisCard();
+      var isRetry = sourceLabel === "SMILES" || sourceLabel === "CAS";
       promise.then(function (res) {
         it.busy = false;
-        if (isCas) {
-          if (res.values && res.values.length) {
-            it.draftFix = res.values[0];
-            it.candidates = res.values.slice(0, 5);
-            it.note = "Found via " + sourceLabel + " — verify CAS before saving.";
+        if (isCas || isComm) {
+          var vals = (res.values && res.values.length) ? res.values
+            : (res.value ? [res.value].concat(res.synonyms || []) : []);
+          if (vals.length) {
+            it.draftFix = vals[0];
+            it.candidates = vals.slice(0, 5);
+            it.note = "Found via " + sourceLabel + " — verify before saving.";
             it.noteIsErr = false;
           } else {
             it.candidates = [];
             it.note = res.reason || "Not found on PubChem.";
             it.noteIsErr = res.code === "bad_input";
-            if (sourceLabel === "SMILES") { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
+            if (isRetry) { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
           }
         } else {
           if (res.value) {
@@ -1101,10 +1126,10 @@
           } else {
             it.note = res.reason || "Not found on PubChem.";
             it.noteIsErr = res.code === "bad_input";
-            if (sourceLabel === "SMILES") { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
+            if (isRetry) { it.reason = it.note; it.kind = res.code === "bad_input" ? "fail" : "miss"; }
           }
         }
-        if (sourceLabel === "SMILES") drawEnrichIssues();
+        if (isRetry) drawEnrichIssues();
         else rerenderThisCard();
       }, function (err) {
         it.busy = false;
@@ -1116,12 +1141,13 @@
     byNameBtn.addEventListener("click", function () {
       var q = qInp.value.trim();
       it.draftQuery = q;
-      if (!q) { it.note = "Enter a compound name to search."; it.noteIsErr = true; rerenderThisCard(); return; }
-      runLookup(isCas ? Ent.lookupCasByName(q) : Ent.lookupIupacByName(q), "name");
+      if (!q) { it.note = isComm ? "Enter a CAS number or name to search." : "Enter a compound name to search."; it.noteIsErr = true; rerenderThisCard(); return; }
+      runLookup(isCas ? Ent.lookupCasByName(q) : isComm ? Ent.lookupCommercialSynonyms(q) : Ent.lookupIupacByName(q), isComm ? "PubChem" : "name");
     });
     if (retryBtn) {
       retryBtn.addEventListener("click", function () {
-        runLookup(isCas ? Ent.lookupCasDetailed(it.smiles) : Ent.lookupIupacDetailed(it.smiles), "SMILES");
+        if (isComm && it.cas) runLookup(Ent.lookupCommercialNameDetailed(it.cas), "CAS");
+        else runLookup(isCas ? Ent.lookupCasDetailed(it.smiles) : isComm ? Ent.lookupCommercialSynonyms(it.smiles, "smiles") : Ent.lookupIupacDetailed(it.smiles), "SMILES");
       });
     }
 
@@ -1132,6 +1158,9 @@
         if (!cleaned) { it.note = "Enter a CAS number first."; it.noteIsErr = true; rerenderThisCard(); return; }
         if (!EntScore.casValid(cleaned)) { it.note = "“" + cleaned + "” is not a valid CAS number."; it.noteIsErr = true; rerenderThisCard(); return; }
         patch = { cas: cleaned };
+      } else if (isComm) {
+        if (!raw) { it.note = "Enter a commercial name first."; it.noteIsErr = true; rerenderThisCard(); return; }
+        patch = { commercial_name: raw.slice(0, 200) };
       } else {
         if (!raw) { it.note = "The IUPAC name cannot be empty."; it.noteIsErr = true; rerenderThisCard(); return; }
         patch = { name: raw };
@@ -1274,7 +1303,7 @@
   function nameFix() { return scopedDocs().filter(function (d) { var n = nameOf(d); return n && d.name !== n; }); }
   function namePc() { return scopedDocs().filter(function (d) { return d.smiles && !nameOf(d) && !nameTried[d.id]; }); }
   function syncEnrichEmpty() {
-    $("enrich-empty").hidden = !$("smi-sync").hidden || !$("iupac").hidden || !$("cas").hidden || enrichIssues.length > 0;
+    $("enrich-empty").hidden = !$("smi-sync").hidden || !$("iupac").hidden || !$("cas").hidden || !$("comm").hidden || enrichIssues.length > 0;
     updateToolsBadge();
   }
   function drawNames(msg) {
@@ -1339,7 +1368,7 @@
   });
 
   function runPubchemEnrich(cfg) {
-    var groups = groupDocsByMol(cfg.todo);
+    var groups = (cfg.groupBy || groupDocsByMol)(cfg.todo);
     var run = { stop: false, out: false, okEntries: 0, sameEntries: 0, missMol: 0, failMol: 0, inRow: 0, issues: [], attemptedIds: {} };
     cfg.setRun(run);
     cfg.onStart(groups);
@@ -1355,7 +1384,7 @@
       cfg.onStep(i, groups.length, run);
       var g = groups[i], wait = 250;
       g.docs.forEach(function (d) { run.attemptedIds[d.id] = 1; });
-      cfg.lookup(g.smiles).then(function (res) {
+      cfg.lookup(cfg.groupBy ? g : g.smiles).then(function (res) {
         return cfg.handleResult(g, res, run);
       }).catch(function (err) {
         if (err && err.status === 401) { run.stop = run.out = true; signedOut("Your session ended. Sign in again."); return; }
@@ -1363,6 +1392,21 @@
         run.issues.push(issueGroup(g.docs, cfg.tool, "fail", errText(err, "PubChem or database error"), g.key));
       }).then(function () { setTimeout(function () { step(i + 1); }, wait); });
     })(0);
+  }
+
+  function saveEnrichDocs(docs, patch, run, tool, failMsg, molKey, onSaved) {
+    return api.adminPatchManyRows(docs.map(function (d) { return d.id; }), patch).then(function (rows) {
+      var byUp = applyUpdatedRows(rows);
+      var missed = [];
+      docs.forEach(function (d) {
+        if (byUp[d.id]) { run.okEntries++; if (onSaved) onSaved(d); }
+        else missed.push(d);
+      });
+      if (missed.length) {
+        run.failMol++; run.inRow++;
+        run.issues.push(issueGroup(missed, tool, "fail", failMsg, molKey));
+      } else run.inRow = 0;
+    });
   }
 
   $("iupac-pc").addEventListener("click", function () {
@@ -1395,17 +1439,8 @@
         same.forEach(function (d) { nameTried[d.id] = 1; });
         run.sameEntries += same.length;
         if (!need.length) { run.inRow = 0; return; }
-        return api.adminPatchManyRows(need.map(function (d) { return d.id; }), { name: res.value }).then(function (rows) {
-          var byUp = applyUpdatedRows(rows);
-          var missed = [];
-          need.forEach(function (d) {
-            if (byUp[d.id]) { nameTried[d.id] = 1; run.okEntries++; }
-            else missed.push(d);
-          });
-          if (missed.length) {
-            run.failMol++; run.inRow++;
-            run.issues.push(issueGroup(missed, "IUPAC", "fail", "Database did not save the updated name", g.key));
-          } else run.inRow = 0;
+        return saveEnrichDocs(need, { name: res.value }, run, "IUPAC", "Database did not save the updated name", g.key, function (d) {
+          nameTried[d.id] = 1;
         });
       },
       onFinish: function (why, run) {
@@ -1455,17 +1490,8 @@
           run.issues.push(issueGroup(g.docs, "CAS", "miss", res.reason, g.key));
           return;
         }
-        return api.adminPatchManyRows(g.docs.map(function (d) { return d.id; }), { cas: res.values[0] }).then(function (rows) {
-          var byUp = applyUpdatedRows(rows);
-          var missed = [];
-          g.docs.forEach(function (d) {
-            if (byUp[d.id]) run.okEntries++;
-            else missed.push(d);
-          });
-          if (missed.length) {
-            run.failMol++; run.inRow++;
-            run.issues.push(issueGroup(missed, "CAS", "fail", "Database did not save the CAS number", g.key));
-          } else run.inRow = 0;
+        return saveEnrichDocs(g.docs, { cas: res.values[0] }, run, "CAS", "Database did not save the CAS number", g.key, function (d) {
+          delete commMiss[d.id];
         });
       },
       onFinish: function (why, run) {
@@ -1473,6 +1499,7 @@
         dupCache = {};
         mergeToolIssues("CAS", run.attemptedIds, run.issues);
         drawCas();
+        drawComm();
         var left = casTodo().length;
         var summary = why + " Filled " + run.okEntries + " entries, not on PubChem " + run.missMol + (run.failMol ? ", failed " + run.failMol : "") + " molecules.";
         addToolLog("PubChem CAS: " + summary);
@@ -1485,6 +1512,62 @@
   });
   $("cas-stop").addEventListener("click", function () { if (casRun) { casRun.stop = true; $("cas-stop").disabled = true; } });
 
+  var commRun = null, commMiss = {};
+  function commTodo() {
+    return scopedDocs().filter(function (d) { return !String(d.commercial_name || "").trim() && d.cas && !commMiss[d.id]; });
+  }
+  function drawComm() {
+    if (commRun) return;
+    var n = commTodo().length;
+    $("comm").hidden = !n; $("comm-go").hidden = false; $("comm-stop").hidden = true;
+    $("comm-prog").hidden = true;
+    $("comm-text").textContent = n + (n === 1 ? " entry has" : " entries have") + " a CAS number but no commercial name. PubChem can look up the common name from CAS.";
+    syncEnrichEmpty();
+  }
+  $("comm-go").addEventListener("click", function () {
+    runPubchemEnrich({
+      tool: "Commercial name",
+      todo: commTodo(),
+      groupBy: groupDocsByCas,
+      setRun: function (r) { commRun = r; },
+      onStart: function (groups) {
+        $("comm-go").hidden = true; $("comm-stop").hidden = false; $("comm-stop").disabled = false;
+        var prog = $("comm-prog"); prog.max = Math.max(1, groups.length); prog.value = 0; prog.hidden = false;
+      },
+      onStep: function (i, total, run) {
+        $("comm-prog").value = i;
+        $("comm-text").textContent = "Looking up " + (i + 1) + " / " + total + " CAS numbers · filled " + run.okEntries + " · not on PubChem " + run.missMol + (run.failMol ? " · failed " + run.failMol : "");
+      },
+      lookup: function (g) { return Ent.lookupCommercialNameDetailed(g.cas); },
+      handleResult: function (g, res, run) {
+        if (res.code === "bad_input" || res.code === "no_cas") {
+          run.inRow = 0; g.docs.forEach(function (d) { commMiss[d.id] = 1; }); run.failMol++;
+          run.issues.push(issueGroup(g.docs, "Commercial name", "fail", res.reason, g.key));
+          return;
+        }
+        if (!res.value) {
+          run.inRow = 0; g.docs.forEach(function (d) { commMiss[d.id] = 1; }); run.missMol++;
+          run.issues.push(issueGroup(g.docs, "Commercial name", "miss", res.reason, g.key));
+          return;
+        }
+        return saveEnrichDocs(g.docs, { commercial_name: res.value }, run, "Commercial name", "Database did not save the commercial name", g.key);
+      },
+      onFinish: function (why, run) {
+        $("comm-prog").hidden = true;
+        mergeToolIssues("Commercial name", run.attemptedIds, run.issues);
+        drawComm();
+        var left = commTodo().length;
+        var summary = why + " Filled " + run.okEntries + " entries, not on PubChem " + run.missMol + (run.failMol ? ", failed " + run.failMol : "") + " CAS numbers.";
+        addToolLog("PubChem Commercial name: " + summary);
+        $("comm").hidden = false; $("comm-go").hidden = !left;
+        $("comm-text").textContent = summary + (left ? " " + left + " can still be tried." : "");
+        syncEnrichEmpty();
+        if (run.issues.length) toast(run.issues.length + (run.issues.length === 1 ? " molecule" : " molecules") + " failed or not on PubChem.", { actionLabel: "Review & fix", onAction: openEnrichModal });
+      }
+    });
+  });
+  $("comm-stop").addEventListener("click", function () { if (commRun) { commRun.stop = true; $("comm-stop").disabled = true; } });
+
   /* ---------- Load, Auth & Drawer ---------- */
   function load(opts) {
     opts = opts || {};
@@ -1495,7 +1578,7 @@
     return Promise.all([api.adminList(), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
       state.docs = r[0] || []; state.sugg = r[1] || [];
       dupCache = {}; state.loaded = true; state.refreshing = false; state.lastSync = new Date();
-      render(); backfill(); checkBatches(); drawCas(); drawEnrichIssues();
+      render(); backfill(); checkBatches(); drawCas(); drawComm(); drawEnrichIssues();
     }, function (err) {
       state.refreshing = false;
       if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
@@ -1508,11 +1591,12 @@
   }
   function signedOut(msg) {
     if (casRun) casRun.stop = casRun.out = true;
+    if (commRun) commRun.stop = commRun.out = true;
     if (nameRun) nameRun.stop = true;
     enrichIssues = []; eiModalFilter = "all"; eiModalTool = ""; eiModalQuery = "";
-    nameTried = {}; casMiss = {}; toolLogs = [];
+    nameTried = {}; casMiss = {}; commMiss = {}; toolLogs = [];
     closeEnrichModal(); drawEnrichIssues(); drawToolLog();
-    $("cas").hidden = true; $("iupac").hidden = true; $("smi-sync").hidden = true; $("imp").hidden = true;
+    $("cas").hidden = true; $("comm").hidden = true; $("iupac").hidden = true; $("smi-sync").hidden = true; $("imp").hidden = true;
     $("tools-aside").classList.remove("open");
     $("toggle-tools").setAttribute("aria-expanded", "false");
     state.activeId = ""; state.triage = "";

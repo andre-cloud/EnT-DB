@@ -1,35 +1,48 @@
 /* Layout: one column of review cards under a sticky tab bar; each card leads with the E_T value on a 40–80 kcal/mol scale. */
 :root{
-  --bg:#f1faf4; --surface:#ffffff; --fg:#12301f; --muted:#3f5e4c; --line:#cfe5d7;
+  --bg:#f6f7f8; --surface:#ffffff; --fg:#182026; --muted:#525c65; --line:#e1e4e8;
   --accent:#146c43; --accent-fg:#ffffff; --accent-soft:#ddf2e5;
   --exp:#1c6b45; --exp-soft:#e1f1e8; --calc:#5a3f96; --calc-soft:#ebe5f6;
   --warn:#8a5a00; --warn-soft:#f8ecd2; --bad:#a23a32; --bad-soft:#f7e3e1;
   --dup:#b98900; --dup-soft:#fff6d1; --sugg:#6a3fa8; --sugg-soft:#f1e9fb;
-  --paper:#ffffff; --paper-line:#cfe5d7; --track:#e0efe5; --scrim:rgba(10,14,20,.6); --ink:#3b4654;
+  --paper:#ffffff; --paper-line:#e1e4e8; --track:#e8ebee; --scrim:rgba(10,14,20,.6); --ink:#3b4654;
   --f-display:"Fredoka","Segoe UI",system-ui,sans-serif; --brand-en:#22a06b;
   --f-body:"Inter","Segoe UI",system-ui,sans-serif;
   --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
-  --bg:#0d1912; --surface:#14241a; --fg:#e4f2e9; --muted:#9dbba8; --line:#264233;
+  --bg:#121417; --surface:#1a1d21; --fg:#eceff2; --muted:#9aa3ad; --line:#2c3138;
   --accent:#5fd39a; --accent-fg:#0b1f14; --accent-soft:#1b3a2a;
   --exp:#7fd0a3; --exp-soft:#183326; --calc:#b9a3ea; --calc-soft:#2a2342;
   --warn:#e2b659; --warn-soft:#3a2f14; --bad:#ec9087; --bad-soft:#3d1f1c;
   --dup:#f0c93a; --dup-soft:#3a3212; --sugg:#c7a6f5; --sugg-soft:#2c2142;
-  --paper:#0f1d15; --paper-line:#264233; --track:#1e3326; --scrim:rgba(0,0,0,.72); --ink:#e4f2e9;
-  --chem-ink:#e4f2e9; --chem-N:#60a5fa; --chem-O:#f87171; --chem-S:#fbbf24; --chem-F:#34d399;
+  --paper:#16181c; --paper-line:#2c3138; --track:#252a30; --scrim:rgba(0,0,0,.72); --ink:#eceff2;
+  --chem-ink:#eceff2; --chem-N:#60a5fa; --chem-O:#f87171; --chem-S:#fbbf24; --chem-F:#34d399;
   --chem-Cl:#4ade80; --chem-Br:#fb923c; --chem-I:#a78bfa; --chem-B:#fb923c; --chem-P:#fbbf24; --chem-M:#2dd4bf;
   color-scheme:dark } }
 :root[data-theme="dark"]{
-  --bg:#0d1912; --surface:#14241a; --fg:#e4f2e9; --muted:#9dbba8; --line:#264233;
+  --bg:#121417; --surface:#1a1d21; --fg:#eceff2; --muted:#9aa3ad; --line:#2c3138;
   --accent:#5fd39a; --accent-fg:#0b1f14; --accent-soft:#1b3a2a;
   --exp:#7fd0a3; --exp-soft:#183326; --calc:#b9a3ea; --calc-soft:#2a2342;
   --warn:#e2b659; --warn-soft:#3a2f14; --bad:#ec9087; --bad-soft:#3d1f1c;
   --dup:#f0c93a; --dup-soft:#3a3212; --sugg:#c7a6f5; --sugg-soft:#2c2142;
-  --paper:#0f1d15; --paper-line:#264233; --track:#1e3326; --scrim:rgba(0,0,0,.72); --ink:#e4f2e9;
-  --chem-ink:#e4f2e9; --chem-N:#60a5fa; --chem-O:#f87171; --chem-S:#fbbf24; --chem-F:#34d399;
+  --paper:#16181c; --paper-line:#2c3138; --track:#252a30; --scrim:rgba(0,0,0,.72); --ink:#eceff2;
+  --chem-ink:#eceff2; --chem-N:#60a5fa; --chem-O:#f87171; --chem-S:#fbbf24; --chem-F:#34d399;
   --chem-Cl:#4ade80; --chem-Br:#fb923c; --chem-I:#a78bfa; --chem-B:#fb923c; --chem-P:#fbbf24; --chem-M:#2dd4bf;
   color-scheme:dark }
+
+.et.exp .v{color:var(--exp)}
+.et.calc .v{color:var(--calc)}
+.scale .mark.exp{background:var(--exp)}
+.scale .band.exp{background:var(--exp);opacity:.28}
+.scale .mark.calc{background:var(--surface);border:2px solid var(--calc);width:6px;margin-left:-3px;box-sizing:border-box}
+.scale .band.calc{background:var(--calc);opacity:.28}
+.paper-details{border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:6px 10px}
+.paper-details summary{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.82rem;font-weight:500;color:var(--muted);list-style:none}
+.paper-details summary::-webkit-details-marker{display:none}
+.paper-details summary::before{content:"▸";font-size:.85rem;line-height:1;transition:transform .12s}
+.paper-details[open] summary::before{transform:rotate(90deg)}
+.paper-details[open] summary{margin-bottom:8px;color:var(--fg)}
 
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -176,7 +189,6 @@ sub{font-size:.72em;line-height:0}
 .card.mol .val{border-top:1px solid var(--line, rgba(127,127,127,.25));padding-top:12px;display:flex;flex-direction:column;gap:8px}
 .valtop{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
 .valtop .chips{margin:0}
-.scale .mark.calc{background:var(--surface);border:2px solid var(--accent);width:6px;margin-left:-3px;box-sizing:border-box}
 .dupnote.info{background:var(--surface-2, rgba(127,127,127,.08))}
 .dupnote li.same{font-weight:600}
 /* correction form: every field at once, changed ones highlighted */

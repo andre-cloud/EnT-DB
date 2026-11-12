@@ -1271,7 +1271,7 @@
     var maxTitleChars = titleSize === 16 ? 82 : titleSize === 18 ? 72 : 64;
     var lines = wrapLines(rawName, maxTitleChars, 2);
     var has2Lines = lines.length > 1;
-    var subLine = (commName && iupacName) ? wrapLines(iupacName, 102, 1)[0] : "";
+    var subLine = (commName && iupacName && commName.toLowerCase() !== iupacName.toLowerCase()) ? wrapLines(iupacName, 102, 1)[0] : "";
     var boxY = (has2Lines || subLine) ? 116 : 104, boxH = 292;
     var boxX = 34, boxW = 424;
 
