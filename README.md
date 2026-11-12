@@ -13,8 +13,9 @@ Site: https://nuniwo-source.github.io/TrEnDB/
   [OpenChemLib](https://github.com/cheminfo/openchemlib-js)).
 - **Submit.** Anyone can propose an entry. The form scores it from 0 to 100 for completeness and
   consistency; the server recomputes the score, so the browser cannot fake it.
-- **Review.** A submission is stored as *pending* and the curator is notified. It becomes public
-  only when a curator approves it on the review page (`admin.html`).
+- **Review.** A submission is stored as *pending* and the curator is notified. Accepting a value (or a
+  reader's correction) requires verification from **two different curators** on the review page (`admin.html`);
+  the first verification keeps it in the queue at `1/2`, and the second publishes it.
 - **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
   structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
 - **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both

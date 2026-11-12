@@ -278,6 +278,12 @@
       var ta = Date.parse(a.created_at || "") || 0, tb = Date.parse(b.created_at || "") || 0;
       return tb - ta || (String(b.id) < String(a.id) ? -1 : String(b.id) > String(a.id) ? 1 : 0);
     });
+    else if (st.sort === "approvals") rows.sort(function (a, b) {
+      var da = approvalsOf(b).length - approvalsOf(a).length;
+      if (da) return da;
+      var ds = (Number(b.score) || 0) - (Number(a.score) || 0);
+      return ds || (String(a.created_at || "") < String(b.created_at || "") ? -1 : 1);
+    });
     else if (st.sort === "review") rows.sort(function (a, b) {
       var d = (Number(b.score) || 0) - (Number(a.score) || 0);
       return d || (String(a.created_at || "") < String(b.created_at || "") ? -1 : 1);
@@ -501,6 +507,31 @@
     if (typeof v === "string") setText(dd, v); else dd.appendChild(v);
     dl.appendChild(dd);
   }
+  function callout(text, quoted) {
+    /* only the verbatim line looks like a quotation; the paraphrase is ordinary text */
+    var box = el("span", quoted ? "quote-callout" : "evidence-note");
+    if (quoted) box.appendChild(el("q", null, text));
+    else setText(box, text);
+    return box;
+  }
+  /* "SI, p. S14" / "Table S3" -> si; any other location -> article; no location -> null */
+  Ent.sourceKind = function (location) {
+    var loc = String(location || "").trim();
+    if (!loc) return null;
+    return (/^(SI|ESI)\b/i.test(loc) || /^Suppl|^Supporting/i.test(loc) || /\bS-?\d+\b/.test(loc)) ? "si" : "article";
+  };
+  function sourceChip(d) {
+    var kind = Ent.sourceKind(d.location);
+    if (!kind) return null;
+    var chip = el("span", "chip plain", kind === "si" ? "SI" : "Article");
+    chip.title = kind === "si" ? "Value taken from the Supporting Information" : "Value taken from the article";
+    return chip;
+  }
+  function paperExcerptRows(dl, d) {
+    row(dl, "Where", d.location);
+    if (d.quote) row(dl, "Verbatim", callout(d.quote, true));
+    if (d.evidence) row(dl, "What it says", callout(d.evidence, false));
+  }
   /* one entry, or several values of the same molecule (green filled: experimental; purple hollow: computed) */
   function scale(list) {
     list = Array.isArray(list) ? list : [list];
@@ -590,10 +621,60 @@
     });
   }
 
+  function approvalsOf(d) {
+    var list = d && Array.isArray(d.approvals) ? d.approvals : [];
+    var seen = {}, out = [];
+    list.forEach(function (a) {
+      var em = a && a.email ? String(a.email).trim().toLowerCase() : "";
+      if (!em || seen[em]) return;
+      seen[em] = 1;
+      out.push({ email: em, at: a.at || "" });
+    });
+    return out;
+  }
+  Ent.approvalsOf = approvalsOf;
+  Ent.approvalState = function (d, myEmail) {
+    var list = approvalsOf(d);
+    var me = String(myEmail || "").trim().toLowerCase();
+    var byMe = !!me && list.some(function (a) { return a.email === me; });
+    var byOthers = list.filter(function (a) { return a.email !== me; });
+    return { list: list, count: list.length, byMe: byMe, byOthers: byOthers, needed: Math.max(0, 2 - list.length) };
+  };
+  function fmtApprovalDate(iso) {
+    if (!iso) return "";
+    var t = Date.parse(iso);
+    return isNaN(t) ? "" : new Date(t).toLocaleString();
+  }
+  function approvalNoteBox(ap, status, kindLabel) {
+    if (!ap.count) return null;
+    if (status === "pending") {
+      var box = el("div", "approval-note " + (ap.byMe ? "mine" : "ready"));
+      if (ap.byMe) {
+        var mineAt = "";
+        ap.list.forEach(function (a) { if (a.email && !ap.byOthers.some(function (o) { return o.email === a.email; })) mineAt = fmtApprovalDate(a.at); });
+        box.appendChild(el("p", null, "Verified by you (1/2)" + (mineAt ? " on " + mineAt : "") + " — awaiting a second curator to accept this " + (kindLabel || "value") + "."));
+      } else {
+        var who = ap.byOthers.map(function (a) {
+          var dt = fmtApprovalDate(a.at);
+          return a.email + (dt ? " (" + dt + ")" : "");
+        }).join(", ");
+        box.appendChild(el("p", null, "Verified (1/2) by " + who + " — your confirmation will accept this " + (kindLabel || "value") + "."));
+      }
+      return box;
+    }
+    if (status === "approved" && ap.count >= 2) {
+      var abox = el("div", "approval-note done");
+      abox.appendChild(el("p", null, "Verified (" + ap.count + "/2) by " + ap.list.map(function (a) { return a.email; }).join(" and ") + "."));
+      return abox;
+    }
+    return null;
+  }
+
   /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.clusterTag, o.onSuggest(d),
-     o.admin = {busy, drafts, activeId, onFocusCard, onPatch(id, patch) -> Promise<bool>, approve(d, note), selected, onSelect, onDelete} */
+     o.admin = {email, busy, drafts, activeId, onFocusCard, onPatch(id, patch) -> Promise<bool>, approve(d, note), reject(d, note), revoke(d, note), selected, onSelect, onDelete} */
   Ent.card = function (d, o) {
     o = o || {}; var adm = o.admin || null, dup = o.dup || null;
+    var ap = adm ? Ent.approvalState(d, adm.email) : null;
     var cls = "card" + (dup && dup.flag ? " dup" : "") + (adm && adm.activeId === d.id ? " kb-focus" : "");
     var c = el("article", cls), head = el("div", "head");
     c.setAttribute("data-id", d.id);
@@ -628,15 +709,27 @@
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
+    var srcChip = sourceChip(d); if (srcChip) chips.appendChild(srcChip);
     if (d.cls) chips.appendChild(el("span", "chip plain", d.cls));
     if (o.simMode && o.scores && o.scores[d.id] != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(o.scores[d.id], 2)));
     if (d.score != null) chips.appendChild(scoreDetails(d));
     if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
     if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
     if (adm && !d.smiles_checked) chips.appendChild(el("span", "chip warn", "Structure unchecked"));
+    if (adm && ap && d.status === "pending" && ap.count >= 1) {
+      chips.appendChild(el("span", "chip " + (ap.byMe ? "verify1-me" : "verify1-other"), ap.byMe ? "1/2 verified · by you" : "1/2 verified · needs 2nd check"));
+    } else if (adm && ap && d.status === "approved" && ap.count >= 2) {
+      var vchip = el("span", "chip verify2", ap.count + "/2 verified");
+      vchip.title = ap.list.map(function (a) { return a.email; }).join(", ");
+      chips.appendChild(vchip);
+    }
     if (dup && dup.flag) chips.appendChild(el("span", "chip dupchip", dup.dbSame.length ? "Possible duplicate" : "Same value also in the queue"));
     else if (dup && dup.db.length) chips.appendChild(el("span", "chip plain", "New value for a known molecule"));
     head.appendChild(chips); c.appendChild(head);
+    if (adm && ap) {
+      var apBox = approvalNoteBox(ap, d.status, "value");
+      if (apBox) c.appendChild(apBox);
+    }
     if (dup && (dup.db.length || dup.queue.length || dup.stereo.length)) c.appendChild(dupNote(dup));
 
     var etVal = Number(d.et_kcal);
@@ -703,9 +796,7 @@
     row(dl, "Method", d.method);
     row(dl, "Conditions", d.conditions);
     row(dl, "Source", d.citation);
-    row(dl, "Where", d.location);
-    if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(dl, "Verbatim", qd); }
-    row(dl, "What it says", d.evidence);
+    paperExcerptRows(dl, d);
     if (d.doi) {
       var doiRow = el("div", "copy-row"), dw = el("span", "doi-wrap");
       dw.appendChild(doiLink(d.doi, d.doi)); doiRow.appendChild(dw);
@@ -750,20 +841,39 @@
       c.appendChild(noteBtn); c.appendChild(f);
 
       var act = el("div", "actions");
-      var decide = function (label, clsName, status) {
-        var b = el("button", "btn " + clsName, label); b.type = "button"; b.disabled = busy;
+      var decide = function (label, clsName, status, actName, disabledExtra) {
+        var b = el("button", "btn " + clsName, label); b.type = "button"; b.disabled = busy || !!disabledExtra;
+        if (actName) b.setAttribute("data-act", actName);
         b.addEventListener("click", function () {
           var done = function (ok) { if (ok) delete adm.drafts[d.id]; };
           if (status === "approved" && adm.approve) { Promise.resolve(adm.approve(d, ni.value || "")).then(done); return; }
           if (status === "rejected" && adm.reject) { Promise.resolve(adm.reject(d, ni.value || "")).then(done); return; }
-          adm.onPatch(d.id, { status: status, decided_at: new Date().toISOString(), note: ni.value || "" }).then(done);
+          adm.onPatch(d.id, { status: status, decided_at: status === "pending" ? null : new Date().toISOString(), note: ni.value || "" }).then(done);
         });
         act.appendChild(b);
       };
       var eb = el("button", "btn", "Edit entry"); eb.type = "button"; eb.disabled = busy;
       eb.addEventListener("click", function () { Ent.editor.open(d, function (patch) { return adm.onPatch(d.id, patch); }); });
-      if (d.status === "pending") { decide("Approve", "primary", "approved"); decide("Reject", "reject", "rejected"); }
-      else { decide("Back to queue", "", "pending"); if (d.status === "approved") decide("Reject", "reject", "rejected"); else decide("Approve", "primary", "approved"); }
+      if (d.status === "pending") {
+        if (ap && ap.byMe) {
+          decide("Verified by you (" + ap.count + "/2)", "primary", "approved", "approve", true);
+          if (adm.revoke) {
+            var rb = el("button", "btn", "Withdraw verification"); rb.type = "button"; rb.disabled = busy;
+            rb.setAttribute("data-act", "revoke");
+            rb.addEventListener("click", function () {
+              Promise.resolve(adm.revoke(d, ni.value || "")).then(function (ok) { if (ok) delete adm.drafts[d.id]; });
+            });
+            act.appendChild(rb);
+          }
+        } else {
+          decide(ap && ap.count >= 1 ? "Approve (2/2)" : "Verify (1/2)", "primary", "approved", "approve");
+        }
+        decide("Reject", "reject", "rejected", "reject");
+      } else {
+        decide("Back to queue", "", "pending");
+        if (d.status === "approved") decide("Reject", "reject", "rejected", "reject");
+        else decide("Verify (1/2)", "primary", "approved", "approve");
+      }
       act.appendChild(eb);
       if (d.status === "rejected" && adm.onDelete) {
         var db = el("button", "btn danger", "Delete permanently"); db.type = "button"; db.disabled = busy;
@@ -815,6 +925,7 @@
     top.appendChild(et);
     var chips = el("div", "chips");
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
+    var srcChip = sourceChip(d); if (srcChip) chips.appendChild(srcChip);
     if (d.score != null) chips.appendChild(scoreDetails(d));
     top.appendChild(chips); v.appendChild(top);
     if (!many) v.appendChild(scale(d));
@@ -835,9 +946,7 @@
       var det = el("details", "paper-details");
       det.appendChild(el("summary", null, "Paper details"));
       var pdl = el("dl");
-      row(pdl, "Where", d.location);
-      if (d.quote) { var qd = el("span", "quote-callout"); qd.appendChild(el("q", null, d.quote)); row(pdl, "Verbatim", qd); }
-      row(pdl, "What it says", d.evidence);
+      paperExcerptRows(pdl, d);
       det.appendChild(pdl);
       v.appendChild(det);
     }
@@ -1085,6 +1194,7 @@
   var SUGG_LABEL = {}; EntScore.SUGGEST_FIELDS.forEach(function (f) { SUGG_LABEL[f[0]] = f[1]; });
   function shown(v) {
     if (v == null || v === "") return "(empty)";
+    if (Array.isArray(v)) return v.length ? v.map(shown).join("; ") : "(empty)";
     if (typeof v === "object") {
       if ("doi" in v) return (v.doi || "") + (v.note ? " · " + v.note : "");
       return EntScore.formatDirectExc(v);
@@ -1097,16 +1207,22 @@
     if (info) box.innerHTML = info.svg; else box.textContent = label || "No drawing";
     return box;
   }
-  /* s: suggestion row, entry: current entry or null, h = {busy, approve(s, note), reject(s, note), edit(s, entry, note)} */
+  /* s: suggestion row, entry: current entry or null, h = {email, busy, approve(s, note), revoke(s, note), reject(s, note), edit(s, entry, note)} */
   Ent.suggestionCard = function (s, entry, h) {
+    var ap = Ent.approvalState(s, h && h.email);
     var c = el("article", "card sugg"), head = el("div", "head");
     if (entry) renderMolTitle(head, entry, "Suggested correction · ");
     else head.appendChild(el("h2", null, "Suggested correction · entry no longer available"));
     var chips = el("div", "chips"); chips.appendChild(el("span", "chip suggchip", "Correction from a reader"));
+    if (ap.count >= 1) {
+      chips.appendChild(el("span", "chip " + (ap.byMe ? "verify1-me" : "verify1-other"), ap.byMe ? "1/2 verified · by you" : "1/2 verified · needs 2nd check"));
+    }
     if (entry && entry.cas) chips.appendChild(el("span", "chip plain", "CAS " + entry.cas));
     if (entry && entry.origin) chips.appendChild(el("span", "chip " + (entry.origin === "calc" ? "calc" : "exp"), entry.origin === "calc" ? "Computed" : "Experimental"));
     if (entry && entry.et_kcal != null) chips.appendChild(el("span", "chip plain", fmt(Number(entry.et_kcal), 1) + " kcal/mol"));
     head.appendChild(chips); c.appendChild(head);
+    var apBox = approvalNoteBox(ap, s.status || "pending", "correction");
+    if (apBox) c.appendChild(apBox);
 
     if (entry && (entry.smiles || (s.changes && s.changes.smiles))) {
       var st = el("div", "sugg-struct"), chSmi = s.changes && s.changes.smiles;
@@ -1147,13 +1263,28 @@
     c.appendChild(noteToggle); c.appendChild(nf);
 
     var act = el("div", "actions"), busy = !!h.busy[s.id];
-    var ok = el("button", "btn primary", "Approve: apply to the entry"), no = el("button", "btn reject", "Reject");
-    ok.type = no.type = "button"; ok.disabled = busy || !entry; no.disabled = busy;
-    ok.addEventListener("click", function () { h.approve(s, ni.value.trim()); });
+    if (ap.byMe) {
+      var doneBtn = el("button", "btn primary", "Verified by you (" + ap.count + "/2)");
+      doneBtn.type = "button"; doneBtn.disabled = true;
+      act.appendChild(doneBtn);
+      if (h.revoke) {
+        var rev = el("button", "btn", "Withdraw verification");
+        rev.type = "button"; rev.disabled = busy;
+        rev.addEventListener("click", function () { h.revoke(s, ni.value.trim()); });
+        act.appendChild(rev);
+      }
+    } else {
+      var ok = el("button", "btn primary", ap.count >= 1 ? "Approve & apply (2/2)" : "Verify correction (1/2)");
+      ok.type = "button"; ok.disabled = busy || !entry;
+      ok.addEventListener("click", function () { h.approve(s, ni.value.trim()); });
+      act.appendChild(ok);
+    }
+    var no = el("button", "btn reject", "Reject");
+    no.type = "button"; no.disabled = busy;
     no.addEventListener("click", function () { h.reject(s, ni.value.trim()); });
-    act.appendChild(ok); act.appendChild(no);
+    act.appendChild(no);
     if (entry && h.edit) {
-      var ed = el("button", "btn", "Edit & apply…"); ed.type = "button"; ed.disabled = busy;
+      var ed = el("button", "btn", "Edit & verify…"); ed.type = "button"; ed.disabled = busy;
       ed.addEventListener("click", function () { h.edit(s, entry, ni.value.trim()); });
       act.appendChild(ed);
     }
@@ -1243,6 +1374,11 @@
       head.appendChild(h); head.appendChild(headAct); box.appendChild(head);
 
       var body = el("div", "ed-body");
+      if (opts.banner) {
+        body.appendChild(el("p", "banner", opts.banner));
+      } else if (!overrides && d.status === "pending" && approvalsOf(d).length > 0) {
+        body.appendChild(el("p", "banner", "This entry has 1/2 verification. Editing the value, structure, method, or source will reset verifications to 0/2."));
+      }
 
       /* Live structure panel inside editor so stereodescriptors & CAS can be verified visually */
       var stWrap = el("div", "ed-struct"), paper = el("div", "paper"), si = el("div", "sinfo");
@@ -1724,6 +1860,50 @@
     return authed(function (t) {
       return fetch(base + "/rest/v1/entries?id=eq." + encodeURIComponent(id),
         { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) }).then(asJson);
+    });
+  };
+  api.adminApproveMany = function (ids, note) {
+    var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    return authed(function (t) {
+      return chunks.reduce(function (p, c) {
+        return p.then(function (all) {
+          return fetch(base + "/rest/v1/rpc/approve_entries", {
+            method: "POST",
+            headers: headers(t),
+            body: JSON.stringify({ p_ids: c, p_note: note === undefined ? null : note })
+          }).then(asJson).then(function (rows) { return all.concat(rows || []); });
+        });
+      }, Promise.resolve([]));
+    });
+  };
+  api.adminApprove = function (id, note) {
+    return api.adminApproveMany([id], note);
+  };
+  api.adminRevokeApproval = function (id, note) {
+    return authed(function (t) {
+      return fetch(base + "/rest/v1/rpc/revoke_entry_approval", {
+        method: "POST",
+        headers: headers(t),
+        body: JSON.stringify({ p_id: id, p_note: note === undefined ? null : note })
+      }).then(asJson);
+    });
+  };
+  api.adminApproveSuggestion = function (id, note) {
+    return authed(function (t) {
+      return fetch(base + "/rest/v1/rpc/approve_suggestion", {
+        method: "POST",
+        headers: headers(t),
+        body: JSON.stringify({ p_id: id, p_note: note === undefined ? null : note })
+      }).then(asJson);
+    });
+  };
+  api.adminRevokeSuggestionApproval = function (id, note) {
+    return authed(function (t) {
+      return fetch(base + "/rest/v1/rpc/revoke_suggestion_approval", {
+        method: "POST",
+        headers: headers(t),
+        body: JSON.stringify({ p_id: id, p_note: note === undefined ? null : note })
+      }).then(asJson);
     });
   };
 })();

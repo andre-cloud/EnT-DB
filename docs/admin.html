@@ -70,6 +70,8 @@
       <div class="admin-main">
         <div class="triage-bar" id="triage-bar" role="group" aria-label="Quick curator filters">
           <button class="pill" type="button" data-triage="" aria-pressed="true">All<span class="n" id="tr-all">0</span></button>
+          <button class="pill pill-need2" type="button" data-triage="need2" aria-pressed="false" hidden>Needs 2nd check<span class="n" id="tr-need2">0</span></button>
+          <button class="pill pill-wait2" type="button" data-triage="wait2" aria-pressed="false" hidden>Verified by me (1/2)<span class="n" id="tr-wait2">0</span></button>
           <button class="pill pill-sugg" type="button" data-triage="sugg" aria-pressed="false" hidden>Corrections<span class="n" id="tr-sugg">0</span></button>
           <button class="pill pill-dup" type="button" data-triage="dup" aria-pressed="false" hidden>Duplicates<span class="n" id="tr-dup">0</span></button>
           <button class="pill pill-warn" type="button" data-triage="unchecked" aria-pressed="false" hidden>Unchecked structure<span class="n" id="tr-unchecked">0</span></button>
@@ -90,6 +92,7 @@
             </select>
             <select id="f-sort" aria-label="Sort order">
               <option value="review">Review order: score, duplicates together</option>
+              <option value="approvals">Needs 2nd verification first</option>
               <option value="received-desc">Date received, newest first</option>
               <option value="added">Date received, oldest first</option>
               <option value="et-asc">Triplet energy, low to high</option>
@@ -160,6 +163,7 @@
           </div>
           <p class="hint" id="up-info" aria-live="polite">Import entries directly into the review queue.</p>
           <div class="err" id="up-err" role="alert" hidden></div>
+          <div class="up-report" id="up-report" hidden></div>
         </section>
 
         <section class="tool-card" id="enrich-box" aria-labelledby="enrich-title">
@@ -236,8 +240,9 @@
               <li><span class="sw known"></span><span><b>White, “New value for a known molecule”</b> · a different value for a molecule already in the database. Approve adds it to that molecule’s card.</span></li>
               <li><span class="sw plain"></span><span><b>White</b> · new molecule.</span></li>
             </ul>
+            <p class="hint">Two-admin verification: every entry or correction needs confirmation from <b>two different curators</b> before it is accepted and published (1/2 stays in the queue; 2/2 publishes).</p>
             <p class="hint">Queue order: corrections, then entries by score (highest first), with duplicates kept together.</p>
-            <p class="hint">Chips: <span class="chip exp">Good</span> 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> &lt; 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
+            <p class="hint">Chips: <span class="chip verify1-other">1/2 verified · needs 2nd check</span>, <span class="chip verify1-me">1/2 verified · by you</span>, <span class="chip exp">Good</span> 80+, <span class="chip warn">Fair</span> 50–79, <span class="chip bad">Poor</span> &lt; 50; <span class="chip warn">Structure unchecked</span> SMILES not yet verified in the sketcher.</p>
           </details>
         </section>
       </aside>

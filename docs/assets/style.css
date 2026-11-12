@@ -285,6 +285,8 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center}
 .pill[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
 .pill[aria-pressed="true"] .n{background:rgba(255,255,255,.22);color:inherit}
 .pill-dup{border-color:color-mix(in srgb,var(--dup) 55%,var(--line))}
+.pill-need2{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.pill-wait2{border-color:color-mix(in srgb,var(--exp) 45%,var(--line))}
 .pill-sugg{border-color:color-mix(in srgb,var(--sugg) 55%,var(--line))}
 .pill-warn{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
 .pill-bad{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
@@ -310,6 +312,12 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center}
 .tool-log-wrap summary .n{font-variant-numeric:tabular-nums;font-size:.72rem;font-weight:600;padding:1px 6px;border-radius:999px;background:var(--track);color:var(--muted)}
 .tool-log{margin:6px 0;padding-left:16px;font-size:.78rem;color:var(--muted);max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:3px}
 .err-list{margin:4px 0 0;padding-left:18px;font-size:.8rem}
+.up-report{display:flex;flex-direction:column;gap:8px;font-size:.82rem}
+.up-sec{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg);min-width:0}
+.up-sec.bad{border-left-color:var(--bad)} .up-sec.bad>.tool-head>strong{color:var(--bad)}
+.up-sec.warn{border-left-color:var(--warn)} .up-sec.warn>strong{color:var(--warn)}
+.up-sec .tool-head{flex-wrap:wrap}
+.up-list{margin:0;padding-left:18px;max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:5px;overflow-wrap:anywhere}
 
 /* Compact enrichment summary in sidebar */
 .ei-summary-box{background:var(--warn-soft);border:1px solid color-mix(in srgb,var(--warn) 35%,var(--line));border-radius:10px;padding:10px;margin-top:2px;gap:6px}
@@ -380,8 +388,18 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center}
 .sinfo-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .cas-inline{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .note-toggle{align-self:flex-start}
-.quote-callout{border-left:3px solid var(--line);padding-left:8px;display:block}
+/* the verbatim line is set apart as a quotation; the curator's paraphrase stays plain text */
+.quote-callout{border-left:3px solid var(--line);padding-left:8px;display:block;font-style:italic}
+.evidence-note{display:block;font-style:normal}
 .verify-callout{color:var(--warn);font-weight:500}
+.chip.verify1-other{background:var(--accent-soft);color:var(--accent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
+.chip.verify1-me{background:var(--track);color:var(--fg)}
+.chip.verify2{background:var(--exp-soft);color:var(--exp)}
+.approval-note{border-radius:8px;padding:8px 12px;font-size:.84rem;border:1px solid var(--line);background:var(--bg)}
+.approval-note p{margin:0}
+.approval-note.ready{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,transparent);color:var(--fg)}
+.approval-note.mine{background:var(--bg);color:var(--muted)}
+.approval-note.done{background:var(--exp-soft);border-color:color-mix(in srgb,var(--exp) 30%,transparent);color:var(--exp)}
 
 /* Duplicate comparison table inside modal */
 .diff-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
