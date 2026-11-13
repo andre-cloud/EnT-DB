@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import re
+import time
 import zipfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -17,6 +18,7 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from . import chem, scoring
+from .grouping import companion_si_files
 from .resolvers import Resolver, looks_like_anonymous_label, normalize_name_key
 
 # Never attempt to bypass gates or CAPTCHAs: detect and abort on challenge/HTML gate responses.
@@ -48,6 +50,7 @@ _ALLOWED_SI_EXTS = {".pdf", ".md", ".markdown", ".txt", ".docx", ".csv", ".tsv",
 _COMPANION_SI_SUFFIXES = ("_si", "-si", "_supp", "-supp", "_supporting", "-supporting", "_esi", "-esi")
 
 _MAX_SI_FILES = 6
+_FAILED_SI_TTL_SECONDS = 7 * 24 * 3600
 _MAX_SI_BYTES = 50 * 1024 * 1024
 
 
@@ -155,7 +158,13 @@ def find_local_si_files(main_path: Path) -> list[Path]:
         p_low = p.stem.lower()
         if any(p_low == f"{stem_low}{suf}" or p_low.startswith(f"{stem_low}{suf}_") or p_low.startswith(f"{stem_low}{suf}-") for suf in _COMPANION_SI_SUFFIXES):
             matches.append(p)
-    return matches
+    # Same naming rule the folder scan uses, so a file is never both an SI and a paper.
+    known = {m.resolve() for m in matches}
+    for p in companion_si_files(main_path):
+        if p.resolve() not in known:
+            known.add(p.resolve())
+            matches.append(p)
+    return sorted(matches)
 
 
 def _doi_cache_dir(cache_dir: Path, doi: str) -> Path:
@@ -376,7 +385,9 @@ def download_si_for_doi(
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             cached_files = [Path(p) for p in manifest.get("files") or [] if Path(p).is_file()]
-            if cached_files or manifest.get("attempted"):
+            # A search that found nothing is retried after a week: publishers and repositories change.
+            age = time.time() - float(manifest.get("ts") or manifest_path.stat().st_mtime)
+            if cached_files or (manifest.get("attempted") and age < _FAILED_SI_TTL_SECONDS):
                 return SIDownloadResult(
                     files=cached_files,
                     warnings=list(manifest.get("warnings") or []),
@@ -445,6 +456,7 @@ def download_si_for_doi(
     manifest_data = {
         "doi": clean_d,
         "attempted": True,
+        "ts": time.time(),
         "files": [str(p) for p in downloaded],
         "warnings": warnings,
     }
@@ -823,15 +835,20 @@ def enrich_with_si(
     si_docs: list[Any] = []
     si_candidates: list[Any] = []
     for sp in si_files:
-        s_doc, s_cands = parse_si_file(
-            sp,
-            resolver=resolver,
-            doi=doi,
-            citation=citation,
-            default_role=default_role,
-            default_cls=default_cls,
-            enable_ocr=enable_ocr,
-        )
+        try:
+            s_doc, s_cands = parse_si_file(
+                sp,
+                resolver=resolver,
+                doi=doi,
+                citation=citation,
+                default_role=default_role,
+                default_cls=default_cls,
+                enable_ocr=enable_ocr,
+            )
+        except Exception as exc:
+            # A broken SI file must not cost the paper its own data.
+            dl_warnings.append(f"Supporting Information file {sp.name} could not be read: {exc}")
+            continue
         if s_doc is not None:
             si_docs.append(s_doc)
         si_candidates.extend(s_cands)

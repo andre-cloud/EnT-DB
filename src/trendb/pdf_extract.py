@@ -12,6 +12,7 @@ from typing import Any, Sequence
 from . import clean_fields, scoring
 from .models import KCAL_PER_EV, KJ_PER_KCAL
 from .resolvers import Resolver, looks_like_anonymous_label, normalize_name_key
+from .textnorm import normalize_cell, normalize_text
 
 # Optional PyMuPDF / pdfplumber backends
 try:  # pragma: no cover - optional runtime dependency
@@ -34,7 +35,11 @@ _ACS_STEM_RE = re.compile(r"^([a-z]{2}\d{5}a\d{3}|(?:jacs|joc|orglett|jo|ol|cm|j
 _CAS_INLINE_RE = re.compile(r"\b(\d{2,7}-\d{2}-\d)\b")
 
 # Energy extraction patterns
-_UNIT_PATTERN = r"(kcal\s*(?:/|per)\s*mole?|kcal\s*mole?\s*[-−]1|kJ\s*(?:/|per)\s*mole?|kJ\s*mole?\s*[-−]1|eV)"
+_UNIT_PATTERN = (
+    r"(kcal\s*(?:/|per)\s*mole?|kcal[\s·.]*mole?\s*[-−–]\s*1|"
+    r"kJ\s*(?:/|per)\s*mole?|kJ[\s·.]*mole?\s*[-−–]\s*1|eV|cm\s*[-−–]\s*1)"
+)
+KCAL_PER_WAVENUMBER = 2.85914e-3
 _ET_AFTER_CUE_RE = re.compile(
     r"(?:triplet(?:\s+state)?(?:\s+excitation)?\s+energ(?:y|ies)|E_?\s*T\b|T_?\s*1(?:\s+energy)?|"
     r"0\s*[-–]\s*0\s+transition(?:\s+to\s+the\s+lowest\s+triplet\s+state)?|"
@@ -172,6 +177,10 @@ class ExtractedCandidate:
     page_num: int = 1
 
 
+class PdfReadError(RuntimeError):
+    """A PDF that cannot be turned into text (corrupt, encrypted, or scanned with no OCR available)."""
+
+
 def _strip_urls(text: str | None) -> str | None:
     if text is None:
         return None
@@ -194,6 +203,8 @@ def _truncate_quote(text: str | None, max_words: int = 22) -> str | None:
 
 def _normalize_unit(unit_raw: str | None) -> str:
     u = (unit_raw or "").lower().replace(" ", "")
+    if u.startswith("cm"):
+        return "cm"
     if "kj" in u:
         return "kj"
     if "ev" in u:
@@ -225,7 +236,37 @@ def _convert_energy(val: float, unc: float | None, unit: str) -> tuple[float | N
         kcal = scoring.round1(28591.5 / val)
         rep = f"{val:g} nm (phosphorescence)"
         return kcal, None, rep
+    if unit == "cm":
+        kcal = scoring.round1(val * KCAL_PER_WAVENUMBER)
+        unc_kcal = scoring.round2(abs(unc) * KCAL_PER_WAVENUMBER) if unc is not None else None
+        rep = f"{val:g}" + (f" ± {unc:g}" if unc is not None else "") + " cm-1"
+        return kcal, unc_kcal, rep
     return None, None, ""
+
+
+_THOUSANDS_RE = re.compile(r"^\d{1,3},\d{3}$")
+
+
+def _num(raw: str | None, unit: str) -> float:
+    """Parse a reported value; wavenumbers use the comma as a thousands separator (21,300 cm-1)."""
+    txt = (raw or "").strip()
+    if unit == "cm" and _THOUSANDS_RE.match(txt):
+        txt = txt.replace(",", "")
+    return scoring.num(txt)
+
+
+def _scoring_unit(unit: str) -> str:
+    """Units the scorer does not know (nm, cm-1) are stored already converted to kcal/mol."""
+    return unit if unit in ("kcal", "kj", "ev") else "kcal"
+
+
+def normalize_document(doc: "PdfDocument") -> "PdfDocument":
+    """Normalise every page of a document in place (idempotent)."""
+    for page in doc.pages:
+        page.text = normalize_text(page.text)
+        page.layout_text = normalize_text(page.layout_text)
+        page.tables = [[[normalize_cell(c) for c in row] for row in tb] for tb in page.tables]
+    return doc
 
 
 def _parse_layout_tables(layout_text: str) -> list[list[list[str]]]:
@@ -261,7 +302,13 @@ def read_pdf(path: str | Path) -> PdfDocument:
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     if fitz is not None:  # pragma: no cover - used when pymupdf is installed
-        doc = fitz.open(str(pdf_path))
+        try:
+            doc = fitz.open(str(pdf_path))
+        except Exception as exc:
+            raise PdfReadError(f"{pdf_path.name}: not a readable PDF ({exc})") from exc
+        if getattr(doc, "needs_pass", False):
+            doc.close()
+            raise PdfReadError(f"{pdf_path.name}: PDF is password-protected")
         meta = doc.metadata or {}
         meta_doi = None
         for v in meta.values():
@@ -300,7 +347,7 @@ def read_pdf(path: str | Path) -> PdfDocument:
             if plumber_doc is not None:
                 plumber_doc.close()
             doc.close()
-        return PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="pymupdf")
+        return normalize_document(PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="pymupdf"))
 
     # Poppler fallback (`pdftotext` + `pdfinfo`)
     pdftotext = shutil.which("pdftotext")
@@ -318,10 +365,18 @@ def read_pdf(path: str | Path) -> PdfDocument:
             if scoring.is_doi(cand):
                 meta_doi = cand
 
-    raw_plain = subprocess.run([pdftotext, str(pdf_path), "-"], capture_output=True, text=True, check=True).stdout
-    raw_layout = subprocess.run(
-        [pdftotext, "-layout", str(pdf_path), "-"], capture_output=True, text=True, check=True
-    ).stdout
+    def _pdftotext(*flags: str) -> str:
+        proc = subprocess.run([pdftotext, *flags, str(pdf_path), "-"], capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip().splitlines()
+            reason = detail[-1] if detail else f"pdftotext exit code {proc.returncode}"
+            if "password" in reason.lower():
+                reason = "PDF is password-protected"
+            raise PdfReadError(f"{pdf_path.name}: {reason}")
+        return proc.stdout
+
+    raw_plain = _pdftotext()
+    raw_layout = _pdftotext("-layout")
 
     plain_pages = raw_plain.split("\f")
     layout_pages = raw_layout.split("\f")
@@ -337,7 +392,7 @@ def read_pdf(path: str | Path) -> PdfDocument:
         p_txt = plain_pages[i] if i < len(plain_pages) else ""
         l_txt = layout_pages[i] if i < len(layout_pages) else p_txt
         pages.append(PageText(page_num=i + 1, text=p_txt, layout_text=l_txt, tables=_parse_layout_tables(l_txt)))
-    return PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="poppler")
+    return normalize_document(PdfDocument(path=pdf_path, metadata_doi=meta_doi, pages=pages, backend="poppler"))
 
 
 def _parse_gfm_tables(md_text: str) -> tuple[list[list[list[str]]], str]:
@@ -532,13 +587,57 @@ def _detect_header_unit(header: str) -> str | None:
     low = header.lower()
     if "kcal" in low:
         return "kcal"
-    if "kj" in low:
+    if re.search(r"\bkj\b", low):
         return "kj"
-    if "ev" in low:
+    if re.search(r"(?<![a-z])ev(?![a-z])", low):
         return "ev"
-    if "nm" in low:
+    if re.search(r"cm\s*[-−–]\s*1", low):
+        return "cm"
+    if re.search(r"(?<![a-z])nm(?![a-z])", low):
         return "nm"
     return None
+
+
+_ET_HEADER_CUE_RE = re.compile(r"triplet|(?<![a-z])e_?\s*\(?t\d*\)?(?![a-z])|(?<![a-z])t_?1(?![a-z0-9])", re.IGNORECASE)
+_OTHER_ENERGY_HEADER_RE = re.compile(
+    r"singlet|fluoresc|(?<![a-z])e_?\s*\(?s\d*\)?(?![a-z])|(?<![a-z])s_?1(?![a-z0-9])|δg|δh|Δg|Δh|"
+    r"(?<![a-z])bde(?![a-z])|redox|e\s*1/2|e_?ox|e_?red|barrier|activation|strain",
+    re.IGNORECASE,
+)
+_PROSE_WORD_RE = re.compile(r"\b(?:the|of|to|and|is|are|was|were|that|which|with|for|in|by|this|these)\b", re.IGNORECASE)
+
+
+def _is_et_header(header: str, table_ctx: str) -> bool:
+    """True when a column header denotes a triplet energy.
+
+    A header naming the triplet state is enough. A header carrying only an energy unit counts only
+    when the table caption or header row is about triplet energies, and never when it names another
+    quantity (singlet energy, redox potential, free energy, ...).
+    """
+    if _NON_ENERGY_COL_RE.search(header):
+        return False
+    has_cue = bool(_ET_HEADER_CUE_RE.search(header))
+    if _OTHER_ENERGY_HEADER_RE.search(header) and not re.search(r"triplet", header, re.IGNORECASE):
+        return False
+    if has_cue:
+        return True
+    return _detect_header_unit(header) in ("kcal", "kj", "ev", "cm") and bool(_TRIPLET_CONTEXT_RE.search(table_ctx))
+
+
+def _looks_like_prose(cell: str) -> bool:
+    words = cell.split()
+    return len(words) >= 5 and len(_PROSE_WORD_RE.findall(cell)) >= 2
+
+
+def _clean_molecule_name(raw: str, resolver: Resolver) -> str:
+    """Drop a citation number glued to a known name ("riboflavin83" -> "riboflavin")."""
+    m = re.match(r"^(.*[a-z]{4,})(\d{1,3})$", raw)
+    if not m:
+        return raw
+    known = resolver._by_name
+    if normalize_name_key(raw) in known:
+        return raw
+    return m.group(1) if normalize_name_key(m.group(1)) in known else raw
 
 
 _HEADER_CONT_RE = re.compile(
@@ -646,14 +745,13 @@ def _extract_from_tables(
                     ref_col = ci
                 elif any(k in hl for k in ("uv", "λmax", "lambda", "abs")) and uv_col is None:
                     uv_col = ci
-                elif not _NON_ENERGY_COL_RE.search(hl) and (
-                    re.search(r"\b(?:e_?t\d*|t_?1|Δe|de)\b", hl) or any(k in hl for k in ("triplet", "kcal", "kj", "ev"))
-                ):
+                elif _is_et_header(h, f"{cap_match.group(1) if cap_match else ''} {' '.join(header)}"):
                     origin_hint = "calc" if any(k in hl for k in ("calc", "comp", "dft")) else ("exp" if any(k in hl for k in ("exp", "meas", "obs")) else None)
                     et_cols.append((ci, _detect_header_unit(h), origin_hint))
 
             if not et_cols:
                 continue
+            name_col_guessed = name_col is None
             if name_col is None:
                 name_col = 0
 
@@ -663,6 +761,23 @@ def _extract_from_tables(
                 raw_name = re.sub(r"\s*[*†‡§]+$", "", row[name_col].strip()).strip()
                 if not raw_name or raw_name.lower() in ("entry", "compound", "substance", "sensitizer", "name", "-", "—"):
                     continue
+                # Layout tables often swallow body text: a "name" that reads as a sentence is not a row.
+                if _looks_like_prose(raw_name):
+                    continue
+                # With no name column in the header, a bare number in column 0 is a value, not a label.
+                if name_col_guessed and re.fullmatch(r"[\d.,\s±]+", raw_name):
+                    continue
+                raw_name = _clean_molecule_name(raw_name, resolver)
+                name_warnings: list[str] = []
+                if re.search(r"[-,(]$", raw_name):
+                    name_warnings.append("Name looks truncated (cell wrapped across lines); check the table.")
+                # "Pyrene (48.2)": the energy is printed next to the name, the numeric column is something else.
+                inline_val = re.search(r"\((\d{2,3}(?:\.\d+)?)\)\s*$", raw_name)
+                if inline_val:
+                    name_warnings.append(
+                        f"Name cell carries a value in parentheses ({inline_val.group(1)}); "
+                        "check which number is the triplet energy."
+                    )
 
                 row_text = " | ".join(row)
                 cas_inline = row[cas_col].strip() if (cas_col is not None and cas_col < len(row)) else None
@@ -680,9 +795,9 @@ def _extract_from_tables(
                     vm = _TABLE_VAL_RE.match(cell)
                     if not vm:
                         continue
-                    val = scoring.num(vm.group(1))
-                    unc = scoring.num(vm.group(2)) if vm.group(2) else None
                     unit = _normalize_unit(vm.group(3) or vm.group(4) or unit_hint)
+                    val = _num(vm.group(1), unit)
+                    unc = _num(vm.group(2), unit) if vm.group(2) else None
                     et_kcal, unc_kcal, rep = _convert_energy(val, None if unc is None or unc != unc else unc, unit)
                     if et_kcal is None or not (10.0 <= et_kcal <= scoring.ET_MAX):
                         continue
@@ -753,9 +868,9 @@ def _extract_from_tables(
                             ),
                             cls=default_cls or res.cls_hint,
                             role=res.role_hint or default_role,
-                            unit="kcal" if unit == "nm" else unit,
-                            raw_et=val,
-                            raw_unc=None if unc is None or unc != unc else unc,
+                            unit=_scoring_unit(unit),
+                            raw_et=val if unit in ("kcal", "kj", "ev") else et_kcal,
+                            raw_unc=(None if unc is None or unc != unc else unc) if unit in ("kcal", "kj", "ev") else unc_kcal,
                             tech=None if origin == "calc" else (None if method == "Not stated" else method),
                             solvent=None if origin == "calc" else f_or_solv,
                             temp=None if origin == "calc" else b_or_temp,
@@ -763,7 +878,7 @@ def _extract_from_tables(
                             basis=b_or_temp if origin == "calc" else None,
                             solv=solv_model if origin == "calc" else None,
                             resolution_source=res.source,
-                            warnings=list(res.warnings),
+                            warnings=[*res.warnings, *name_warnings],
                             pdf_file=doc.path.name,
                             page_num=page.page_num,
                         )
@@ -789,6 +904,33 @@ _AND_PAIR_UNIT_RE = re.compile(
     rf"(\d+(?:[.,]\d+)?)\s+and\s+(\d+(?:[.,]\d+)?)\s*{_UNIT_PATTERN}\b",
     re.IGNORECASE,
 )
+
+
+_CLAUSE_SPLIT_RE = re.compile(r"[;,]|\b(?:whereas|while|but|and)\b", re.IGNORECASE)
+_SINGLET_CUE_RE = re.compile(
+    r"\bsinglet\b|\bfluorescence\b|(?<![A-Za-z])S_?\s*1(?![0-9])|(?<![A-Za-z])E_?\s*S(?![A-Za-z])|"
+    r"\bS0\s*(?:→|->)\s*S1\b",
+    re.IGNORECASE,
+)
+_TRIPLET_CUE_RE = re.compile(
+    r"\btriplet\b|\bphosphorescence\b|(?<![A-Za-z])T_?\s*1(?![0-9])|(?<![A-Za-z])E_?\s*T(?![A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _clause_around(sent: str, start: int, end: int) -> str:
+    """The comma/conjunction-delimited clause that contains sent[start:end]."""
+    left = 0
+    for m in _CLAUSE_SPLIT_RE.finditer(sent, 0, start):
+        left = m.end()
+    m_right = _CLAUSE_SPLIT_RE.search(sent, end)
+    return sent[left : m_right.start() if m_right else len(sent)]
+
+
+def _is_singlet_value(sent: str, start: int, end: int) -> bool:
+    """True when the value sits in a clause about the singlet state and not the triplet."""
+    clause = _clause_around(sent, start, end)
+    return bool(_SINGLET_CUE_RE.search(clause)) and not _TRIPLET_CUE_RE.search(clause)
 
 
 def _find_molecule_spans_in_sentence(sentence: str, resolver: Resolver) -> tuple[list[tuple[int, int, str]], str | None]:
@@ -858,10 +1000,10 @@ def _extract_energy_matches_in_sentence(sent: str) -> list[tuple[int, int, float
                 if val == val:
                     matches.append((m.start(1), m.end(), val, None, "nm", m.group(0)))
             else:
-                val = scoring.num(m.group(1))
-                unc = scoring.num(m.group(2)) if m.group(2) else None
                 unit = _normalize_unit(m.group(3))
-                if val == val:
+                val = _num(m.group(1), unit)
+                unc = _num(m.group(2), unit) if m.group(2) else None
+                if val == val and not _is_singlet_value(sent, m.start(1), m.end()):
                     matches.append((m.start(1), m.end(), val, None if unc is None or unc != unc else unc, unit, m.group(0)))
         if matches:
             break
@@ -876,8 +1018,10 @@ def _extract_energy_matches_in_sentence(sent: str) -> list[tuple[int, int, float
             prefix = sent[max(0, m.start() - 45) : m.start()]
             if _RANGE_OR_NEG_PREFIX_RE.search(prefix):
                 continue
-            v1, v2 = scoring.num(m.group(1)), scoring.num(m.group(2))
             unit = _normalize_unit(m.group(3))
+            v1, v2 = _num(m.group(1), unit), _num(m.group(2), unit)
+            if _is_singlet_value(sent, m.start(), m.end()):
+                continue
             if v1 == v1 and v2 == v2:
                 matches = [x for x in matches if (x[1] <= m.start() or x[0] >= m.end())]
                 matches.append((m.start(1), m.end(1), v1, None, unit, m.group(0)))
@@ -892,9 +1036,11 @@ def _extract_energy_matches_in_sentence(sent: str) -> list[tuple[int, int, float
             prefix = sent[max(0, m.start() - 45) : m.start()]
             if _RANGE_OR_NEG_PREFIX_RE.search(prefix):
                 continue
-            val = scoring.num(m.group(1))
-            unc = scoring.num(m.group(2)) if m.group(2) else None
             unit = _normalize_unit(m.group(3))
+            val = _num(m.group(1), unit)
+            unc = _num(m.group(2), unit) if m.group(2) else None
+            if _is_singlet_value(sent, m.start(), m.end()):
+                continue
             if val == val:
                 matches.append((m.start(), m.end(), val, None if unc is None or unc != unc else unc, unit, m.group(0)))
 
@@ -1003,6 +1149,7 @@ def _extract_from_prose(
                     et_kcal, unc_kcal, rep = _convert_energy(val, unc, unit)
                     if et_kcal is None or not (10.0 <= et_kcal <= scoring.ET_MAX):
                         continue
+                    mol_name = _clean_molecule_name(mol_name, resolver)
                     if mol_name not in resolved_cache:
                         resolved_cache[mol_name] = (
                             resolver.resolve_molecule(mol_name, cas=cas_inline)
@@ -1041,9 +1188,9 @@ def _extract_from_prose(
                             ),
                             cls=default_cls or res.cls_hint,
                             role=res.role_hint or default_role,
-                            unit="kcal" if unit == "nm" else unit,
-                            raw_et=val,
-                            raw_unc=unc,
+                            unit=_scoring_unit(unit),
+                            raw_et=val if unit in ("kcal", "kj", "ev") else et_kcal,
+                            raw_unc=unc if unit in ("kcal", "kj", "ev") else unc_kcal,
                             tech=None if origin == "calc" else (None if method == "Not stated" else method),
                             solvent=None if origin == "calc" else f_or_solv,
                             temp=None if origin == "calc" else b_or_temp,
@@ -1074,6 +1221,7 @@ def extract_from_document(
     si_cache_dir: str | Path | None = ".cache/trendb_si",
 ) -> list[ExtractedCandidate]:
     """Extract candidate TrEnDB entries from an already-parsed PdfDocument."""
+    normalize_document(doc)
     doi = scoring.clean_doi(doi_override) if doi_override else detect_doi(doc)
     if doi and not scoring.is_doi(doi):
         doi = None
@@ -1178,14 +1326,22 @@ def extract_pdf(
     fetch_si: bool = True,
     si_paths: Sequence[str | Path] | None = None,
     si_cache_dir: str | Path | None = ".cache/trendb_si",
+    strict: bool = False,
 ) -> list[ExtractedCandidate]:
-    """Extract candidate TrEnDB entries from a single PDF without an LLM."""
+    """Extract candidate TrEnDB entries from a single PDF without an LLM.
+
+    With ``strict`` a PDF that yields no usable text raises PdfReadError instead of returning nothing.
+    """
     from .ocsr import decimer_available, run_ocsr_on_pdf
     from .pdf_markdown import pdf_to_markdown
 
     p_path = Path(pdf_path)
     md_out = Path(save_markdown_dir) / f"{p_path.stem}.md" if save_markdown_dir else None
     doc, _md, _md_pages = pdf_to_markdown(p_path, enable_ocr=enable_ocr, save_path=md_out)
+    if strict and sum(len(re.sub(r"\s+", "", pg.text)) for pg in doc.pages) < 200:
+        raise PdfReadError(
+            f"{p_path.name}: no extractable text (scanned PDF and OCR unavailable, or empty document)"
+        )
 
     combined = extract_from_document(
         doc,

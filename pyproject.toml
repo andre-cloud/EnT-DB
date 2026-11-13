@@ -21,6 +21,7 @@ all = ["rdkit", "pandas>=2.0", "pymupdf>=1.24", "pdfplumber>=0.11"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
+trendb = "trendb.cli:main_ingest"
 trendb-scrape = "trendb.cli:main_scrape"
 trendb-extract = "trendb.cli:main_extract"
 trendb-stats = "trendb.cli:main_stats"

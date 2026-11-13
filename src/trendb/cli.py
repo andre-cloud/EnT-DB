@@ -10,6 +10,8 @@ from typing import Any, Sequence
 
 from .batch import build_batch, build_batch_from_review
 from .client import TrEnDBClient
+from .config import find_repo_root
+from .grouping import SI_EXTS, group_inputs, si_base_stem
 from .ocsr import decimer_available, predict_smiles_decimer, run_ocsr_on_pdf
 from .pdf_extract import extract_markdown, extract_pdf
 from .pdf_markdown import pdf_to_markdown
@@ -24,14 +26,9 @@ def _expand_inputs(inputs: list[str], *, allow_markdown: bool = False) -> list[P
             pdfs = sorted(p.glob("*.pdf"))
             if pdfs or not allow_markdown:
                 stems = {x.stem.lower() for x in pdfs}
-                filtered = [
-                    x
-                    for x in pdfs
-                    if not any(
-                        x.stem.lower().endswith(suf) and x.stem.lower()[: -len(suf)] in stems
-                        for suf in ("_si", "-si", "_supp", "-supp", "_supporting", "-supporting", "_esi", "-esi")
-                    )
-                ]
+                # A file named after another paper in the folder (paper_si.pdf, paper-SI_001.pdf) is that
+                # paper's Supporting Information and is picked up with it, not as a paper of its own.
+                filtered = [x for x in pdfs if si_base_stem(x.stem) not in stems]
                 found.extend(filtered)
             else:
                 found.extend(sorted(p.glob("*.md")))
@@ -235,6 +232,115 @@ def main_extract(argv: Sequence[str] | None = None) -> int:
     if res.report_path:
         print(f"Report: {res.report_path}")
     return 0
+
+
+def _collect_files(inputs: Sequence[str]) -> list[Path]:
+    """Every paper/SI file under the given folders (recursive, any letter case) or given directly."""
+    found: list[Path] = []
+    for item in inputs:
+        p = Path(item).expanduser()
+        if p.is_dir():
+            for f in sorted(p.rglob("*")):
+                rel_parts = f.relative_to(p).parts
+                if f.is_file() and f.suffix.lower() in SI_EXTS and not any(part.startswith(".") for part in rel_parts):
+                    found.append(f)
+        elif p.is_file():
+            found.append(p)
+    return found
+
+
+def main_ingest(argv: Sequence[str] | None = None) -> int:
+    """`trendb <folder>`: extract every paper in a folder and write the next batch, with no other input."""
+    parser = argparse.ArgumentParser(
+        prog="trendb",
+        description=(
+            "Read every PDF in a folder (papers and their Supporting Information, matched automatically), "
+            "extract triplet energies and write the next docs/batches/batch-NNN.json."
+        ),
+    )
+    parser.add_argument("paths", nargs="+", help="Folder(s) with the PDFs, or individual files.")
+    parser.add_argument("--offline", action="store_true", help="No network: skip OPSIN/PubChem/Crossref and SI download.")
+    parser.add_argument("--dry-run", action="store_true", help="Write only the preview in extracted/, not docs/batches.")
+    args = parser.parse_args(argv)
+
+    root = find_repo_root()
+    if root is None:
+        print("TrEnDB repository not found (docs/assets/config.js). Run from inside the repository.", file=sys.stderr)
+        return 2
+    batches_dir = root / "docs" / "batches"
+    out_dir = root / "extracted"
+    cache_dir = root / ".cache"
+
+    files = _collect_files(args.paths)
+    if not any(f.suffix.lower() == ".pdf" for f in files):
+        print("No PDF files found in: " + ", ".join(args.paths), file=sys.stderr)
+        return 2
+    groups, unmatched = group_inputs(files)
+
+    notes: list[str] = []
+    for g in groups:
+        if g.main_is_si:
+            notes.append(f"`{g.main.name}` looks like Supporting Information but no paper matches it; processed on its own.")
+        elif g.si:
+            notes.append(f"`{g.main.name}` + SI {', '.join(f'`{s.name}`' for s in g.si)} (matched by {g.how}).")
+    for u in unmatched:
+        notes.append(f"`{u.name}` was not attached to any paper and was ignored.")
+
+    failures: list[dict[str, str]] = []
+    all_candidates = []
+    n_ok = 0
+    with Resolver(
+        cache_path=cache_dir / "trendb_resolvers.sqlite", batches_dir=batches_dir, offline=args.offline
+    ) as resolver:
+        for i, g in enumerate(groups, start=1):
+            extra = f" + {len(g.si)} SI" if g.si else ""
+            print(f"[{i}/{len(groups)}] {g.main.name}{extra}", flush=True)
+            try:
+                cands = extract_pdf(
+                    g.main,
+                    resolver=resolver,
+                    si_paths=g.si or None,
+                    si_cache_dir=cache_dir / "trendb_si",
+                    strict=True,
+                )
+            except Exception as exc:  # one unreadable file must not stop the folder
+                failures.append({"file": g.main.name, "error": f"{type(exc).__name__}: {exc}"})
+                print(f"    failed: {exc}", file=sys.stderr)
+                continue
+            if g.main_is_si:
+                for c in cands:
+                    if not c.location.startswith("SI"):
+                        c.location = f"SI ({g.main.name}), {c.location}"[:200]
+            n_ok += 1
+            print(f"    {len(cands)} candidate value(s)")
+            all_candidates.extend(cands)
+
+        try:
+            res = build_batch(
+                all_candidates,
+                resolver=resolver,
+                batches_dir=batches_dir,
+                write_batch=not args.dry_run,
+                out_dir=out_dir,
+                failures=failures,
+                notes=notes,
+            )
+        except ValueError as exc:
+            print(f"Batch not written: {exc}", file=sys.stderr)
+            return 1
+
+    print(
+        f"\nPapers read: {n_ok}/{len(groups)} | Ready: {len(res.ready_rows)} | Needs review: {len(res.review_items)} | "
+        f"Duplicates skipped: {len(res.skipped_duplicates)} | Failed: {len(failures)}"
+    )
+    if res.batch_path and res.ready_rows:
+        print(f"Batch:  {res.batch_path}")
+    elif not args.dry_run:
+        print("Batch:  none written (no new ready entries)")
+    if res.review_items and res.review_path:
+        print(f"Review: {res.review_path}")
+    print(f"Report: {res.report_path}")
+    return 0 if n_ok else 1
 
 
 def main_scrape(argv: Sequence[str] | None = None) -> int:

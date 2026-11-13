@@ -89,6 +89,8 @@
     });
   }
 
+  function myEmail() { return (api.sessionEmail ? api.sessionEmail() : "").trim().toLowerCase(); }
+
   /* ---------- Triage pills & suggestion filtering ---------- */
   function enrichIssueDocIds() {
     var map = {};
@@ -96,6 +98,8 @@
     return map;
   }
   var TRIAGE_PRED = {
+    need2: function (d) { var ap = Ent.approvalState(d, myEmail()); return d.status === "pending" && ap.count === 1 && !ap.byMe; },
+    wait2: function (d) { var ap = Ent.approvalState(d, myEmail()); return d.status === "pending" && ap.byMe; },
     dup: function (d) { var x = dupOf(d); return !!(x && x.flag); },
     unchecked: function (d) { return !d.smiles_checked; },
     nocas: function (d) { return !d.cas; },
@@ -105,7 +109,7 @@
     enrich: function (d) { return !!enrichIssueDocIds()[d.id]; }
   };
   function updateTriageBar(inView) {
-    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0, enrich: 0 };
+    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, need2: 0, wait2: 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0, enrich: 0 };
     inView.forEach(function (d) {
       Object.keys(TRIAGE_PRED).forEach(function (k) { if (TRIAGE_PRED[k](d)) counts[k]++; });
     });
@@ -223,6 +227,7 @@
     rel.textContent = state.refreshing ? "Refreshing…" : "Refresh";
     $("last-sync").textContent = state.lastSync ? ("Synced " + state.lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) : "";
     $("up-pick").disabled = !state.loaded;
+    if ($("pdf-pick")) $("pdf-pick").disabled = !state.loaded || pdfBusy;
     if (!state.loaded) { status.hidden = false; status.textContent = state.loadErr || "Loading…"; list.replaceChildren(); drawBulk([]); return; }
 
     var inView = state.docs.filter(function (d) { return d.status === state.view; });
@@ -256,9 +261,9 @@
         scores: res.scores, simMode: state.search.ss.mode === "sim", dup: dupOf(d),
         clusterTag: clusterTags[d.id] || "",
         admin: {
-          busy: state.busy, drafts: state.drafts, activeId: state.activeId,
+          email: myEmail(), busy: state.busy, drafts: state.drafts, activeId: state.activeId,
           onFocusCard: function (id) { setFocusCard(id, false); },
-          onPatch: onPatch, approve: approve, reject: reject,
+          onPatch: onPatch, approve: approve, reject: reject, revoke: revoke,
           selected: state.selected, onSelect: onSelect, onDelete: confirmDelete
         }
       });
@@ -267,7 +272,7 @@
     if (shownSugg.length) {
       var cards = shownSugg.map(function (sg) {
         return Ent.suggestionCard(sg, byId[sg.entry_id] || null, {
-          busy: state.busy, approve: approveSuggestion, reject: rejectSuggestion, edit: editSuggestion
+          email: myEmail(), busy: state.busy, approve: approveSuggestion, revoke: revokeSuggestion, reject: rejectSuggestion, edit: editSuggestion
         });
       });
       list.prepend.apply(list, cards);
@@ -354,15 +359,80 @@
     return tbl;
   }
 
-  function approve(d, note) {
-    var dup = dupOf(d), now = new Date().toISOString();
-    var prev = { status: d.status, decided_at: d.decided_at || null, note: d.note || null };
-    if (!dup || !dup.dbSame.length) {
-      return onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok) {
-        if (ok && prev.status === "pending") {
-          toast("Approved “" + Ent.displayName(d) + "”", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
+  function runApproveSingle(d, note) {
+    state.busy[d.id] = true; render();
+    return api.adminApprove(d.id, note).then(function (rows) {
+      delete state.busy[d.id];
+      if (rows && rows[0]) applyUpdatedRows(rows);
+      else state.busy[d.id] = "err";
+      render(); drawCas(); drawComm(); drawSmiSync(); drawNames(); drawEnrichIssues();
+      return (rows && rows[0]) || null;
+    }, function (err) {
+      if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return null; }
+      state.busy[d.id] = "err"; render(); return null;
+    });
+  }
+
+  function revoke(d, note) {
+    var prevNote = d.note || null;
+    state.busy[d.id] = true; render();
+    return api.adminRevokeApproval(d.id, note === undefined ? prevNote : note).then(function (rows) {
+      delete state.busy[d.id];
+      var updated = rows && rows[0];
+      if (updated) {
+        applyUpdatedRows(rows);
+        if (d.status === "approved" && updated.status === "pending") {
+          toast("Removed your verification; “" + Ent.displayName(d) + "” moved back to queue (1/2)");
+        } else {
+          toast("Withdrew your verification for “" + Ent.displayName(d) + "”");
         }
-        return ok;
+      } else {
+        state.busy[d.id] = "err";
+      }
+      render(); drawCas(); drawComm(); drawSmiSync(); drawNames(); drawEnrichIssues();
+      return !!updated;
+    }, function (err) {
+      if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
+      state.busy[d.id] = "err"; render(); return false;
+    });
+  }
+
+  function approve(d, note) {
+    var ap = Ent.approvalState(d, myEmail());
+    if (d.status === "pending" && ap.byMe) {
+      toast("You already verified “" + Ent.displayName(d) + "”. A second curator must approve it.");
+      return Promise.resolve(false);
+    }
+    var willFinalize = d.status === "pending" && ap.byOthers.length >= 1;
+    var prev = { status: d.status, decided_at: d.decided_at || null, note: d.note || null };
+    if (!willFinalize) {
+      return runApproveSingle(d, note).then(function (updated) {
+        if (!updated) return false;
+        if (prev.status === "rejected") {
+          toast("Moved “" + Ent.displayName(d) + "” back to queue with your verification (1/2)", {
+            actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); }
+          });
+        } else {
+          toast("Verified “" + Ent.displayName(d) + "” (1/2) — awaiting a second curator", {
+            actionLabel: "Undo", onAction: function () { return revoke(d, prev.note); }
+          });
+        }
+        return true;
+      });
+    }
+
+    var dup = dupOf(d), now = new Date().toISOString();
+    if (!dup || !dup.dbSame.length) {
+      return runApproveSingle(d, note).then(function (updated) {
+        if (!updated) return false;
+        if (updated.status === "approved") {
+          toast("Approved “" + Ent.displayName(d) + "” (2/2)", {
+            actionLabel: "Undo", onAction: function () { return revoke(d, prev.note); }
+          });
+        } else {
+          toast("Verified “" + Ent.displayName(d) + "” (1/2) — awaiting a second curator");
+        }
+        return true;
       });
     }
     return new Promise(function (resolve) {
@@ -390,23 +460,42 @@
         cancel.addEventListener("click", function () { Ent.closeDialog(); resolve(false); });
         keep.addEventListener("click", function () {
           Ent.closeDialog();
-          onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok) {
-            if (ok && prev.status === "pending") toast("Approved (kept both)", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev); } });
-            resolve(ok);
+          runApproveSingle(d, note).then(function (updated) {
+            if (updated && updated.status === "approved") {
+              toast("Approved (2/2, kept both)", { actionLabel: "Undo", onAction: function () { return revoke(d, prev.note); } });
+            }
+            resolve(!!updated);
           });
         });
         ow.addEventListener("click", function () {
           var pick = box.querySelector('input[name="dup-target"]:checked'); if (!pick) return;
           var old = state.docs.filter(function (x) { return x.id === pick.value; })[0];
-          var oldPrev = { id: old.id, patch: { status: old.status, decided_at: old.decided_at || null, note: old.note || null } };
           ow.disabled = keep.disabled = true;
           onPatch(old.id, { status: "rejected", decided_at: now, note: "Overwritten by “" + (d.name || "") + "” (" + now.slice(0, 10) + ")" + (old.note ? ". " + old.note : "") })
             .then(function (ok) {
               if (!ok) { ow.disabled = keep.disabled = false; err.textContent = "The existing entry could not be removed. Nothing was changed."; err.hidden = false; return; }
               Ent.closeDialog();
-              onPatch(d.id, { status: "approved", decided_at: now, note: note }).then(function (ok2) {
-                if (ok2) toast("Approved & overwrote duplicate", { actionLabel: "Undo", onAction: function () { return undoEntry(d.id, prev, oldPrev); } });
-                resolve(ok2);
+              runApproveSingle(d, note).then(function (updated) {
+                if (updated && updated.status === "approved") {
+                  toast("Approved (2/2) & overwrote duplicate", {
+                    actionLabel: "Undo",
+                    onAction: function () {
+                      return Promise.all([
+                        api.adminRevokeApproval(d.id, prev.note),
+                        api.adminApprove(old.id, old.note || null)
+                      ]).then(function (res) {
+                        var r1 = res[0] && res[0][0], r2 = res[1] && res[1][0];
+                        if (r1) applyUpdatedRows([r1]);
+                        if (r2) applyUpdatedRows([r2]);
+                        render();
+                        toast("Reverted approval; overwritten entry moved to queue (1/2) for re-verification.");
+                      }, function () {
+                        toast("Could not undo completely; refresh to verify status.");
+                      });
+                    }
+                  });
+                }
+                resolve(!!updated);
               });
             });
         });
@@ -415,8 +504,7 @@
   }
 
   /* ---------- corrections from readers ---------- */
-  function approveSuggestion(sg, note) {
-    var entry = state.docs.filter(function (d) { return d.id === sg.entry_id; })[0]; if (!entry) return;
+  function suggestionPatchForEntry(sg, entry) {
     var patch = {}, ch = sg.changes || {};
     Object.keys(ch).forEach(function (k) {
       if (k === "uses_add") patch.uses = (Array.isArray(entry.uses) ? entry.uses : []).concat([ch[k]]);
@@ -427,38 +515,121 @@
       patch.score_items = entry.score_items.filter(function (i) { return !i.edited; })
         .concat([{ label: "Edited by a curator", got: 0, max: 0, edited: true, note: Object.keys(ch).join(", ") + " from a reader's correction on " + new Date().toLocaleDateString("en-CA") }]);
     }
+    return patch;
+  }
+
+  function replaceSuggestionRow(row) {
+    state.sugg = state.sugg.map(function (x) { return x.id === row.id ? row : x; });
+  }
+
+  function approveSuggestion(sg, note) {
+    var entry = state.docs.filter(function (d) { return d.id === sg.entry_id; })[0]; if (!entry) return;
+    var ap = Ent.approvalState(sg, myEmail());
+    if (ap.byMe) {
+      toast("You already verified this correction; a second curator must approve it.");
+      return;
+    }
     state.busy[sg.id] = true; render();
-    var apply = Object.keys(patch).length ? api.adminPatch(entry.id, patch) : Promise.resolve([entry]);
-    apply.then(function (rows) {
-      if (!rows || !rows[0]) throw new Error("not saved");
-      state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
-      return api.adminPatchSuggestion(sg.id, { status: "approved", decided_at: new Date().toISOString(), note: note || null });
-    }).then(function () {
-      delete state.busy[sg.id]; state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; }); render();
-      toast("Applied correction to “" + (entry.name || "entry") + "”");
+    api.adminApproveSuggestion(sg.id, note).then(function (sRows) {
+      var updatedSg = sRows && sRows[0];
+      if (!updatedSg) throw new Error("not saved");
+      if (updatedSg.status !== "approved") {
+        delete state.busy[sg.id];
+        replaceSuggestionRow(updatedSg);
+        render();
+        toast("Verified correction (1/2) — awaiting a second curator");
+        return;
+      }
+      var patch = suggestionPatchForEntry(updatedSg, entry);
+      var apply = Object.keys(patch).length ? api.adminPatch(entry.id, patch) : Promise.resolve([entry]);
+      return apply.then(function (rows) {
+        if (!rows || !rows[0]) throw new Error("not saved");
+        state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
+        delete state.busy[sg.id];
+        state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; });
+        render();
+        toast("Approved (2/2) & applied correction to “" + (entry.name || "entry") + "”");
+      }, function (err) {
+        return api.adminRevokeSuggestionApproval(sg.id, sg.note || null).catch(function () { return null; }).then(function (revRows) {
+          if (revRows && revRows[0]) replaceSuggestionRow(revRows[0]);
+          throw err;
+        });
+      });
+    }).catch(function (err) {
+      if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+      state.busy[sg.id] = "err"; render();
+    });
+  }
+
+  function revokeSuggestion(sg, note) {
+    state.busy[sg.id] = true; render();
+    api.adminRevokeSuggestionApproval(sg.id, note === undefined ? (sg.note || null) : note).then(function (rows) {
+      delete state.busy[sg.id];
+      if (rows && rows[0]) {
+        replaceSuggestionRow(rows[0]);
+        toast("Withdrew your verification for this correction");
+      } else {
+        state.busy[sg.id] = "err";
+      }
+      render();
     }, function (err) {
       if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
       state.busy[sg.id] = "err"; render();
     });
   }
 
+  function buildSuggestionChanges(sg, entry, patch) {
+    var next = {};
+    Object.keys(patch || {}).forEach(function (k) {
+      if (k === "score_items" || k === "idcode" || k === "smiles_checked") return;
+      next[k] = patch[k];
+    });
+    var orig = sg.changes || {};
+    if (orig.uses_add && Array.isArray(next.uses)) {
+      var expectedUses = (Array.isArray(entry.uses) ? entry.uses : []).concat([orig.uses_add]);
+      if (JSON.stringify(next.uses) === JSON.stringify(expectedUses)) {
+        delete next.uses;
+        next.uses_add = orig.uses_add;
+      }
+    }
+    return next;
+  }
+
+  function samePlainObject(a, b) {
+    var ka = Object.keys(a || {}).sort(), kb = Object.keys(b || {}).sort();
+    if (ka.length !== kb.length) return false;
+    return ka.every(function (k, i) { return k === kb[i] && JSON.stringify(a[k]) === JSON.stringify(b[k]); });
+  }
+
   function editSuggestion(sg, entry, note) {
+    var ap = Ent.approvalState(sg, myEmail());
+    var bannerText = ap.count >= 1
+      ? "Saving modified values resets prior verifications to 1/2 (verified by you). If you leave the proposed changes unchanged, your verification will be recorded directly."
+      : "Saving changes updates the proposed correction and records your 1/2 verification; a second curator must confirm before it is applied.";
     Ent.editor.open(entry, function (patch) {
-      return api.adminPatch(entry.id, patch).then(function (rows) {
+      var newChanges = buildSuggestionChanges(sg, entry, patch);
+      if (!Object.keys(newChanges).length) {
+        toast("No changes remain relative to the current entry. Reject the correction instead.");
+        return false;
+      }
+      if (samePlainObject(newChanges, sg.changes || {})) {
+        approveSuggestion(sg, note);
+        return true;
+      }
+      return api.adminPatchSuggestion(sg.id, { changes: newChanges, note: note || null }).then(function (rows) {
         if (!rows || !rows[0]) return false;
-        state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
-        return api.adminPatchSuggestion(sg.id, { status: "approved", decided_at: new Date().toISOString(), note: note || null })
-          .then(function () {
-            state.sugg = state.sugg.filter(function (x) { return x.id !== sg.id; });
-            render();
-            toast("Saved edits & approved correction");
-            return true;
-          }, function () { render(); return false; });
+        return api.adminApproveSuggestion(sg.id, note || null).then(function (sRows) {
+          if (sRows && sRows[0]) replaceSuggestionRow(sRows[0]);
+          else replaceSuggestionRow(rows[0]);
+          render();
+          toast("Saved edited correction (1/2) — awaiting a second curator");
+          return true;
+        });
       }, function (err) {
         if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
         return false;
       });
-    }, { title: "Review suggestion · " + (entry.name || ""), saveLabel: "Save & approve suggestion", overrides: sg.changes || {} });
+    }, { title: "Edit & verify correction · " + (entry.name || ""), saveLabel: "Save & verify correction", banner: bannerText, overrides: sg.changes || {} });
   }
 
   function rejectSuggestion(sg, note) {
@@ -488,10 +659,14 @@
   }
   function drawBulk(rows) { listed = rows || []; drawSel(); }
   function drawSel() {
-    var sel = selectedDocs(), n = sel.length, v = state.view;
+    var sel = selectedDocs(), n = sel.length, v = state.view, me = myEmail();
     var shownLimit = state.search.pager.shown || 50;
     var dupSkip = v === "pending" ? sel.filter(function (d) { var x = dupOf(d); return x && x.flag; }).length : 0;
-    $("sel-n").textContent = n + " selected" + (dupSkip ? " (" + dupSkip + " duplicate" + (dupSkip === 1 ? "" : "s") + ")" : "");
+    var mineSkip = v === "pending" ? sel.filter(function (d) { return Ent.approvalState(d, me).byMe; }).length : 0;
+    var notes = [];
+    if (dupSkip) notes.push(dupSkip + " duplicate" + (dupSkip === 1 ? "" : "s"));
+    if (mineSkip) notes.push(mineSkip + " already verified by you");
+    $("sel-n").textContent = n + " selected" + (notes.length ? " (" + notes.join(", ") + ")" : "");
     var splitVisible = listed.length > shownLimit;
     $("sel-visible").hidden = !splitVisible;
     if (splitVisible) $("sel-visible").textContent = "Select " + shownLimit + " visible";
@@ -499,7 +674,22 @@
     $("sel-all").textContent = "Select all " + listed.length + " listed";
     $("sel-none").hidden = !n;
     if ($("sel-slide")) $("sel-slide").hidden = !n || !Ent.slideGraphic;
-    $("sel-approve").hidden = !n || v === "approved";
+    var approveBtn = $("sel-approve");
+    approveBtn.hidden = !n || v === "approved";
+    if (!approveBtn.hidden) {
+      if (v === "rejected") approveBtn.textContent = "Verify selected (1/2)";
+      else {
+        var actionable = sel.filter(function (d) {
+          var x = dupOf(d);
+          return !(x && x.flag) && !Ent.approvalState(d, me).byMe;
+        });
+        var n2 = actionable.filter(function (d) { return Ent.approvalState(d, me).byOthers.length >= 1; }).length;
+        var n1 = actionable.length - n2;
+        approveBtn.textContent = (n2 > 0 && n1 === 0) ? "Approve selected (2/2)"
+          : (n1 > 0 && n2 === 0) ? "Verify selected (1/2)"
+          : "Verify / Approve selected";
+      }
+    }
     $("sel-reject").hidden = !n || v === "rejected";
     $("sel-queue").hidden = !n || v === "pending";
     $("sel-delete").hidden = !n || v !== "rejected";
@@ -541,17 +731,76 @@
     });
   }
   $("sel-approve").addEventListener("click", function () {
-    var sel = selectedDocs();
-    /* the same value already in the database (yellow) must be resolved one by one */
-    var ok = sel.filter(function (d) { var x = dupOf(d); return !(x && x.flag); }), skipped = sel.length - ok.length;
-    if (!ok.length) { bulkError("All selected entries are possible duplicates: approve them one by one."); return; }
-    askThen("Approve " + ok.length + " entries?", "They become public at once." + (skipped ? " " + skipped + " possible duplicates (yellow) are left selected for one-by-one review." : ""),
-      "Approve " + ok.length, "primary", function () {
-        var now = new Date().toISOString();
-        runPatch(ok, { status: "approved", decided_at: now }, "approved").then(function () {
-          sel.filter(function (d) { return ok.indexOf(d) < 0; }).forEach(function (d) { state.selected[d.id] = true; }); render();
+    var sel = selectedDocs(), me = myEmail();
+    if (state.view === "rejected") {
+      askThen("Move " + sel.length + (sel.length === 1 ? " entry" : " entries") + " back to queue with 1/2 verification?",
+        "They will receive your 1st verification (1/2) and wait in the queue for a second curator.",
+        "Verify " + sel.length + " (1/2)", "primary", function () {
+          bulkError("");
+          var ids = sel.map(function (d) { return d.id; });
+          api.adminApproveMany(ids).then(function (rows) {
+            clearSel();
+            if (!rows || rows.length < ids.length) bulkError((ids.length - (rows ? rows.length : 0)) + " of " + ids.length + " entries could not be verified.");
+            else toast("Moved " + rows.length + (rows.length === 1 ? " entry" : " entries") + " to queue with your verification (1/2).");
+            return load({ silent: true });
+          }, function (err) {
+            if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+            bulkError("Not all entries could be verified. Refresh to see which ones went through.");
+            return load({ silent: true });
+          });
         });
+      return;
+    }
+    /* the same value already in the database (yellow) must be resolved one by one; entries already verified by me cannot be verified twice */
+    var dupSkipped = [], mineSkipped = [], ok = [];
+    sel.forEach(function (d) {
+      var x = dupOf(d);
+      if (x && x.flag) { dupSkipped.push(d); return; }
+      if (Ent.approvalState(d, me).byMe) { mineSkipped.push(d); return; }
+      ok.push(d);
+    });
+    if (!ok.length) {
+      var reasons = [];
+      if (dupSkipped.length) reasons.push("possible duplicates must be approved one by one");
+      if (mineSkipped.length) reasons.push("entries you already verified require a second curator");
+      bulkError("Nothing to verify here: " + reasons.join("; ") + ".");
+      return;
+    }
+    var willPublish = ok.filter(function (d) { return Ent.approvalState(d, me).byOthers.length >= 1; }).length;
+    var willStage1 = ok.length - willPublish;
+    var parts = [];
+    if (willPublish) parts.push(willPublish + (willPublish === 1 ? " entry already has 1 verification and will be approved and published immediately" : " entries already have 1 verification and will be approved and published immediately"));
+    if (willStage1) parts.push(willStage1 + (willStage1 === 1 ? " entry will receive your 1st verification (1/2) and wait for a second curator" : " entries will receive your 1st verification (1/2) and wait for a second curator"));
+    if (dupSkipped.length) parts.push(dupSkipped.length + " possible duplicate" + (dupSkipped.length === 1 ? "" : "s") + " (yellow) will stay selected for one-by-one review");
+    if (mineSkipped.length) parts.push(mineSkipped.length + " already verified by you will be skipped");
+    var title = willPublish && !willStage1 ? ("Approve " + willPublish + (willPublish === 1 ? " entry" : " entries") + " (2/2)?")
+      : (!willPublish ? ("Verify " + willStage1 + (willStage1 === 1 ? " entry" : " entries") + " (1/2)?") : ("Verify / Approve " + ok.length + " entries?"));
+    var btnLbl = willPublish && !willStage1 ? ("Approve " + ok.length + " (2/2)")
+      : (!willPublish ? ("Verify " + ok.length + " (1/2)") : ("Verify / Approve " + ok.length));
+    askThen(title, parts.join(". ") + ".", btnLbl, "primary", function () {
+      bulkError("");
+      var ids = ok.map(function (d) { return d.id; });
+      api.adminApproveMany(ids).then(function (rows) {
+        clearSel();
+        dupSkipped.forEach(function (d) { state.selected[d.id] = true; });
+        var updated = rows || [];
+        var pubN = updated.filter(function (r) { return r.status === "approved"; }).length;
+        var st1N = updated.length - pubN;
+        if (updated.length < ids.length) {
+          bulkError((ids.length - updated.length) + " of " + ids.length + " entries could not be verified.");
+        } else {
+          var tparts = [];
+          if (pubN) tparts.push("approved " + pubN + " (2/2)");
+          if (st1N) tparts.push("verified " + st1N + " (1/2)");
+          toast(tparts.join("; ") + ".");
+        }
+        return load({ silent: true });
+      }, function (err) {
+        if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+        bulkError("Not all entries could be verified. Refresh to see which ones went through.");
+        return load({ silent: true });
       });
+    });
   });
   $("sel-reject").addEventListener("click", function () {
     var sel = selectedDocs();
@@ -635,73 +884,169 @@
     });
   });
 
-  var uploadRows = [];
+  var uploadRows = [], uploadReport = null;
+  var ROLES = ["acceptor", "donor", "both"];
+  /* columns the database fills by itself: harmless in a re-uploaded export, but never imported */
+  var SERVER_KEYS = ["id", "decided_at", "updated_at"];
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function editDist(a, b) {
+    var prev = [], i, j;
+    for (j = 0; j <= b.length; j++) prev[j] = j;
+    for (i = 1; i <= a.length; i++) {
+      var cur = [i];
+      for (j = 1; j <= b.length; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+  function nearestKey(k) {
+    function norm(x) { return String(x).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+    var a = norm(k), best = null, bestD = 99;
+    UPLOAD_KEYS.forEach(function (u) {
+      var d = editDist(a, norm(u));
+      if (d < bestD) { bestD = d; best = u; }
+    });
+    return bestD <= (a.length <= 4 ? 1 : 2) ? best : null;
+  }
   function showUploadErrors(errs) {
     var box = $("up-err");
     box.replaceChildren();
     if (!errs || !errs.length) { box.hidden = true; return; }
     box.hidden = false;
     if (errs.length === 1) { box.textContent = errs[0]; return; }
-    box.appendChild(el("span", null, errs.length >= 10 ? "First 10 validation issues:" : errs.length + " validation issues:"));
     var ul = el("ul", "err-list");
-    errs.slice(0, 10).forEach(function (msg) { ul.appendChild(el("li", null, msg)); });
+    errs.forEach(function (msg) { ul.appendChild(el("li", null, msg)); });
     box.appendChild(ul);
   }
+  function rowList(rows) {
+    var shown = rows.slice(0, 8).join(", ");
+    return (rows.length === 1 ? "row " : "rows ") + shown + (rows.length > 8 ? " and " + (rows.length - 8) + " more" : "");
+  }
+  function discardedJson() {
+    /* the original entries plus _row/_errors, so the file can be fixed and dropped again as it is */
+    return uploadReport.rejected.map(function (x) {
+      var o = { _row: x.row, _errors: x.reasons };
+      if (x.entry && typeof x.entry === "object" && !Array.isArray(x.entry)) {
+        Object.keys(x.entry).forEach(function (k) { if (k.charAt(0) !== "_") o[k] = x.entry[k]; });
+      } else o._value = x.entry === undefined ? null : x.entry;
+      return o;
+    });
+  }
+  function downloadDiscarded() {
+    if (!uploadReport || !uploadReport.rejected.length) return;
+    var blob = new Blob([JSON.stringify(discardedJson(), null, 2) + "\n"], { type: "application/json" });
+    var a = document.createElement("a"), url = URL.createObjectURL(blob);
+    a.href = url; a.download = uploadReport.slug + ".discarded.json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function drawUploadReport() {
+    var box = $("up-report");
+    box.replaceChildren();
+    var rep = uploadReport;
+    if (!rep || (!rep.rejected.length && !rep.warnings.length)) { box.hidden = true; return; }
+    box.hidden = false;
+    if (rep.rejected.length) {
+      var sec = el("div", "up-sec bad");
+      var head = el("div", "tool-head");
+      head.appendChild(el("strong", null, plural(rep.rejected.length, "row", "rows") + " discarded"));
+      var dl = el("button", "btn small", "Download discarded (JSON)");
+      dl.type = "button"; dl.addEventListener("click", downloadDiscarded);
+      head.appendChild(dl); sec.appendChild(head);
+      var ul = el("ul", "up-list");
+      rep.rejected.forEach(function (x) {
+        var li = el("li");
+        li.appendChild(el("strong", null, "Row " + x.row + (x.label ? " · " + x.label : "")));
+        var why = el("ul", "err-list");
+        x.reasons.forEach(function (m) { why.appendChild(el("li", null, m)); });
+        li.appendChild(why); ul.appendChild(li);
+      });
+      sec.appendChild(ul); box.appendChild(sec);
+    }
+    if (rep.warnings.length) {
+      var ws = el("div", "up-sec warn");
+      ws.appendChild(el("strong", null, plural(rep.warnings.length, "warning", "warnings")));
+      var wl = el("ul", "up-list");
+      rep.warnings.forEach(function (w) {
+        wl.appendChild(el("li", null, w.msg + (w.rows.length ? " (" + rowList(w.rows) + ")" : "")));
+      });
+      ws.appendChild(wl); box.appendChild(ws);
+    }
+  }
   function resetUpload(msg, errs) {
-    uploadRows = [];
+    uploadRows = []; uploadReport = null;
     $("up-file").value = "";
     $("up-go").hidden = true; $("up-go").disabled = false;
     $("up-clear").hidden = true;
+    drawUploadReport();
     showUploadErrors(Array.isArray(errs) ? errs : (errs ? [errs] : []));
     $("up-info").textContent = (!errs && msg) ? msg : "Import entries directly into the review queue.";
   }
+  function isInt(v) { return typeof v === "number" && Math.floor(v) === v; }
+  /* Every problem of one entry; an empty list means the entry can be imported. */
+  function entryErrors(r) {
+    var errs = [];
+    Object.keys(r).forEach(function (k) {
+      if (typeof r[k] === "string" && /https?:\/\//i.test(r[k])) errs.push(k + " contains a web link; only DOIs are allowed.");
+    });
+    var smi = String(r.smiles || "").trim();
+    if (!String(r.name || "").trim()) errs.push("name is required.");
+    if (!smi) errs.push("smiles is required.");
+    else if (Ent.structureOk(smi) === false) errs.push("SMILES could not be read.");
+    var et = Number(r.et_kcal);
+    if (r.et_kcal == null || r.et_kcal === "" || !isFinite(et) || et <= 0 || et > EntScore.ET_MAX) {
+      errs.push("et_kcal must be a number above 0 and up to " + EntScore.ET_MAX + ".");
+    }
+    if (r.origin !== "exp" && r.origin !== "calc") errs.push("origin must be \"exp\" or \"calc\".");
+    if (r.doi && !EntScore.isDoi(EntScore.cleanDoi(r.doi))) errs.push("\"" + r.doi + "\" is not a valid DOI.");
+    if (r.cas && !EntScore.casValid(EntScore.cleanCas(r.cas))) errs.push("\"" + r.cas + "\" is not a valid CAS number.");
+    if (r.uv_lmax != null && !(isInt(r.uv_lmax) && r.uv_lmax >= 100 && r.uv_lmax <= 1500)) errs.push("uv_lmax must be an integer between 100 and 1500.");
+    if (r.uv_eps != null && !(isInt(r.uv_eps) && r.uv_eps >= 0)) errs.push("uv_eps must be a non-negative integer.");
+    if (r.direct_exc != null) {
+      if (typeof r.direct_exc !== "object" || Array.isArray(r.direct_exc)) errs.push("direct_exc must be an object.");
+      else if (Object.keys(r.direct_exc).some(function (k) {
+        var dv = r.direct_exc[k];
+        return !k.trim() || !isInt(dv) || dv < 100 || dv > 1500;
+      })) errs.push("direct_exc values must be integers between 100 and 1500.");
+    }
+    return errs;
+  }
   function parseAndValidateUpload(raw, fileName) {
-    if (!Array.isArray(raw) || !raw.length) return { errs: ["The JSON file must be a non-empty array of entry objects."] };
+    if (!Array.isArray(raw) || !raw.length) return { fatal: "The JSON file must be a non-empty array of entry objects." };
     var slug = String(fileName || "upload").replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 40) || "upload";
     var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
-    var valid = [], errs = [], skipped = 0, usedKeys = {};
-    for (var i = 0; i < raw.length; i++) {
-      var r = raw[i], rowErr = "";
-      if (!r || typeof r !== "object" || Array.isArray(r)) { errs.push("Row " + (i + 1) + " is not an object."); if (errs.length >= 10) break; continue; }
-      var tag = r.import_key || ("row " + (i + 1));
-      var keys = Object.keys(r);
-      for (var ki = 0; ki < keys.length; ki++) {
-        var v = r[keys[ki]];
-        if (typeof v === "string" && /https?:\/\//i.test(v)) { rowErr = tag + " (" + keys[ki] + "): contains a web link; only DOIs are allowed."; break; }
+    var valid = [], rejected = [], skipped = 0, usedKeys = {}, warnMap = {}, warnings = [];
+    function warn(msg, rowNo) {
+      if (!warnMap[msg]) { warnMap[msg] = { msg: msg, rows: [] }; warnings.push(warnMap[msg]); }
+      if (rowNo) warnMap[msg].rows.push(rowNo);
+    }
+    if (!window.OCL) warn("The structure library has not loaded, so SMILES were not checked. Reload the page and drop the file again to check them.");
+    raw.forEach(function (r, i) {
+      var rowNo = i + 1;
+      if (!r || typeof r !== "object" || Array.isArray(r)) {
+        rejected.push({ row: rowNo, label: "", reasons: ["The row is not an entry object."], entry: r });
+        return;
       }
-      var name = String(r.name || "").trim(), smi = String(r.smiles || "").trim();
-      if (!rowErr && !name) rowErr = tag + ": name is required.";
-      if (!rowErr && !smi) rowErr = tag + ": smiles is required.";
-      if (!rowErr && Ent.structureOk(smi) === false) rowErr = tag + ": SMILES could not be read.";
-      var et = Number(r.et_kcal);
-      if (!rowErr && (!isFinite(et) || et <= 0 || et > EntScore.ET_MAX)) rowErr = tag + ": et_kcal must be between 0 and " + EntScore.ET_MAX + ".";
-      if (!rowErr && r.origin !== "exp" && r.origin !== "calc") rowErr = tag + ": origin must be \"exp\" or \"calc\".";
-      var doi = r.doi ? EntScore.cleanDoi(r.doi) : null;
-      if (!rowErr && doi && !EntScore.isDoi(doi)) rowErr = tag + ": \"" + r.doi + "\" is not a valid DOI.";
-      var cas = r.cas ? EntScore.cleanCas(r.cas) : null;
-      if (!rowErr && cas && !EntScore.casValid(cas)) rowErr = tag + ": \"" + r.cas + "\" is not a valid CAS number.";
-      if (!rowErr && r.uv_lmax != null && (!(typeof r.uv_lmax === "number" && Math.floor(r.uv_lmax) === r.uv_lmax && r.uv_lmax >= 100 && r.uv_lmax <= 1500))) {
-        rowErr = tag + ": uv_lmax must be an integer between 100 and 1500.";
-      }
-      if (!rowErr && r.uv_eps != null && (!(typeof r.uv_eps === "number" && Math.floor(r.uv_eps) === r.uv_eps && r.uv_eps >= 0))) {
-        rowErr = tag + ": uv_eps must be a non-negative integer.";
-      }
-      if (!rowErr && r.direct_exc != null) {
-        if (typeof r.direct_exc !== "object" || Array.isArray(r.direct_exc)) rowErr = tag + ": direct_exc must be an object.";
-        else {
-          var dkeys = Object.keys(r.direct_exc);
-          for (var di = 0; di < dkeys.length; di++) {
-            var dv = r.direct_exc[dkeys[di]];
-            if (!dkeys[di].trim() || typeof dv !== "number" || Math.floor(dv) !== dv || dv < 100 || dv > 1500) {
-              rowErr = tag + ": direct_exc values must be integers between 100 and 1500."; break;
-            }
-          }
-        }
-      }
-      if (rowErr) { errs.push(rowErr); if (errs.length >= 10) break; continue; }
-      var ik = r.import_key ? String(r.import_key).trim() : ("json:" + slug + ":" + (i + 1));
-      if (have[ik] || usedKeys[ik]) { skipped++; continue; }
-      usedKeys[ik] = 1;
+      var label = String(r.import_key || r.name || "").trim().slice(0, 80);
+      var errs = entryErrors(r);
+      var ik = r.import_key ? String(r.import_key).trim() : ("json:" + slug + ":" + rowNo);
+      if (usedKeys[ik]) errs.push("import_key \"" + ik + "\" is already used by row " + usedKeys[ik] + " of this file.");
+      if (errs.length) { rejected.push({ row: rowNo, label: label, reasons: errs, entry: r }); return; }
+      usedKeys[ik] = rowNo;
+      if (have[ik]) { skipped++; return; }
+      /* warnings only for rows that go in: what is dropped or changed on the way */
+      Object.keys(r).forEach(function (k) {
+        if (UPLOAD_KEYS.indexOf(k) >= 0 || k.charAt(0) === "_") return;
+        if (SERVER_KEYS.indexOf(k) >= 0) { warn("Field \"" + k + "\" is set by the database and is ignored.", rowNo); return; }
+        var near = nearestKey(k);
+        warn("Unknown field \"" + k + "\" is ignored" + (near ? "; did you mean \"" + near + "\"?" : "."), rowNo);
+      });
+      if (r.role == null || r.role === "") warn("role is missing; imported as \"acceptor\".", rowNo);
+      else if (ROLES.indexOf(r.role) < 0) warn("role \"" + String(r.role).slice(0, 40) + "\" is not acceptor, donor or both; imported as \"acceptor\".", rowNo);
+      var name = String(r.name).trim(), smi = String(r.smiles).trim(), et = Number(r.et_kcal);
+      var doi = r.doi ? EntScore.cleanDoi(r.doi) : null, cas = r.cas ? EntScore.cleanCas(r.cas) : null;
       var copy = {}; for (var rk in r) copy[rk] = r[rk];
       copy.import_key = ik; copy.name = name.slice(0, 200);
       copy.commercial_name = r.commercial_name ? String(r.commercial_name).trim().slice(0, 200) || null : null;
@@ -718,28 +1063,35 @@
         copy.score = sc.total; copy.score_items = sc.items;
       }
       valid.push(copy);
-    }
-    return errs.length ? { errs: errs } : { rows: valid, skipped: skipped };
+    });
+    return { rows: valid, rejected: rejected, warnings: warnings, skipped: skipped, total: raw.length, slug: slug };
+  }
+  function uploadSummary(name, res) {
+    var parts = [plural(res.rows.length, "row", "rows") + " ready to import"];
+    if (res.rejected.length) parts.push(res.rejected.length + " discarded");
+    if (res.skipped) parts.push(res.skipped + " already in the database");
+    return name + ": " + plural(res.total, "row", "rows") + " · " + parts.join(" · ") + ".";
   }
   function handleUploadFile(file) {
     if (!file) return;
+    if (!state.loaded) {
+      resetUpload(null, ["The queue is still loading, so the file was not read. Drop it again in a moment."]);
+      return;
+    }
     file.text().then(function (txt) {
       var parsed;
       try { parsed = JSON.parse(txt); } catch (err) { resetUpload(null, ["Could not parse JSON: " + err.message]); return; }
       var res = parseAndValidateUpload(parsed, file.name);
-      if (res.errs) { resetUpload(null, res.errs); return; }
+      if (res.fatal) { resetUpload(null, [res.fatal]); return; }
       uploadRows = res.rows;
+      uploadReport = { rejected: res.rejected, warnings: res.warnings, slug: res.slug };
       showUploadErrors([]);
+      drawUploadReport();
+      $("up-file").value = "";
       $("up-clear").hidden = false;
-      if (!uploadRows.length) {
-        $("up-go").hidden = true;
-        $("up-info").textContent = file.name + ": all " + res.skipped + " entries are already in the database.";
-        return;
-      }
-      $("up-go").hidden = false;
-      $("up-go").textContent = "Import " + uploadRows.length + (uploadRows.length === 1 ? " entry" : " entries");
-      $("up-info").textContent = file.name + ": " + uploadRows.length + " ready to import" +
-        (res.skipped ? " (" + res.skipped + " already in the database skipped)" : "") + ".";
+      $("up-go").hidden = !uploadRows.length; $("up-go").disabled = false;
+      $("up-go").textContent = "Import " + plural(uploadRows.length, "entry", "entries");
+      $("up-info").textContent = uploadSummary(file.name, res);
     }, function () { resetUpload(null, ["Could not read the selected file."]); });
   }
   $("up-pick").addEventListener("click", function () { $("up-file").click(); });
@@ -747,13 +1099,12 @@
   $("up-file").addEventListener("change", function (e) { handleUploadFile(e.target.files && e.target.files[0]); });
   var upDrop = $("up-drop");
   ["dragenter", "dragover"].forEach(function (ev) {
-    upDrop.addEventListener(ev, function (e) { e.preventDefault(); if (state.loaded) upDrop.classList.add("dragover"); });
+    upDrop.addEventListener(ev, function (e) { e.preventDefault(); upDrop.classList.add("dragover"); });
   });
   ["dragleave", "drop"].forEach(function (ev) {
     upDrop.addEventListener(ev, function (e) { e.preventDefault(); upDrop.classList.remove("dragover"); });
   });
   upDrop.addEventListener("drop", function (e) {
-    if (!state.loaded) return;
     var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) handleUploadFile(f);
   });
@@ -764,8 +1115,14 @@
     $("up-info").textContent = "Importing " + rows.length + " entries…";
     api.adminImport(rows).then(function () {
       $("up-pick").disabled = false;
-      resetUpload("Imported " + rows.length + (rows.length === 1 ? " entry" : " entries") + " into the review queue.");
-      addToolLog("Uploaded " + rows.length + " JSON entries.");
+      var left = uploadReport && uploadReport.rejected.length;
+      /* the discarded rows stay listed (and downloadable) until Clear or the next file */
+      uploadRows = []; $("up-go").hidden = true; $("up-go").disabled = false;
+      if (uploadReport) { uploadReport.warnings = []; drawUploadReport(); }
+      $("up-clear").hidden = !left;
+      $("up-info").textContent = "Imported " + plural(rows.length, "entry", "entries") + " into the review queue." +
+        (left ? " " + plural(left, "discarded row is", "discarded rows are") + " still listed below." : "");
+      addToolLog("Uploaded " + rows.length + " JSON entries" + (left ? " (" + left + " discarded)" : "") + ".");
       toast("Imported " + rows.length + (rows.length === 1 ? " entry." : " entries."));
       load({ silent: true });
     }, function (err) {
@@ -775,6 +1132,369 @@
       load({ silent: true });
     });
   });
+
+  /* ---------- Upload PDF of articles -> batch JSON ---------- */
+  var pdfFiles = [], pdfResult = null, pdfBusy = false, pdfModalReturn = null, pdfAbort = null;
+  function downloadJsonFile(data, filename) {
+    var blob = new Blob([JSON.stringify(data, null, 1) + "\n"], { type: "application/json" });
+    var a = document.createElement("a"), url = URL.createObjectURL(blob);
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function drawPdfResult() {
+    var box = $("pdf-result");
+    if (!pdfResult) { box.hidden = true; return; }
+    var readyN = pdfResult.readyRows.length;
+    var unresN = pdfResult.reviewItems.length;
+    var dupN = pdfResult.skippedDuplicates.length;
+    var fileCount = pdfResult.fileReports.length;
+    var parts = [
+      plural(fileCount, "PDF", "PDFs") + " processed",
+      plural(readyN, "ready entry", "ready entries")
+    ];
+    if (unresN) parts.push(unresN + " unresolved");
+    if (dupN) parts.push(dupN + " duplicate" + (dupN === 1 ? "" : "s") + " skipped");
+    var failedN = pdfResult.fileReports.filter(function (r) { return r.error; }).length;
+    parts[0] = plural(fileCount - failedN, "PDF", "PDFs") + " processed";
+    if (failedN) parts.push(failedN + " could not be read");
+    var summary = parts.join(" · ") + "." + (pdfResult.cancelled ? " Cancelled before the end: results are partial." : "");
+    $("pdf-summary").textContent = summary;
+    var ul = $("pdf-files");
+    ul.replaceChildren();
+    pdfResult.fileReports.forEach(function (r) {
+      var warns = r.warnings || [];
+      var li = el("li", r.error ? "bad" : (warns.length ? "warn" : ""));
+      li.appendChild(el("strong", null, r.file));
+      if (r.error) {
+        li.appendChild(el("span", "pdf-file-note", r.error));
+      } else {
+        var bits = [r.pages + " page" + (r.pages === 1 ? "" : "s"), r.ready + " ready", r.review + " unresolved"];
+        if (r.duplicates) bits.push(r.duplicates + " duplicate" + (r.duplicates === 1 ? "" : "s"));
+        if (!r.extracted) bits.push("no triplet energy found");
+        li.appendChild(el("span", "pdf-file-note", bits.join(" · ")));
+        if (r.isSi) li.appendChild(el("span", "pdf-file-note", r.pairedWith
+          ? "Supporting Information of " + r.pairedWith + " (matched by " + r.matchedBy + ")"
+          : "Supporting Information with no matching paper"));
+        if (r.ocrPages && r.ocrPages.length) li.appendChild(el("span", "pdf-file-note",
+          "OCR used on page" + (r.ocrPages.length === 1 ? " " : "s ") + r.ocrPages.join(", ") + ": check those values against the PDF"));
+        if (!r.doi) li.appendChild(el("span", "pdf-file-note", "No DOI found: entries will need one before approval"));
+        warns.forEach(function (w) { li.appendChild(el("span", "pdf-file-note", w)); });
+      }
+      ul.appendChild(li);
+    });
+    $("pdf-load-up").hidden = !readyN;
+    $("pdf-load-up").disabled = pdfBusy;
+    $("pdf-load-up").textContent = "Import " + readyN + " into queue";
+    $("pdf-dl-json").hidden = !readyN;
+    $("pdf-review-open").hidden = !unresN;
+    $("pdf-review-open").textContent = "Fix unresolved (" + unresN + ")…";
+    box.hidden = false;
+  }
+  function resetPdfUpload(msg, err) {
+    pdfFiles = []; pdfResult = null; pdfBusy = false;
+    if ($("pdf-file")) $("pdf-file").value = "";
+    if ($("pdf-prog")) $("pdf-prog").hidden = true;
+    if ($("pdf-go")) { $("pdf-go").hidden = true; $("pdf-go").disabled = false; }
+    if ($("pdf-clear")) { $("pdf-clear").hidden = true; $("pdf-clear").disabled = false; $("pdf-clear").textContent = "Clear"; }
+    if ($("pdf-err")) { $("pdf-err").textContent = err || ""; $("pdf-err").hidden = !err; }
+    if ($("pdf-result")) $("pdf-result").hidden = true;
+    if ($("pdf-info")) $("pdf-info").textContent = msg || "Generates a trendb-extract JSON you can download or load straight into the queue.";
+    closePdfModal();
+  }
+  function handlePdfFiles(fileList) {
+    if (pdfBusy) return;
+    var all = Array.prototype.slice.call(fileList || []), seenPdf = {};
+    var list = all.filter(function (f) {
+      if (!f || !(/\.pdf$/i.test(f.name || "") || f.type === "application/pdf")) return false;
+      var k = f.name + "|" + f.size;
+      if (seenPdf[k]) return false;
+      seenPdf[k] = 1;
+      return true;
+    });
+    if (!list.length) {
+      resetPdfUpload(null, "Select one or more .pdf files.");
+      return;
+    }
+    if (!state.loaded) {
+      resetPdfUpload(null, "The database is still loading; drop the PDF(s) again in a moment.");
+      return;
+    }
+    pdfFiles = list;
+    pdfResult = null;
+    $("pdf-err").hidden = true;
+    $("pdf-result").hidden = true;
+    $("pdf-prog").hidden = true;
+    $("pdf-go").hidden = false; $("pdf-go").disabled = false;
+    $("pdf-go").textContent = "Extract JSON (" + plural(list.length, "PDF", "PDFs") + ")";
+    $("pdf-clear").hidden = false;
+    $("pdf-info").textContent = "Ready: " + list.map(function (f) { return f.name; }).join(", ");
+  }
+  function openPdfModal() {
+    if (!pdfResult || !pdfResult.reviewItems.length) return;
+    pdfModalReturn = document.activeElement;
+    $("pdf-modal").hidden = false;
+    Ent.syncModalOpen();
+    drawPdfModal();
+  }
+  function closePdfModal() {
+    var m = $("pdf-modal");
+    if (!m || m.hidden) return;
+    m.hidden = true;
+    Ent.syncModalOpen();
+    if (pdfModalReturn && pdfModalReturn.focus) pdfModalReturn.focus();
+    pdfModalReturn = null;
+  }
+  function drawPdfModal() {
+    var ul = $("pdf-modal-list"), empty = $("pdf-modal-empty"), items = (pdfResult && pdfResult.reviewItems) || [];
+    $("pdf-modal-meta").textContent = plural(items.length, "unresolved candidate", "unresolved candidates") +
+      " · " + (pdfResult ? plural(pdfResult.readyRows.length, "ready row", "ready rows") : "");
+    empty.hidden = items.length > 0;
+    ul.replaceChildren.apply(ul, items.map(function (it, idx) {
+      var cand = it.cand;
+      var li = el("li", "ei-card pdf-unres-card");
+      var infoCol = el("div", "ei-col-info");
+      var thumb = el("div", "ei-thumb");
+      var drawThumb = function (smi) {
+        var minfo = smi ? Ent.molInfo(smi) : null;
+        if (minfo) thumb.innerHTML = minfo.svg;
+        else thumb.textContent = smi ? (window.OCL ? "Invalid SMILES" : "No preview") : "No SMILES";
+      };
+      drawThumb(it.draftSmiles || "");
+      infoCol.appendChild(thumb);
+
+      var meta = el("div", "ei-meta pdf-unres-meta");
+      var head = el("div", "ei-head");
+      head.appendChild(el("strong", "ei-name", cand.name || "(unnamed)"));
+      var badges = el("span", "ei-badges");
+      badges.appendChild(el("span", "ei-status", Ent.fmt(Number(cand.et_kcal), 1) + " kcal/mol"));
+      badges.appendChild(el("span", "ei-tool", cand.origin === "calc" ? "Computed" : "Experimental"));
+      if (cand.location) badges.appendChild(el("span", "ei-status", cand.location));
+      head.appendChild(badges);
+      meta.appendChild(head);
+      meta.appendChild(el("div", "ei-reason", it.reason));
+      if (cand.quote) meta.appendChild(el("div", "pdf-unres-quote", cand.quote));
+      if (cand.evidence) meta.appendChild(el("div", "hint", cand.evidence));
+      if (cand.doi) meta.appendChild(el("div", "hint mono", "DOI: " + cand.doi));
+      infoCol.appendChild(meta);
+      li.appendChild(infoCol);
+
+      var fixCol = el("div", "ei-col-fix");
+      var nameRow = el("div", "ei-fix-row");
+      var nameInp = el("input"); nameInp.type = "text"; nameInp.className = "grow";
+      nameInp.placeholder = "Compound or IUPAC name";
+      nameInp.value = it.draftName != null ? it.draftName : (cand.name || "");
+      nameInp.addEventListener("input", function () { it.draftName = nameInp.value; });
+      var lookupBtn = el("button", "btn small", "Lookup SMILES"); lookupBtn.type = "button";
+      nameRow.appendChild(nameInp); nameRow.appendChild(lookupBtn);
+      fixCol.appendChild(nameRow);
+
+      var smiRow = el("div", "ei-fix-row");
+      var smiInp = el("input"); smiInp.type = "text"; smiInp.className = "mono grow";
+      smiInp.placeholder = "Enter SMILES or use Sketcher…";
+      smiInp.value = it.draftSmiles || "";
+      smiInp.addEventListener("input", function () { it.draftSmiles = smiInp.value; drawThumb(smiInp.value.trim()); });
+      var skBtn = el("button", "btn small", "Sketcher…"); skBtn.type = "button";
+      var addBtn = el("button", "btn small primary", "Add to JSON"); addBtn.type = "button";
+      var dropBtn = el("button", "btn small reject", "Dismiss"); dropBtn.type = "button";
+      smiRow.appendChild(smiInp); smiRow.appendChild(skBtn); smiRow.appendChild(addBtn); smiRow.appendChild(dropBtn);
+      fixCol.appendChild(smiRow);
+
+      var noteEl = el("div", "ei-note " + (it.noteIsErr ? "err" : "hint"), it.note || "");
+      noteEl.hidden = !it.note;
+      fixCol.appendChild(noteEl);
+      li.appendChild(fixCol);
+
+      lookupBtn.addEventListener("click", function () {
+        var q = nameInp.value.trim();
+        if (!q) { it.note = "Enter a compound name or CAS first."; it.noteIsErr = true; drawPdfModal(); return; }
+        lookupBtn.disabled = true;
+        EntPdf.lookupSmilesByName(q).then(function (found) {
+          lookupBtn.disabled = false;
+          if (!found) { it.note = "Not found on PubChem; draw it in Sketcher."; it.noteIsErr = true; drawPdfModal(); return; }
+          it.draftSmiles = found;
+          it.note = "Found SMILES on PubChem — verify preview and click Add to JSON.";
+          it.noteIsErr = false;
+          drawPdfModal();
+        }, function () {
+          lookupBtn.disabled = false;
+          it.note = "PubChem lookup failed."; it.noteIsErr = true; drawPdfModal();
+        });
+      });
+
+      skBtn.addEventListener("click", function () {
+        Ent.sketcher.open({
+          title: "Sketcher · " + (nameInp.value.trim() || cand.name || "Structure"),
+          smiles: smiInp.value.trim(),
+          saveLabel: "Use structure",
+          hint: "Draw the structure or paste SMILES, then click Use structure.",
+          onSave: function (s) {
+            it.draftSmiles = s;
+            it.note = "Structure set — click Add to JSON.";
+            it.noteIsErr = false;
+            drawPdfModal();
+            return true;
+          }
+        });
+      });
+
+      addBtn.addEventListener("click", function () {
+        var smi = smiInp.value.trim();
+        if (!smi || Ent.structureOk(smi) === false) {
+          it.note = "Enter a valid SMILES first."; it.noteIsErr = true; drawPdfModal(); return;
+        }
+        var paperName = cand.name || "";
+        cand.name = (nameInp.value.trim() || cand.name || "").slice(0, 200);
+        // The same compound usually comes back with other values: offer this structure there too.
+        var twins = 0;
+        if (paperName && paperName !== "(unnamed candidate)") {
+          items.forEach(function (other) {
+            if (other === it || other.draftSmiles || other.cand.name !== paperName || other.cand.pdf_file !== cand.pdf_file) return;
+            other.draftSmiles = smi;
+            other.draftName = cand.name;
+            other.note = "Same name as an entry just added: structure copied from it. Check it and click Add to JSON.";
+            other.noteIsErr = false;
+            twins++;
+          });
+        }
+        addBtn.disabled = true;
+        Promise.all([
+          Ent.lookupIupac ? Ent.lookupIupac(smi).catch(function () { return ""; }) : Promise.resolve(""),
+          Ent.lookupCas ? Ent.lookupCas(smi).catch(function () { return []; }) : Promise.resolve([])
+        ]).then(function (metaRes) {
+          return pdfResult.resolveCandidate(cand, smi, (metaRes[1] && metaRes[1][0]) || null, metaRes[0] || cand.name);
+        }).then(function (row) {
+          pdfResult.readyRows.push(row);
+          pdfResult.reviewItems.splice(idx, 1);
+          drawPdfResult();
+          if (!pdfResult.reviewItems.length) closePdfModal();
+          else drawPdfModal();
+          toast("Added “" + (row.name || "entry") + "” to batch JSON." +
+            (twins ? " Structure copied to " + plural(twins, "other candidate", "other candidates") + " with the same name." : ""));
+        }, function () {
+          addBtn.disabled = false;
+          it.note = "Could not build entry row."; it.noteIsErr = true; drawPdfModal();
+        });
+      });
+      dropBtn.addEventListener("click", function () {
+        pdfResult.reviewItems.splice(idx, 1);
+        drawPdfResult();
+        if (!pdfResult.reviewItems.length) closePdfModal();
+        else drawPdfModal();
+      });
+      return li;
+    }));
+  }
+
+  if ($("pdf-pick")) {
+    $("pdf-pick").addEventListener("click", function () { $("pdf-file").click(); });
+    $("pdf-clear").addEventListener("click", function () {
+      if (pdfBusy && pdfAbort) {
+        pdfAbort.aborted = true;
+        $("pdf-clear").disabled = true;
+        $("pdf-info").textContent = "Cancelling after the current page…";
+        return;
+      }
+      resetPdfUpload();
+    });
+    $("pdf-file").addEventListener("change", function (e) { handlePdfFiles(e.target.files); });
+    var pdfDrop = $("pdf-drop");
+    ["dragenter", "dragover"].forEach(function (ev) {
+      pdfDrop.addEventListener(ev, function (e) { e.preventDefault(); pdfDrop.classList.add("dragover"); });
+    });
+    ["dragleave", "drop"].forEach(function (ev) {
+      pdfDrop.addEventListener(ev, function (e) { e.preventDefault(); pdfDrop.classList.remove("dragover"); });
+    });
+    pdfDrop.addEventListener("drop", function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) handlePdfFiles(e.dataTransfer.files);
+    });
+    $("pdf-go").addEventListener("click", function () {
+      if (!pdfFiles.length || !window.EntPdf) return;
+      pdfBusy = true;
+      pdfAbort = { aborted: false };
+      $("pdf-go").disabled = true; $("pdf-pick").disabled = true;
+      $("pdf-clear").disabled = false; $("pdf-clear").textContent = "Cancel";
+      $("pdf-err").hidden = true; $("pdf-result").hidden = true;
+      var prog = $("pdf-prog"); prog.hidden = false; prog.max = Math.max(1, pdfFiles.length); prog.value = 0;
+      EntPdf.extractFromPdfFiles(pdfFiles, {
+        refEntries: state.docs.concat(batchRows),
+        doiOverride: $("pdf-doi").value.trim() || null,
+        defaultRole: $("pdf-role").value || "acceptor",
+        defaultCls: $("pdf-cls").value.trim() || null,
+        ocr: !$("pdf-ocr") || $("pdf-ocr").checked,
+        ocrImages: !!($("pdf-ocr-img") && $("pdf-ocr-img").checked),
+        signal: pdfAbort,
+        onStatus: function (msg, fi, tot) {
+          $("pdf-info").textContent = msg;
+          prog.max = Math.max(1, tot || 1);
+          prog.value = Math.min(prog.max, fi || 0);
+        }
+      }).then(function (res) {
+        pdfBusy = false; pdfResult = res;
+        prog.value = prog.max; prog.hidden = true;
+        $("pdf-pick").disabled = false; $("pdf-clear").disabled = false; $("pdf-go").disabled = false;
+        $("pdf-clear").textContent = "Clear";
+        $("pdf-info").textContent = res.cancelled ? "Extraction cancelled." : "Extraction complete.";
+        drawPdfResult();
+        addToolLog("PDF extraction (" + res.fileReports.length + " file" + (res.fileReports.length === 1 ? "" : "s") + "): " +
+          res.readyRows.length + " ready, " + res.reviewItems.length + " unresolved, " + res.skippedDuplicates.length + " duplicates skipped.");
+        if (!res.readyRows.length && !res.reviewItems.length) {
+          var bad = res.fileReports.filter(function (r) { return r.error; }).length;
+          $("pdf-err").textContent = res.cancelled ? "Cancelled before any value was extracted."
+            : bad === res.fileReports.length ? "None of the selected PDFs could be read; see the reason next to each file."
+            : "No triplet energy values could be extracted from the selected PDF(s).";
+          $("pdf-err").hidden = false;
+        } else {
+          toast("Extracted " + plural(res.readyRows.length, "entry", "entries") + " from PDF.");
+        }
+      }, function (err) {
+        pdfBusy = false; prog.hidden = true;
+        $("pdf-pick").disabled = false; $("pdf-clear").disabled = false; $("pdf-go").disabled = false;
+        $("pdf-clear").textContent = "Clear";
+        $("pdf-info").textContent = "PDF extraction failed.";
+        $("pdf-err").textContent = (err && err.message) || "Could not read PDF.";
+        $("pdf-err").hidden = false;
+      });
+    });
+    $("pdf-dl-json").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.readyRows.length) return;
+      downloadJsonFile(pdfResult.readyRows, pdfResult.slug + ".batch.json");
+    });
+    $("pdf-load-up").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.readyRows.length) return;
+      var res = parseAndValidateUpload(pdfResult.readyRows, pdfResult.slug + ".batch.json");
+      if (res.fatal || !res.rows.length) {
+        $("pdf-err").textContent = res.fatal || "All extracted entries are already in the database.";
+        $("pdf-err").hidden = false;
+        return;
+      }
+      var rows = toImportRows(res.rows);
+      pdfBusy = true; $("pdf-load-up").disabled = true; $("pdf-pick").disabled = true;
+      $("pdf-info").textContent = "Importing " + rows.length + " extracted entries…";
+      api.adminImport(rows).then(function () {
+        pdfBusy = false; $("pdf-pick").disabled = false;
+        addToolLog("Imported " + rows.length + " PDF-extracted entries into the queue.");
+        toast("Imported " + rows.length + (rows.length === 1 ? " entry" : " entries") + " into the queue.");
+        pdfResult.readyRows = [];
+        drawPdfResult();
+        $("pdf-info").textContent = "Imported " + plural(rows.length, "entry", "entries") + " into the review queue.";
+        load({ silent: true });
+      }, function (err) {
+        pdfBusy = false; $("pdf-load-up").disabled = false; $("pdf-pick").disabled = false;
+        if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return; }
+        $("pdf-err").textContent = "Import failed: " + ((err && err.message) || "unknown error");
+        $("pdf-err").hidden = false;
+        load({ silent: true });
+      });
+    });
+    $("pdf-review-open").addEventListener("click", openPdfModal);
+    $("pdf-modal-close").addEventListener("click", closePdfModal);
+    $("pdf-modal").addEventListener("click", function (e) { if (e.target === $("pdf-modal")) closePdfModal(); });
+    $("pdf-modal-dl").addEventListener("click", function () {
+      if (!pdfResult || !pdfResult.reviewItems.length) return;
+      downloadJsonFile(pdfResult.reviewItems.map(function (it) { return it.cand; }), pdfResult.slug + ".needs_review.json");
+    });
+  }
 
   /* Backfill OpenChemLib structure codes silently once OCL loads. */
   var backfilled = false;
@@ -1246,8 +1966,9 @@
   $("ei-modal-clear").addEventListener("click", clearEnrichIssues);
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
     if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
+    if (pm && !pm.hidden) { closePdfModal(); return; }
     if (ei && !ei.hidden) closeEnrichModal();
   });
 
@@ -1600,7 +2321,7 @@
     $("tools-aside").classList.remove("open");
     $("toggle-tools").setAttribute("aria-expanded", "false");
     state.activeId = ""; state.triage = "";
-    resetUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || "");
+    resetUpload(); resetPdfUpload(); Ent.editor.close(); Ent.closeDialog(); Ent.sketcher.close(); api.signOut(); show("login"); banner(msg || "");
   }
 
   function start() {
@@ -1654,7 +2375,7 @@
         ["S", "Open sketcher on focused card"],
         ["V", "Toggle Structure verified on focused card"],
         ["X", "Select / deselect focused card"],
-        ["A", "Approve focused card"],
+        ["A", "Verify / approve focused card"],
         ["R", "Reject focused card"],
         ["?", "Show this shortcuts reference"],
         ["Esc", "Close active dialog or sketcher"]
@@ -1672,8 +2393,8 @@
   document.addEventListener("keydown", function (e) {
     if ($("panel").hidden || !state.loaded) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal");
-    if ((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden)) return;
+    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
+    if ((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden) || (pm && !pm.hidden)) return;
     var tag = document.activeElement && document.activeElement.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (document.activeElement && document.activeElement.isContentEditable)) return;
 
@@ -1702,8 +2423,19 @@
     else if (lk === "v") { e.preventDefault(); var vb = $("chk-" + cur.getAttribute("data-id")); if (vb) vb.click(); }
     else if (lk === "s") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Open in sketcher") b.click(); }); }
     else if (lk === "e") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Edit entry") b.click(); }); }
-    else if (lk === "a") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Approve") b.click(); }); }
-    else if (lk === "r") { e.preventDefault(); Array.prototype.forEach.call(cur.querySelectorAll("button"), function (b) { if (b.textContent === "Reject") b.click(); }); }
+    else if (lk === "a") {
+      e.preventDefault();
+      var ab = cur.querySelector('button[data-act="approve"]');
+      if (ab) {
+        if (ab.disabled) toast("You already verified this entry; a second curator must approve it.");
+        else ab.click();
+      }
+    }
+    else if (lk === "r") {
+      e.preventDefault();
+      var rb = cur.querySelector('button[data-act="reject"]');
+      if (rb) rb.click();
+    }
   });
 
   $("f-reset").addEventListener("click", function () { state.triage = ""; });

@@ -71,6 +71,8 @@ alter table public.entries add column if not exists commercial_name text;
 alter table public.entries add column if not exists uv_lmax int;
 alter table public.entries add column if not exists uv_eps int;
 alter table public.entries add column if not exists uv_cond text;
+-- Two-admin verification log: [{"email": "curator@...", "at": "2026-...Z"}, ...].
+alter table public.entries add column if not exists approvals jsonb not null default '[]'::jsonb;
 
 -- Drop dependent view/function before migrating legacy uv / direct_exc columns (recreated below).
 drop function if exists public.list_entries(text, text);
@@ -130,6 +132,9 @@ alter table public.entries add constraint entries_uv_eps_nonneg
 alter table public.entries drop constraint if exists entries_direct_exc_object;
 alter table public.entries add constraint entries_direct_exc_object
   check (direct_exc is null or jsonb_typeof(direct_exc) = 'object') not valid;
+alter table public.entries drop constraint if exists entries_approvals_array;
+alter table public.entries add constraint entries_approvals_array
+  check (jsonb_typeof(approvals) = 'array') not valid;
 create index if not exists entries_cas_idx on public.entries (cas);
 create index if not exists entries_status_idx on public.entries (status);
 create index if not exists entries_idcode_idx on public.entries (idcode);
@@ -173,6 +178,37 @@ as $$
 $$;
 revoke all on function public.is_admin() from public, anon;
 grant execute on function public.is_admin() to authenticated;
+
+-- Confirmed lowercase email of the signed-in curator, or null if not an admin.
+create or replace function public.current_admin_email()
+returns text
+language sql stable security definer
+set search_path = ''
+as $$
+  select lower(u.email)
+  from auth.users u
+  join public.admins a on lower(a.email) = lower(u.email)
+  where u.id = auth.uid() and u.email_confirmed_at is not null
+  limit 1;
+$$;
+revoke all on function public.current_admin_email() from public, anon;
+grant execute on function public.current_admin_email() to authenticated;
+
+-- Count distinct valid curator emails currently listed in public.admins.
+create or replace function public.count_valid_approvals(p_approvals jsonb)
+returns int
+language sql stable security definer
+set search_path = ''
+as $$
+  select count(distinct lower(elem->>'email'))::int
+  from jsonb_array_elements(
+    case when jsonb_typeof(p_approvals) = 'array' then p_approvals else '[]'::jsonb end
+  ) elem
+  join public.admins a on lower(a.email) = lower(elem->>'email');
+$$;
+revoke all on function public.count_valid_approvals(jsonb) from public, anon;
+grant execute on function public.count_valid_approvals(jsonb) to authenticated;
+
 -- Only the functions above and below read these tables.
 revoke all on public.admins from anon, authenticated;
 
@@ -192,9 +228,216 @@ revoke all on public.entries from anon;
 revoke all on public.entries from authenticated;
 grant select, insert, update, delete on public.entries to authenticated;
 
+-- Database-level two-admin verification enforcement for entries:
+-- 1) Authenticated inserts start as pending with no approvals.
+-- 2) Approvals can only be written via approve_entries() / revoke_entry_approval().
+-- 3) Moving an entry into 'approved' requires >= 2 distinct valid admins in approvals.
+-- 4) Rejecting, moving back to queue, or editing scientific/source fields while pending resets approvals.
+create or replace function public.entries_enforce_approval_policy()
+returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_rpc boolean := current_setting('trendb.allow_approval_write', true) = 'on';
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+
+  new.approvals := coalesce(new.approvals, '[]'::jsonb);
+
+  if tg_op = 'INSERT' then
+    if new.status <> 'pending' then
+      raise exception 'New entries must start as pending' using errcode = '42501';
+    end if;
+    if jsonb_typeof(new.approvals) <> 'array' or jsonb_array_length(new.approvals) > 0 then
+      raise exception 'New entries cannot start with approvals' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  if not v_rpc then
+    if new.approvals is distinct from old.approvals then
+      raise exception 'Approvals can only be changed through the approval functions' using errcode = '42501';
+    end if;
+    if new.status = 'approved' and old.status is distinct from 'approved' then
+      raise exception 'Two different admins must approve an entry before it becomes approved' using errcode = '42501';
+    end if;
+    if new.status = 'rejected' or (new.status = 'pending' and old.status in ('approved', 'rejected')) then
+      new.approvals := '[]'::jsonb;
+    elsif old.status = 'pending' and new.status = 'pending' and (
+      new.smiles is distinct from old.smiles or
+      new.role is distinct from old.role or
+      new.origin is distinct from old.origin or
+      new.et_kcal is distinct from old.et_kcal or
+      new.et_unc is distinct from old.et_unc or
+      new.et_reported is distinct from old.et_reported or
+      new.et_type is distinct from old.et_type or
+      new.method is distinct from old.method or
+      new.conditions is distinct from old.conditions or
+      new.citation is distinct from old.citation or
+      new.doi is distinct from old.doi or
+      new.location is distinct from old.location or
+      new.quote is distinct from old.quote or
+      new.evidence is distinct from old.evidence or
+      new.uv_lmax is distinct from old.uv_lmax or
+      new.uv_eps is distinct from old.uv_eps or
+      new.uv_cond is distinct from old.uv_cond or
+      new.direct_exc is distinct from old.direct_exc or
+      new.uses is distinct from old.uses
+    ) then
+      new.approvals := '[]'::jsonb;
+    end if;
+  end if;
+
+  if new.status = 'approved' and old.status is distinct from 'approved' then
+    if public.count_valid_approvals(new.approvals) < 2 then
+      raise exception 'Two different admins must approve an entry before it becomes approved' using errcode = '42501';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+drop trigger if exists entries_approval_policy_trg on public.entries;
+create trigger entries_approval_policy_trg
+  before insert or update on public.entries
+  for each row execute function public.entries_enforce_approval_policy();
+
+-- Record the current curator's approval on one or more entries (1/2 stays pending; 2/2 publishes).
+create or replace function public.approve_entries(p_ids uuid[], p_note text default null)
+returns setof public.entries
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.entries%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.entries%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+  if p_ids is null or coalesce(array_length(p_ids, 1), 0) = 0 then
+    return;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+
+  for v_row in
+    select * from public.entries
+    where id = any(p_ids)
+    order by array_position(p_ids, id)
+    for update
+  loop
+    if v_row.status = 'approved' then
+      return next v_row;
+      continue;
+    end if;
+
+    select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+    into v_approvals
+    from jsonb_array_elements(
+      case when v_row.status = 'rejected' then '[]'::jsonb else coalesce(v_row.approvals, '[]'::jsonb) end
+    ) with ordinality as t(elem, ord)
+    join public.admins a on lower(a.email) = lower(elem->>'email');
+
+    if not exists (
+      select 1 from jsonb_array_elements(v_approvals) elem
+      where lower(elem->>'email') = v_email
+    ) then
+      v_approvals := v_approvals || jsonb_build_array(
+        jsonb_build_object(
+          'email', v_email,
+          'at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        )
+      );
+    end if;
+
+    if public.count_valid_approvals(v_approvals) >= 2 then
+      v_status := 'approved';
+      v_decided_at := now();
+    else
+      v_status := 'pending';
+      v_decided_at := null;
+    end if;
+
+    update public.entries
+    set approvals = v_approvals,
+        status = v_status,
+        decided_at = v_decided_at,
+        note = case when p_note is null then v_row.note else nullif(p_note, '') end
+    where id = v_row.id
+    returning * into v_updated;
+
+    return next v_updated;
+  end loop;
+
+  perform set_config('trendb.allow_approval_write', 'off', true);
+end;
+$$;
+revoke all on function public.approve_entries(uuid[], text) from public, anon;
+grant execute on function public.approve_entries(uuid[], text) to authenticated;
+
+-- Withdraw the current curator's approval from an entry (moves approved -> pending if < 2 remain).
+create or replace function public.revoke_entry_approval(p_id uuid, p_note text default null)
+returns setof public.entries
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.entries%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.entries%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.entries where id = p_id for update;
+  if not found then
+    return;
+  end if;
+
+  select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+  into v_approvals
+  from jsonb_array_elements(coalesce(v_row.approvals, '[]'::jsonb)) with ordinality as t(elem, ord)
+  where lower(elem->>'email') <> v_email;
+
+  if v_row.status = 'approved' and public.count_valid_approvals(v_approvals) < 2 then
+    v_status := 'pending';
+    v_decided_at := null;
+  else
+    v_status := v_row.status;
+    v_decided_at := v_row.decided_at;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+  update public.entries
+  set approvals = v_approvals,
+      status = v_status,
+      decided_at = v_decided_at,
+      note = case when p_note is null then v_row.note else nullif(p_note, '') end
+  where id = v_row.id
+  returning * into v_updated;
+  perform set_config('trendb.allow_approval_write', 'off', true);
+
+  return next v_updated;
+end;
+$$;
+revoke all on function public.revoke_entry_approval(uuid, text) from public, anon;
+grant execute on function public.revoke_entry_approval(uuid, text) to authenticated;
+
 -- Corrections proposed by readers for approved entries. They arrive through the "submit"
--- function (service role) and appear in the curators' queue; approving one writes only the
--- changed fields into the entry.
+-- function (service role) and appear in the curators' queue; approving one (by two admins)
+-- writes only the changed fields into the entry.
 create table if not exists public.suggestions (
   id          uuid primary key default gen_random_uuid(),
   created_at  timestamptz not null default now(),
@@ -205,8 +448,13 @@ create table if not exists public.suggestions (
   comment     text,
   submitted_by text,
   note        text,                     -- curator's note
-  ip_hash     text
+  ip_hash     text,
+  approvals   jsonb not null default '[]'::jsonb
 );
+alter table public.suggestions add column if not exists approvals jsonb not null default '[]'::jsonb;
+alter table public.suggestions drop constraint if exists suggestions_approvals_array;
+alter table public.suggestions add constraint suggestions_approvals_array
+  check (jsonb_typeof(approvals) = 'array') not valid;
 create index if not exists suggestions_status_idx on public.suggestions (status);
 create index if not exists suggestions_ip_idx on public.suggestions (ip_hash, created_at);
 alter table public.suggestions enable row level security;
@@ -218,6 +466,179 @@ create policy suggestions_admin_update on public.suggestions for update to authe
 create policy suggestions_admin_delete on public.suggestions for delete to authenticated using ((select public.is_admin()));
 revoke all on public.suggestions from anon, authenticated;
 grant select, update, delete on public.suggestions to authenticated;
+
+create or replace function public.suggestions_enforce_approval_policy()
+returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_rpc boolean := current_setting('trendb.allow_approval_write', true) = 'on';
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+
+  new.approvals := coalesce(new.approvals, '[]'::jsonb);
+
+  if tg_op = 'INSERT' then
+    if new.status <> 'pending' then
+      raise exception 'New suggestions must start as pending' using errcode = '42501';
+    end if;
+    if jsonb_typeof(new.approvals) <> 'array' or jsonb_array_length(new.approvals) > 0 then
+      raise exception 'New suggestions cannot start with approvals' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  if not v_rpc then
+    if new.approvals is distinct from old.approvals then
+      raise exception 'Approvals can only be changed through the approval functions' using errcode = '42501';
+    end if;
+    if new.status = 'approved' and old.status is distinct from 'approved' then
+      raise exception 'Two different admins must approve a suggestion before it becomes approved' using errcode = '42501';
+    end if;
+    if new.status = 'rejected' or (new.status = 'pending' and old.status in ('approved', 'rejected')) then
+      new.approvals := '[]'::jsonb;
+    elsif old.status = 'pending' and new.status = 'pending' and new.changes is distinct from old.changes then
+      new.approvals := '[]'::jsonb;
+    end if;
+  end if;
+
+  if new.status = 'approved' and old.status is distinct from 'approved' then
+    if public.count_valid_approvals(new.approvals) < 2 then
+      raise exception 'Two different admins must approve a suggestion before it becomes approved' using errcode = '42501';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+drop trigger if exists suggestions_approval_policy_trg on public.suggestions;
+create trigger suggestions_approval_policy_trg
+  before insert or update on public.suggestions
+  for each row execute function public.suggestions_enforce_approval_policy();
+
+create or replace function public.approve_suggestion(p_id uuid, p_note text default null)
+returns setof public.suggestions
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.suggestions%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.suggestions%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.suggestions where id = p_id for update;
+  if not found then
+    return;
+  end if;
+
+  if v_row.status = 'approved' then
+    return next v_row;
+    return;
+  end if;
+
+  select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+  into v_approvals
+  from jsonb_array_elements(
+    case when v_row.status = 'rejected' then '[]'::jsonb else coalesce(v_row.approvals, '[]'::jsonb) end
+  ) with ordinality as t(elem, ord)
+  join public.admins a on lower(a.email) = lower(elem->>'email');
+
+  if not exists (
+    select 1 from jsonb_array_elements(v_approvals) elem
+    where lower(elem->>'email') = v_email
+  ) then
+    v_approvals := v_approvals || jsonb_build_array(
+      jsonb_build_object(
+        'email', v_email,
+        'at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    );
+  end if;
+
+  if public.count_valid_approvals(v_approvals) >= 2 then
+    v_status := 'approved';
+    v_decided_at := now();
+  else
+    v_status := 'pending';
+    v_decided_at := null;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+  update public.suggestions
+  set approvals = v_approvals,
+      status = v_status,
+      decided_at = v_decided_at,
+      note = case when p_note is null then v_row.note else nullif(p_note, '') end
+  where id = v_row.id
+  returning * into v_updated;
+  perform set_config('trendb.allow_approval_write', 'off', true);
+
+  return next v_updated;
+end;
+$$;
+revoke all on function public.approve_suggestion(uuid, text) from public, anon;
+grant execute on function public.approve_suggestion(uuid, text) to authenticated;
+
+create or replace function public.revoke_suggestion_approval(p_id uuid, p_note text default null)
+returns setof public.suggestions
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.suggestions%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.suggestions%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.suggestions where id = p_id for update;
+  if not found then
+    return;
+  end if;
+
+  select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+  into v_approvals
+  from jsonb_array_elements(coalesce(v_row.approvals, '[]'::jsonb)) with ordinality as t(elem, ord)
+  where lower(elem->>'email') <> v_email;
+
+  if v_row.status = 'approved' and public.count_valid_approvals(v_approvals) < 2 then
+    v_status := 'pending';
+    v_decided_at := null;
+  else
+    v_status := v_row.status;
+    v_decided_at := v_row.decided_at;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+  update public.suggestions
+  set approvals = v_approvals,
+      status = v_status,
+      decided_at = v_decided_at,
+      note = case when p_note is null then v_row.note else nullif(p_note, '') end
+  where id = v_row.id
+  returning * into v_updated;
+  perform set_config('trendb.allow_approval_write', 'off', true);
+
+  return next v_updated;
+end;
+$$;
+revoke all on function public.revoke_suggestion_approval(uuid, text) from public, anon;
+grant execute on function public.revoke_suggestion_approval(uuid, text) to authenticated;
 
 -- What the public site reads: approved rows only, without the private columns.
 -- The view deliberately runs with its owner's rights so anonymous visitors can read it

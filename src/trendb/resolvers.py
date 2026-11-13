@@ -304,6 +304,9 @@ class Resolver:
                 data = resp.json()
                 if data.get("status") == "SUCCESS" and data.get("smiles"):
                     smiles = self._canonicalize(data["smiles"])
+            elif resp.status_code not in (400, 404):
+                # Rate limit or outage: say nothing now, and ask again next run.
+                return None
         except Exception:
             return None
         self._cache.set("opsin", key, smiles)
@@ -331,6 +334,8 @@ class Resolver:
                 if props:
                     raw = props[0].get("IsomericSMILES") or props[0].get("CanonicalSMILES") or props[0].get("SMILES")
                     smiles = self._canonicalize(raw)
+            else:
+                return None
         except Exception:
             return None
         self._cache.set("pubchem_name", key, smiles)
@@ -395,6 +400,8 @@ class Resolver:
                 props = (resp.json().get("PropertyTable") or {}).get("Properties") or []
                 if props and props[0].get("CID") and props[0].get("IUPACName"):
                     iupac = str(props[0]["IUPACName"]).strip() or None
+            else:
+                return None
         except Exception:
             return None
         self._cache.set("pubchem_iupac", can, iupac)
