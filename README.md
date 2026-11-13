@@ -31,6 +31,10 @@ Site: https://nuniwo-source.github.io/TrEnDB/
   k_q), an E/Z photostationary-state predictor (Hammond–Saltiel plot) and calculators (Stern–Volmer, diffusion limit,
   E_T by class). Each tool cites the papers its method comes from by DOI; plots download as SVG/CSV and the address
   holds the settings, so a plot can be shared as a link.
+- **Installable app.** The site is a progressive web app (`docs/manifest.webmanifest`, `docs/sw.js`): Android and
+  desktop browsers offer "Install", iPhone uses Share → Add to Home Screen (the home page explains it). It opens
+  full-screen, updates itself on every visit (network first), and works offline with the last copy of the public
+  values saved on the device (cleared at sign-out). The offline script never stores database requests or sign-ins.
 - **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
   structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
 - **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both

@@ -443,6 +443,31 @@
     e.preventDefault(); $("q").focus();
   });
 
+  /* ---------- offline copy of the public values (kept on this device, cleared at sign-out) ---------- */
+  var OFFLINE_KEY = "trendb-offline-copy";
+  function saveOffline(rows) {
+    try { localStorage.setItem(OFFLINE_KEY, JSON.stringify({ at: new Date().toISOString(), rows: rows })); } catch (e) { /* full or blocked: no offline copy */ }
+  }
+  function readOffline() {
+    try { var c = JSON.parse(localStorage.getItem(OFFLINE_KEY) || "null"); return c && Array.isArray(c.rows) ? c : null; } catch (e) { return null; }
+  }
+  function dropOffline() { try { localStorage.removeItem(OFFLINE_KEY); } catch (e) {} }
+  function showOffline(copy) {
+    var n = $("offline-note");
+    if (!copy) { n.hidden = true; return; }
+    n.textContent = "Offline: showing the copy saved on this device on " + new Date(copy.at).toLocaleString() + ". Submitting and suggesting need a connection.";
+    n.hidden = false;
+  }
+  /* no connection, but this device has a copy from an earlier signed-in visit */
+  function openOffline(copy) {
+    state.access = null; state.gated = false; state.isAdmin = false; state.curatorModal = false;
+    $("gate").hidden = true; $("app-body").hidden = false;
+    syncAuthUi();
+    state.docs = copy.rows; state.loaded = true; state.failed = false; state.dataVer++;
+    showOffline(copy); readRoute(); render();
+  }
+  window.addEventListener("online", function () { if (!$("offline-note").hidden) location.reload(); });
+
   /* ---------- unified access gate & curator bridge ---------- */
   function gate(title, text, withForm, err, isCuratorModal) {
     state.curatorModal = !!isCuratorModal;
@@ -468,7 +493,7 @@
   function lock(msg) {
     saveAccess(null); api.signOut();
     state.access = null; state.isAdmin = false; state.gated = false; state.curatorModal = false;
-    state.docs = []; state.loaded = false; state.dataVer++; $("gate-pass").value = "";
+    state.docs = []; state.loaded = false; state.dataVer++; $("gate-pass").value = ""; dropOffline(); showOffline(null);
     syncAuthUi();
     if (msg) loginGate(msg);
     else tryAccess({ user: "", pass: "" }, false);
@@ -483,9 +508,11 @@
       return;
     }
     state.loaded = false; state.failed = false; state.failDetail = ""; readRoute(); render();
-    api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; state.dataVer++; render(); },
+    api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; state.dataVer++; saveOffline(state.docs); showOffline(null); render(); },
       function (err) {
         if (window.console && console.error) console.error("listPublic failed:", err);
+        var copy = readOffline();
+        if (copy && !(err && err.status)) { openOffline(copy); return; }
         state.failed = true; state.failDetail = (err && err.message) || ""; state.dataVer++; render();
       });
   }
@@ -493,7 +520,11 @@
     return api.checkAccess(a).then(function (ok) {
       if (ok === true) { if (fromForm) saveAccess(a); openApp(a, !!(a.user || a.pass), false); }
       else { if (!fromForm) saveAccess(null); loginGate(fromForm ? "Wrong user name or password." : ""); }
-    }, function () { gate("Unavailable", "The database could not be reached. Reload the page to try again.", false, "", false); });
+    }, function () {
+      var copy = readOffline();
+      if (copy) { openOffline(copy); return; }
+      gate("Unavailable", "The database could not be reached. Check the connection and reload the page.", false, "", false);
+    });
   }
 
   $("gate").addEventListener("submit", function (e) {
@@ -538,6 +569,41 @@
     $("gate-user").focus();
   });
   $("lock").addEventListener("click", function (e) { e.preventDefault(); lock(""); });
+
+  /* ---------- install as an app ---------- */
+  if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+    window.addEventListener("load", function () { navigator.serviceWorker.register("sw.js").catch(function () { /* the site works without it */ }); });
+  }
+  var installEvt = null, INSTALL_HIDE = "trendb-install-hidden";
+  function standalone() { return (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true; }
+  function installHidden() { try { return localStorage.getItem(INSTALL_HIDE) === "1"; } catch (e) { return false; } }
+  function isIOS() { return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); }
+  function syncInstall() {
+    var box = $("install");
+    if (standalone() || installHidden()) { box.hidden = true; return; }
+    if (installEvt) {
+      $("install-btn").hidden = false; box.hidden = false;
+    } else if (isIOS()) {
+      $("install-btn").hidden = true;
+      $("install-how").replaceChildren();
+      $("install-how").appendChild(document.createTextNode("On iPhone or iPad: tap Share "));
+      var sh = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      sh.setAttribute("width", "16"); sh.setAttribute("height", "16"); sh.setAttribute("viewBox", "0 0 24 24"); sh.setAttribute("aria-label", "(the square with an arrow)"); sh.setAttribute("role", "img");
+      sh.innerHTML = '<path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M5 11v9h14v-9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+      $("install-how").appendChild(sh);
+      $("install-how").appendChild(document.createTextNode(", then “Add to Home Screen”. It opens full-screen like an app and updates itself."));
+      box.hidden = false;
+    } else box.hidden = true;
+  }
+  window.addEventListener("beforeinstallprompt", function (e) { e.preventDefault(); installEvt = e; syncInstall(); });
+  window.addEventListener("appinstalled", function () { installEvt = null; syncInstall(); Ent.toast("TrEnDB is installed. Find it with your other apps."); });
+  $("install-btn").addEventListener("click", function () {
+    if (!installEvt) return;
+    installEvt.prompt();
+    installEvt.userChoice.then(function () { installEvt = null; syncInstall(); });
+  });
+  $("install-close").addEventListener("click", function () { try { localStorage.setItem(INSTALL_HIDE, "1"); } catch (e) {} syncInstall(); });
+  syncInstall();
 
   function boot() {
     if (!api.configured) { gate("Private preview", "TrEnDB is not open yet.", false, "", false); return; }
