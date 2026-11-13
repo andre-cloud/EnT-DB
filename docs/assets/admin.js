@@ -9,6 +9,8 @@
     search: Ent.newSearch("review")
   };
   var dupCache = {};   /* pending id -> duplicates result, recomputed on every load */
+  /* the reaction sketcher's "Search database" offers the approved molecules */
+  Ent.reactionCatalog = function () { return approvedDocs(); };
   function approvedDocs() { return state.docs.filter(function (d) { return d.status === "approved"; }); }
   function pendingDocs() { return state.docs.filter(function (d) { return d.status === "pending"; }); }
   function dupOf(d) {

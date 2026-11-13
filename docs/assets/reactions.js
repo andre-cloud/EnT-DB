@@ -136,6 +136,78 @@
     var c = el("div", "rx-chip fixed"); c.appendChild(molBox(smiles, 110, 78, label)); return c;
   }
 
+  /* ---------- picking a molecule from the database ----------
+     The page sets Ent.reactionCatalog to a function returning the entries it shows
+     (the public page: the database; the review page: approved entries). */
+  Ent.reactionCatalog = Ent.reactionCatalog || function () { return []; };
+  function catalogMolecules() {
+    var docs = (Ent.reactionCatalog() || []).filter(function (d) { return d && d.smiles; });
+    var groups = Ent.groupByMolecule ? Ent.groupByMolecule(docs) : docs.map(function (d) { return [d]; });
+    return groups.map(function (items) {
+      var d = items[0], roles = {};
+      items.forEach(function (x) { roles[x.role || "acceptor"] = 1; });
+      var name = items.map(function (x) { return (x.commercial_name || "").trim(); }).filter(Boolean)[0] || "";
+      var iupac = items.map(function (x) { return (x.name || "").trim(); }).filter(Boolean)[0] || "";
+      var vals = items.map(function (x) { return Number(x.et_kcal); }).filter(function (v) { return !isNaN(v); });
+      return {
+        smiles: d.smiles, title: name || iupac || d.smiles, sub: name ? iupac : "",
+        donor: !!(roles.donor || roles.both), acceptor: !!(roles.acceptor || roles.both),
+        et: vals.length ? vals : null,
+        hay: items.map(function (x) { return [x.commercial_name, x.name, x.cas, x.cls, x.smiles].join(" "); }).join(" ").toLowerCase()
+      };
+    });
+  }
+  function searchCatalog(q, prefer) {
+    var toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!toks.length) return [];
+    return catalogMolecules().filter(function (m) {
+      return toks.every(function (t) { return m.hay.indexOf(t) >= 0; });
+    }).map(function (m) {
+      var t = m.title.toLowerCase(), score = 0;
+      if (t === toks.join(" ")) score += 100; else if (t.indexOf(toks[0]) === 0) score += 50;
+      if (prefer && m[prefer]) score += 20;
+      return { m: m, score: score - t.length / 100 };
+    }).sort(function (a, b) { return b.score - a.score; }).slice(0, 8).map(function (x) { return x.m; });
+  }
+  /* A small search panel. prefer: "donor" | "acceptor" (listed first); onPick(smiles) */
+  function dbPicker(what, prefer, onPick, onClose) {
+    var box = el("div", "rx-picker");
+    var lab = el("label", "field", "Search the database for the " + what), q = el("input");
+    q.type = "search"; q.placeholder = "Name, CAS number, class or SMILES"; q.autocomplete = "off"; q.spellcheck = false;
+    lab.appendChild(q); box.appendChild(lab);
+    var res = el("div", "rx-results"); res.setAttribute("role", "listbox"); box.appendChild(res);
+    var close = el("button", "btn tiny", "Close search"); close.type = "button"; close.addEventListener("click", onClose);
+    var foot = el("div", "actions"); foot.appendChild(close); box.appendChild(foot);
+    function run() {
+      res.replaceChildren();
+      var list = searchCatalog(q.value, prefer);
+      if (!q.value.trim()) { res.appendChild(el("p", "hint", "Type a few letters: " + (prefer === "donor" ? "photocatalysts (donors)" : "acceptors") + " are listed first.")); return; }
+      if (!list.length) { res.appendChild(el("p", "hint", "Nothing in the database matches. Draw it instead.")); return; }
+      list.forEach(function (m) {
+        var b = el("button", "rx-result"); b.type = "button"; b.setAttribute("role", "option");
+        b.appendChild(molBox(m.smiles, 80, 56));
+        var txt = el("span", "rx-result-txt");
+        txt.appendChild(elT("strong", null, m.title));
+        if (m.sub) txt.appendChild(elT("small", null, m.sub));
+        var meta = [];
+        if (m.donor && m.acceptor) meta.push("donor and acceptor"); else meta.push(m.donor ? "donor" : "acceptor");
+        if (m.et) meta.push("E_T " + (m.et.length > 1 ? Math.min.apply(null, m.et).toFixed(1) + "–" + Math.max.apply(null, m.et).toFixed(1) : m.et[0].toFixed(1)) + " kcal/mol");
+        txt.appendChild(el("small", "rx-meta", meta.join(" · ")));
+        b.appendChild(txt);
+        b.addEventListener("click", function () { onPick(m.smiles); });
+        res.appendChild(b);
+      });
+    }
+    q.addEventListener("input", run);
+    q.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); var first = res.querySelector(".rx-result"); if (first) first.click(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
+    });
+    run();
+    setTimeout(function () { q.focus(); }, 0);
+    return box;
+  }
+
   /* One reaction card. opts: {substrate(): smiles, name(): string, defaultDoi(): string, onChange(), onRemove(), number} */
   function reactionCard(init, opts) {
     var rx = {
@@ -201,6 +273,46 @@
     function sketch(title, smiles, onSave) {
       Ent.sketcher.open({ title: title, smiles: smiles || "", saveLabel: "Use in the reaction", hint: "Draw the structure or paste its SMILES.", onSave: function (s) { onSave(s); draw(); changed(); return true; } });
     }
+    var openPanel = "";   /* which helper panel is open: "db-reactant", "db-catalyst" or "copy" */
+    function togglePanel(name) { openPanel = openPanel === name ? "" : name; draw(); }
+    function picked(fn) { return function (s) { fn(s); openPanel = ""; draw(); changed(); }; }
+    function dbButton(what, name) {
+      var b = el("button", "btn small rx-add", "Search database"); b.type = "button";
+      b.title = "Pick the " + what + " from the molecules already in the database";
+      b.setAttribute("aria-expanded", String(openPanel === name));
+      b.addEventListener("click", function () { togglePanel(name); });
+      return b;
+    }
+    /* Products: start from a copy of chosen reactants, so atoms already present need not be redrawn. */
+    function copyPanel(onCopy) {
+      var box = el("div", "rx-picker rx-copy");
+      box.appendChild(el("p", "hint", "Choose the reactants whose atoms end up in the product. They open together in the sketcher: join or edit them into the product."));
+      var sources = [];
+      if (rx.role === "acceptor") sources.push({ smiles: opts.substrate(), label: "this molecule" });
+      rx.reactants.forEach(function (smi, i) { sources.push({ smiles: smi, label: "reactant " + (i + 1) }); });
+      sources = sources.filter(function (x) { return x.smiles; });
+      var chosen = {};
+      var row = el("div", "rx-chips");
+      if (!sources.length) row.appendChild(el("span", "hint", "Draw or pick the reactants first."));
+      var go = el("button", "btn small primary", "Copy into the sketcher"); go.type = "button"; go.disabled = true;
+      sources.forEach(function (src, i) {
+        var b = el("button", "rx-chip rx-pickable"); b.type = "button"; b.setAttribute("aria-pressed", "false");
+        b.appendChild(molBox(src.smiles, 110, 78, src.label));
+        b.addEventListener("click", function () {
+          chosen[i] = !chosen[i]; b.setAttribute("aria-pressed", String(!!chosen[i])); b.classList.toggle("on", !!chosen[i]);
+          go.disabled = !Object.keys(chosen).some(function (k) { return chosen[k]; });
+        });
+        row.appendChild(b);
+      });
+      box.appendChild(row);
+      var close = el("button", "btn tiny", "Cancel"); close.type = "button"; close.addEventListener("click", function () { togglePanel("copy"); });
+      go.addEventListener("click", function () {
+        var smi = sources.filter(function (x, i) { return chosen[i]; }).map(function (x) { return x.smiles; }).join(".");
+        onCopy(smi);
+      });
+      var act = el("div", "actions"); act.appendChild(go); act.appendChild(close); box.appendChild(act);
+      return box;
+    }
     function slot(label, list, max, what) {
       var box = el("div", "rx-slot"); box.appendChild(el("span", "rx-slot-title", label));
       var row = el("div", "rx-chips");
@@ -214,8 +326,25 @@
         var add = el("button", "btn small rx-add", "+ Draw " + what); add.type = "button";
         add.addEventListener("click", function () { sketch("Sketcher · new " + what, "", function (s) { list.push(s); }); });
         row.appendChild(add);
+        if (what === "reactant") row.appendChild(dbButton("reactant", "db-reactant"));
+        if (what === "product") {
+          var cp = el("button", "btn small rx-add", "Copy from reactants"); cp.type = "button";
+          cp.title = "Start the product from a copy of one or more reactants";
+          cp.setAttribute("aria-expanded", String(openPanel === "copy"));
+          cp.addEventListener("click", function () { togglePanel("copy"); });
+          row.appendChild(cp);
+        }
       }
-      box.appendChild(row); return box;
+      box.appendChild(row);
+      if (list.length < max && what === "reactant" && openPanel === "db-reactant")
+        box.appendChild(dbPicker("reactant", "acceptor", picked(function (s) { list.push(s); }), function () { togglePanel("db-reactant"); }));
+      if (list.length < max && what === "product" && openPanel === "copy")
+        box.appendChild(copyPanel(function (smi) {
+          openPanel = "";
+          sketch("Sketcher · new product (from reactants)", smi, function (s) { list.push(s); });
+          draw();
+        }));
+      return box;
     }
     function catSlot() {
       var box = el("div", "rx-slot rx-cat"); box.appendChild(el("span", "rx-slot-title", "Photocatalyst (above the arrow)"));
@@ -228,8 +357,12 @@
         var add = el("button", "btn small rx-add", "+ Draw photocatalyst"); add.type = "button";
         add.addEventListener("click", function () { sketch("Sketcher · photocatalyst", "", function (s) { rx.catalyst = s; }); });
         row.appendChild(add);
+        row.appendChild(dbButton("photocatalyst", "db-catalyst"));
       }
-      box.appendChild(row); return box;
+      box.appendChild(row);
+      if (rx.role === "acceptor" && !rx.catalyst && openPanel === "db-catalyst")
+        box.appendChild(dbPicker("photocatalyst", "donor", picked(function (s) { rx.catalyst = s; }), function () { togglePanel("db-catalyst"); }));
+      return box;
     }
     function drawPreview() { prev.replaceChildren(Ent.reactionScheme(value(), opts.substrate())); }
     function draw() {

@@ -178,6 +178,7 @@
     max: EntScore.MAX_REACTIONS
   });
   $("fm-reactions").appendChild(rxEd.el);
+  Ent.reactionCatalog = function () { return state.docs; };
   var lastSubstrate = "";
   function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); p.reactions = rxEd.value(); return p; }
   function context(f) {
