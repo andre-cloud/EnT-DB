@@ -695,6 +695,10 @@ button.chip.slide-chip:hover{border-color:var(--bad);color:var(--bad)}
 .mol-link:focus-visible::after{box-shadow:0 0 0 3px var(--accent)}
 .card.mol-sum:hover .mol-link{text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
 .card.mol-sum .slide-pick{position:relative;z-index:2}
+.sum-top{display:flex;gap:10px;justify-content:space-between;align-items:flex-start}
+.sum-top .chips{min-width:0}
+.sum-more{flex:0 0 auto;font-size:.8rem;font-weight:600;color:var(--accent);white-space:nowrap;line-height:1.9}
+.card.mol-sum:hover .sum-more{text-decoration:underline;text-underline-offset:3px}
 .sum-body{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
 .sum-body .paper{min-height:170px}
 .sum-et{border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}

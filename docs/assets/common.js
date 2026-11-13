@@ -1068,7 +1068,12 @@
     var sim = bestSimilarity(items, o);
     if (sim != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(sim, 2)));
     if (o.onSlideToggle && Ent.slideGraphic) chips.appendChild(slidePickBtn(items, o, picked));
-    head.appendChild(chips);
+    /* the whole card already links to the page (the title's overlay); this only says so, top right */
+    var top = el("div", "sum-top"), more = el("span", "sum-more", "See more →");
+    more.setAttribute("aria-hidden", "true");
+    top.appendChild(chips);
+    top.appendChild(more);
+    head.appendChild(top);
 
     var title = renderMolTitle(head, { name: g.iupac, commercial_name: g.comm }), h2 = title.querySelector("h2");
     var link = el("a", "mol-link", h2.textContent);
