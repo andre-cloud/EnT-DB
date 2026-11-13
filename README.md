@@ -24,6 +24,13 @@ Site: https://nuniwo-source.github.io/TrEnDB/
   ("Search database"), and a product can start from a copy of the chosen reactants ("Copy from reactants"), so atoms
   that end up in the product need not be redrawn. Each reaction can carry a description of at most 50 words. Curators can edit or delete single reactions
   before approving, and the public card shows them only when "Reactions it was employed in" is clicked.
+- **Home and PlotEnT.** After signing in, a home page leads to the database or to PlotEnT, a set of plots and
+  calculators that run in the browser on the database values: a photocatalyst finder (donors on one triplet-energy
+  axis around a substrate, with Sandros-predicted relative rates), a Sandros fit that extrapolates an acceptor's E_T
+  from measured k_q values (with error bars, an optional slope factor for non-vertical transfer and tips for measuring
+  k_q), an E/Z photostationary-state predictor (Hammond–Saltiel plot) and calculators (Stern–Volmer, diffusion limit,
+  E_T by class). Each tool cites the papers its method comes from by DOI; plots download as SVG/CSV and the address
+  holds the settings, so a plot can be shared as a link.
 - **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
   structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
 - **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both
@@ -55,6 +62,7 @@ method fully specified, DOI resolves, agreement with existing entries). It does 
 | `docs/` | The static site served by GitHub Pages |
 | `docs/assets/config.js` | The two public settings that connect the site to the backend |
 | `docs/assets/score.js` | The scoring rules and the reaction checks (shared by browser and server) |
+| `docs/assets/plotent.js` | PlotEnT: the plotting tools, fits and their references |
 | `docs/assets/reactions.js` | The reaction sketcher, the reaction drawings and the curator's per-reaction edit/delete |
 | `supabase/schema.sql` | Database tables, access rules and the public view |
 | `supabase/seed.sql` | First batch of literature entries, imported as pending |

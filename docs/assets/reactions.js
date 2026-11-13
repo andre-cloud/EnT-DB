@@ -29,7 +29,7 @@
           svg = r ? r.svg : m.toSVG(w, h, undefined, { suppressChiralText: true, suppressESR: true, suppressCIPParity: true, noStereoProblem: true });
         } catch (e) { svg = null; }
       }
-      svgCache[key] = svg;
+      if (window.OCL) svgCache[key] = svg;   /* not cached before the chemistry library has loaded */
     }
     if (svg) box.innerHTML = svg;
     else box.appendChild(el("code", "rx-smi", smiles || "?"));
@@ -144,8 +144,9 @@
      The page sets Ent.reactionCatalog to a function returning the entries it shows
      (the public page: the database; the review page: approved entries). */
   Ent.reactionCatalog = Ent.reactionCatalog || function () { return []; };
-  function catalogMolecules() {
-    var docs = (Ent.reactionCatalog() || []).filter(function (d) { return d && d.smiles; });
+  /* One record per molecule (CAS, else structure); also used by PlotEnT. docs: optional list, else the page's catalogue. */
+  function catalogMolecules(list) {
+    var docs = (list || Ent.reactionCatalog() || []).filter(function (d) { return d && d.smiles; });
     var groups = Ent.groupByMolecule ? Ent.groupByMolecule(docs) : docs.map(function (d) { return [d]; });
     return groups.map(function (items) {
       var d = items[0], roles = {};
@@ -153,7 +154,14 @@
       var name = items.map(function (x) { return (x.commercial_name || "").trim(); }).filter(Boolean)[0] || "";
       var iupac = items.map(function (x) { return (x.name || "").trim(); }).filter(Boolean)[0] || "";
       var vals = items.map(function (x) { return Number(x.et_kcal); }).filter(function (v) { return !isNaN(v); });
+      function etOf(origin) {
+        return items.filter(function (x) { return x.origin === origin && x.et_kcal != null && !isNaN(Number(x.et_kcal)); })
+          .map(function (x) { return Number(x.et_kcal); });
+      }
+      var uv = items.map(function (x) { return Number(x.uv_lmax); }).filter(function (v) { return v > 0; })[0] || null;
       return {
+        items: items, etExp: etOf("exp"), etCalc: etOf("calc"), cls: (items.map(function (x) { return x.cls; }).filter(Boolean)[0] || ""),
+        uv: uv, both: !!roles.both,
         smiles: d.smiles, title: name || iupac || d.smiles, sub: name ? iupac : "",
         donor: !!(roles.donor || roles.both), acceptor: !!(roles.acceptor || roles.both),
         et: vals.length ? vals : null,
@@ -161,18 +169,21 @@
       };
     });
   }
-  function searchCatalog(q, prefer) {
+  function searchCatalog(q, prefer, list, limit) {
     var toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
     if (!toks.length) return [];
-    return catalogMolecules().filter(function (m) {
+    return catalogMolecules(list).filter(function (m) {
       return toks.every(function (t) { return m.hay.indexOf(t) >= 0; });
     }).map(function (m) {
       var t = m.title.toLowerCase(), score = 0;
       if (t === toks.join(" ")) score += 100; else if (t.indexOf(toks[0]) === 0) score += 50;
       if (prefer && m[prefer]) score += 20;
       return { m: m, score: score - t.length / 100 };
-    }).sort(function (a, b) { return b.score - a.score; }).slice(0, 8).map(function (x) { return x.m; });
+    }).sort(function (a, b) { return b.score - a.score; }).slice(0, limit || 8).map(function (x) { return x.m; });
   }
+  Ent.catalogMolecules = catalogMolecules;
+  Ent.searchCatalog = searchCatalog;
+  Ent.molBox = molBox;
   /* A small search panel. prefer: "donor" | "acceptor" (listed first); onPick(smiles) */
   function dbPicker(what, prefer, onPick, onClose) {
     var box = el("div", "rx-picker");

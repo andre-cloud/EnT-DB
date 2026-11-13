@@ -45,6 +45,43 @@
   </form>
 
   <div class="stack" id="app-body" hidden>
+    <nav class="sections" id="sections" aria-label="Sections">
+      <a href="#home" data-sec="home">Home</a>
+      <a href="#db" data-sec="db">Database</a>
+      <a href="#plot" data-sec="plot">Plot<span class="en">EnT</span></a>
+    </nav>
+
+    <section id="home-view" class="home" aria-labelledby="home-title" hidden>
+      <div class="home-head">
+        <h2 id="home-title">Where do you want to go?</h2>
+        <p class="lede">Curated triplet energies for energy-transfer photochemistry, and tools to put them to work.</p>
+      </div>
+      <div class="home-grid">
+        <a class="home-card" href="#db">
+          <span class="home-card-top">
+            <span class="home-icon db" aria-hidden="true"><svg width="40" height="40" viewBox="0 0 40 40"><path d="M9 11 V30 a11 4 0 0 0 22 0 V11" fill="#22a06b"/><ellipse cx="20" cy="11" rx="11" ry="4" fill="#5fd39a"/><path d="M9 18 a11 4 0 0 0 22 0 M9 24 a11 4 0 0 0 22 0" fill="none" stroke="#12301f" stroke-width="1.5" opacity=".35"/></svg></span>
+            <span class="home-card-title"><span class="h">Database</span><span class="sub" id="home-db-count">Loading…</span></span>
+          </span>
+          <span class="home-card-text">Browse and search triplet energies (E<sub>T</sub>) of donors and acceptors by name, CAS number or structure. Every value carries its method, source DOI and where it sits in the paper.</span>
+          <span class="home-tags"><span>Structure search</span><span>Reactions it was employed in</span><span>Submit a value</span></span>
+          <span class="home-go">Open the database →</span>
+        </a>
+        <a class="home-card" href="#plot">
+          <span class="home-card-top">
+            <span class="home-icon plot" aria-hidden="true"><svg width="40" height="40" viewBox="0 0 40 40"><path d="M6 6 V34 H35" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 31 C 16 31, 17 10, 24 9 S 32 8, 34 8" fill="none" class="pe-curve" stroke-width="2.6" stroke-linecap="round"/><circle cx="12" cy="29" r="2.2" class="pe-pt"/><circle cx="18" cy="21" r="2.2" class="pe-pt"/><circle cx="22" cy="12" r="2.2" class="pe-pt"/><circle cx="30" cy="9" r="2.2" class="pe-pt"/></svg></span>
+            <span class="home-card-title"><span class="h">Plot<span class="en">EnT</span></span><span class="sub">4 plotting tools · run in your browser</span></span>
+          </span>
+          <span class="home-card-text">Plots and calculators for energy transfer built on the database: find a photocatalyst for your substrate, fit Sandros curves to extrapolate E<sub>T</sub>, and predict photostationary states.</span>
+          <span class="home-tags plot"><span>Photocatalyst finder</span><span>Sandros fit</span><span>E/Z photostationary state</span><span>Calculators</span></span>
+          <span class="home-go">Open PlotEnT →</span>
+        </a>
+      </div>
+      <p class="hint">You can switch between the two at any time from the bar above.</p>
+    </section>
+
+    <section id="plot-view" class="plotent" aria-label="PlotEnT" hidden></section>
+
+    <div id="db-section">
     <div class="admin-sticky">
       <nav class="tabs" role="tablist" aria-label="Views">
         <button class="tab" id="tab-db" role="tab" data-view="db" aria-selected="true">Database<span class="n" id="n-db">0</span></button>
@@ -286,6 +323,7 @@
         </aside>
       </div>
     </form>
+    </div>
   </div>
 
   <footer class="foot">Values are transcribed from the cited papers; check the source before relying on one. Code and data: <a href="https://github.com/nuniwo-source/TrEnDB">github.com/nuniwo-source/TrEnDB</a>.</footer>
@@ -325,6 +363,7 @@
 <script src="assets/chem-render.js"></script>
 <script src="assets/common.js"></script>
 <script src="assets/reactions.js"></script>
+<script src="assets/plotent.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

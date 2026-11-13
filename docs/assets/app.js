@@ -3,7 +3,7 @@
   "use strict";
   var $ = Ent.$, el = Ent.el, api = Ent.api;
   var state = {
-    docs: [], view: "db", triage: "", loaded: false, failed: false, failDetail: "",
+    docs: [], view: "db", section: "home", plotRoute: { tool: "", data: "" }, dataVer: 0, triage: "", loaded: false, failed: false, failDetail: "",
     access: null, isAdmin: false, gated: false, curatorModal: false,
     search: Ent.newSearch("received-desc"),
     slideSel: {}, slideOrder: []
@@ -77,7 +77,7 @@
     var bar = $("slide-bar");
     if (!bar) return;
     var n = state.slideOrder.length;
-    bar.hidden = state.view === "submit" || !n;
+    bar.hidden = state.view === "submit" || state.section !== "db" || !n;
     if (!n) return;
     $("slide-count").textContent = n + (n === 1 ? " molecule for slide" : " molecules for slide");
     var chips = $("slide-chips");
@@ -121,7 +121,44 @@
     syncSlideBar(); render();
   });
 
+  /* ---------- sections: Home, Database, PlotEnT (the address holds where you are) ---------- */
+  function readRoute() {
+    var h = (location.hash || "").replace(/^#/, ""), parts = h.split("/");
+    if (parts[0] === "db") { state.section = "db"; state.view = "db"; }
+    else if (parts[0] === "submit") { state.section = "db"; state.view = "submit"; }
+    else if (parts[0] === "plot") { state.section = "plot"; state.plotRoute = { tool: parts[1] || "", data: parts.slice(2).join("/") }; }
+    else state.section = "home";
+  }
+  function go(hash) { if (location.hash !== hash) location.hash = hash; else { readRoute(); render(); } }
+  window.addEventListener("hashchange", function () { readRoute(); render(); window.scrollTo(0, 0); });
+  var plotCtx = {
+    docs: function () { return state.docs; },
+    loaded: function () { return state.loaded; },
+    failed: function () { return state.failed; },
+    version: function () { return state.dataVer; },
+    searchDb: function (q) { go("#db"); $("q").value = q; state.search.q = q; render(); }
+  };
+  function renderSections() {
+    var sec = state.section;
+    Array.prototype.forEach.call(document.querySelectorAll("#sections a"), function (a) {
+      if (a.getAttribute("data-sec") === sec) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
+    $("home-view").hidden = sec !== "home";
+    $("plot-view").hidden = sec !== "plot";
+    $("db-section").hidden = sec !== "db";
+    if (sec === "home") {
+      $("home-db-count").textContent = state.loaded
+        ? state.docs.length + (state.docs.length === 1 ? " value" : " values") + " · " + Ent.groupByMolecule(state.docs).length + " molecules"
+        : state.failed ? "Could not be loaded" : "Loading…";
+    }
+    if (sec === "plot") readRoute();   /* the tool keeps its latest settings in the address */
+    if (sec === "plot") window.PlotEnT.render($("plot-view"), state.plotRoute, plotCtx);
+    syncSlideBar();
+    return sec === "db";
+  }
+
   function render() {
+    if (!renderSections()) return;
     $("n-db").textContent = state.docs.length;
     Ent.fillClasses(state.docs, state.search);
     $("tab-db").setAttribute("aria-selected", String(state.view === "db"));
@@ -382,9 +419,9 @@
 
   /* ---------- tabs, aside toggle & shortcuts ---------- */
   Array.prototype.forEach.call(document.querySelectorAll(".tab[data-view]"), function (t) {
-    t.addEventListener("click", function () { state.view = t.getAttribute("data-view"); render(); });
+    t.addEventListener("click", function () { go(t.getAttribute("data-view") === "submit" ? "#submit" : "#db"); });
   });
-  $("pub-go-submit").addEventListener("click", function () { state.view = "submit"; render(); });
+  $("pub-go-submit").addEventListener("click", function () { go("#submit"); });
   $("pub-toggle-aside").addEventListener("click", function () {
     var aside = $("pub-aside"), open = !aside.classList.contains("open");
     aside.classList.toggle("open", open);
@@ -393,12 +430,12 @@
   $("f-reset").addEventListener("click", function () { state.triage = ""; });
   Ent.bindSearch(state.search, render);
   Ent.sketcher.bind();
-  Ent.loadOCL(render);
+  Ent.loadOCL(function () { state.dataVer++; render(); });   /* structures can be drawn now */
 
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && state.curatorModal && !$("gate").hidden) { cancelCuratorGate(); return; }
     if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (state.view !== "db" || $("app-body").hidden) return;
+    if (state.section !== "db" || state.view !== "db" || $("app-body").hidden) return;
     var ed = $("ed"), sk = $("sk");
     if ((ed && !ed.hidden) || (sk && !sk.hidden)) return;
     var tag = document.activeElement && document.activeElement.tagName;
@@ -431,7 +468,7 @@
   function lock(msg) {
     saveAccess(null); api.signOut();
     state.access = null; state.isAdmin = false; state.gated = false; state.curatorModal = false;
-    state.docs = []; state.loaded = false; $("gate-pass").value = "";
+    state.docs = []; state.loaded = false; state.dataVer++; $("gate-pass").value = "";
     syncAuthUi();
     if (msg) loginGate(msg);
     else tryAccess({ user: "", pass: "" }, false);
@@ -445,11 +482,11 @@
       Ent.toast("Signed in as curator. You can open the admin page from the top bar.");
       return;
     }
-    state.loaded = false; state.failed = false; state.failDetail = ""; render();
-    api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; render(); },
+    state.loaded = false; state.failed = false; state.failDetail = ""; readRoute(); render();
+    api.listPublic(a, !!isAdmin).then(function (rows) { state.docs = rows || []; state.loaded = true; state.dataVer++; render(); },
       function (err) {
         if (window.console && console.error) console.error("listPublic failed:", err);
-        state.failed = true; state.failDetail = (err && err.message) || ""; render();
+        state.failed = true; state.failDetail = (err && err.message) || ""; state.dataVer++; render();
       });
   }
   function tryAccess(a, fromForm) {
