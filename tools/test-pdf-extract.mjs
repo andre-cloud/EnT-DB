@@ -534,14 +534,15 @@ assert.equal(EntPdf.normalizeText("ﬂuorescence\u00adtest"), "fluorescencetest"
   // Labels defined in the paper
   const labDoc = { pages: [
     { pageNum: 1, text: "photoreduction and photooxidation reactions of Ru(bpy) 32+ (1 a) are known.\nWe used [Ir(dFCF3ppy)2(dtb)]+ (PC-10) and the\nhydrodechlorination of 4-chloroanisole (2a, 1 equiv). See benzophenone (S1) and ref (3b)." },
-    { pageNum: 2, text: "With thioxanthone (4a) and later xanthone (4a) the label is ambiguous. Dimethyl fumarate (5a) is a class word." }
+    { pageNum: 2, text: "With thioxanthone (4a) and later xanthone (4a) the label is ambiguous. Dimethyl fumarate (5a) is an ester." }
   ] };
   const defs = T.labelDefinitions(labDoc, kb.keys);
   assert.equal(defs["1a"].name, "Ru(bpy)3");
   assert.equal(defs["pc-10"].name, "[Ir(dFCF3ppy)2(dtb)]");
   assert.equal(defs["2a"].name, "4-chloroanisole");
   assert.equal(defs["4a"], null);
-  assert.ok(!("s1" in defs) && !("3b" in defs) && !("5a" in defs));
+  assert.ok(!("s1" in defs) && !("3b" in defs));
+  assert.equal(defs["5a"].name, "Dimethyl fumarate"); // an ester is a compound, not a class word
   const labelled = [{ name: "1a", verify_note: "x" }, { name: "Catalyst PC-10" }, { name: "4a" }, { name: "benzophenone 2a" }, { name: "9b" }];
   T.applyLabelDefinitions(labelled, defs);
   assert.deepEqual(labelled.map((c) => c.name), ["Ru(bpy)3", "[Ir(dFCF3ppy)2(dtb)]", "4a", "benzophenone 2a", "9b"]);
@@ -557,6 +558,71 @@ assert.equal(EntPdf.normalizeText("ﬂuorescence\u00adtest"), "fluorescencetest"
   const prose = (text) => T.extractFromProse(page(text), kb.byName, kb.keys, { doi: null, citation: null });
   assert.equal(prose("In general, styrenes possess excited state triplet energies (ET) of approximately 60 kcal mol-1.").length, 0);
   assert.equal(prose("Benzophenone has a triplet energy of approximately 69 kcal mol-1.").length, 1);
+}
+
+// 5d. Regressions from the arts/ciao review files
+{
+  const kb = T.buildKnowledgeIndex([]);
+  const one = (text) => T.extractFromProse({ name: "r.pdf", pages: [{ pageNum: 3, text, layoutText: "", tables: [] }] },
+    kb.byName, kb.keys, { doi: null, citation: null });
+  const vals = (text) => one(text).map((h) => h.et_kcal);
+  const named = (text) => one(text).map((h) => [h.name, h.et_kcal]);
+  // bounds, limits, class statements and changes are not values of a molecule
+  assert.deepEqual(vals("Their triplet energies (ET up to 2.81 eV) are among the highest known to date."), []);
+  assert.deepEqual(vals("The three experiments demonstrate that it is able to sensitize substrates with triplet energies up to 3.0 eV."), []);
+  assert.deepEqual(vals("In particular, the triplet energies (ET) of the most commonly used Ir PCs do not typically exceed 2.75 eV and their photoreducing strength is modest."), []);
+  assert.deepEqual(vals("Nevertheless, the triplet energy level (ET ) of 64 kcal mol-1 has represented a plateau until very recent advances."), []);
+  assert.deepEqual(vals("An iridium complex is capable of sensitizing certain styrenes (ET 250 kJ mol-1)."), []);
+  assert.deepEqual(vals("Considering the triplet energies of the oxime esters of aliphatic carboxylic acids (ET = 45.4 kcal mol-1), we envisioned a transfer."), []);
+  assert.deepEqual(vals("This example shows that despite nearly identical thermodynamics (same triplet energy of 2.50 eV for both photosensitizers), lifetimes matter."), []);
+  assert.deepEqual(vals("Lewis acid activation lowers both the triplet energy (62.6 kcal mol-1 - 52.1 kcal mol-1) and the barrier."), []);
+  // one molecule and two values: the second value belongs to someone else
+  assert.deepEqual(named("For the [Ir(dFN(Me)2ppy)2(BCF)2] / Bph donor-acceptor couple we estimate a driving-force based on the triplet energies of 2.99 and 2.84 eV."),
+    [["[Ir(dFN(Me)2ppy)2(BCF)2]", 69.0], ["(unnamed candidate)", 65.5]]);
+  // gold complexes, esters, common substrates and compound numbers
+  assert.deepEqual(named("[Au(SIPr)Cbz] and [Au(IPr)(Cbz)] have higher triplet energy (ET) values (66.6 and 66.3 kcal mol-1, respectively)."),
+    [["[Au(SIPr)Cbz]", 66.6], ["[Au(IPr)(Cbz)]", 66.3]]);
+  assert.deepEqual(named("As a first test reaction, we chose the photoisomerization of trans-methyl cinnamate (ET = 2.38 eV) to its cis-isomer."),
+    [["trans-methyl cinnamate", 54.9]]);
+  assert.deepEqual(named("We examined methyl fumarate E-3a (ET = 66.2 kcal mol-1) and methyl maleate Z-3a (ET = 71.0 kcal mol-1)."),
+    [["methyl fumarate", 66.2], ["methyl maleate", 71.0]]);
+  assert.deepEqual(named("The triplet energy of cinnamic aldehyde (6a) for example has been determined as ET = 300 kJ mol-1."),
+    [["cinnamic aldehyde", 71.7]]);
+  assert.deepEqual(named("The cyclization was inhibited in the presence of isoprene, a more efficient triplet quencher due to its lower ET value of 60 kcal mol-1."),
+    [["isoprene", 60.0]]);
+  assert.deepEqual(named("The triplet energy of 3 is higher (74.6 kcal mol-1) compared to 1a (63.2 kcal mol-1) and [Au(SIPr)(Cbz)] (67.9 kcal mol-1)."),
+    [["3", 74.6], ["1a", 63.2], ["[Au(SIPr)(Cbz)]", 67.9]]);
+  assert.deepEqual(named("These values correspond to ET values of 65.9 kcal mol-1 for 3g and higher for the other complexes."), [["3g", 65.9]]);
+  assert.deepEqual(vals("Fewer photocatalysts have ET values that exceed 64 kcal mol-1."), []);
+  assert.deepEqual(vals("The excited complex lies above the substrate ET (by ~0.9 eV) in this case."), []);
+  assert.equal(T.scanComplexes("we used fac-Ir(pmb)3(where pmb represents a carbene) here")[0][2], "fac-Ir(pmb)3");
+  // a value that refers back to the complex named in the sentence before
+  const back = one("We attached B(C6F5)3 to give [Ir(dFN(Me)2ppy)2(BCF)2]. This new complex exhibits an exceptionally high triplet energy of 2.99 eV.");
+  assert.equal(back[0].name, "(unnamed candidate)");
+  assert.equal(back[0].suggest_name, "[Ir(dFN(Me)2ppy)2(BCF)2]");
+
+  // ligatures in the private area, decided from the document's own words
+  const lig = { pages: [{ text: "the simplest of avonoids, avone with an ET value\nflavone is cheap", layoutText: "avone", tables: [[["avone"]]] }] };
+  assert.deepEqual(T.fixPrivateLigatures(lig), ["U+E104 read as “fl”"]);
+  assert.match(lig.pages[0].text, /flavonoids, flavone with/);
+  assert.equal(lig.pages[0].tables[0][0][0], "flavone");
+  assert.equal(EntPdf.normalizeText("E1/2 = 1.56 V"), "E1/2 = +1.56 V");
+
+  // a table name cell that swallowed the absorption column
+  const tdoc = { name: "t.pdf", pages: [{ pageNum: 5, text: "Table 1. Summary of photophysical data", layoutText: "",
+    tables: [[["complex", "ET /eV"], ["[Ru(bpy)2(BCF) 2] 390 (7500)", "2.50"], ["[Ru(bpy)3] 452 (13 000)", "2.12"]]] }] };
+  assert.deepEqual(T.extractFromTables(tdoc, kb.byName, { doi: null, citation: null }).map((h) => h.name), ["[Ru(bpy)2(BCF)2]", "[Ru(bpy)3]"]);
+
+  // OPSIN only where it cannot guess: no metals, no substituents without locants
+  const oq = (name) => T.opsinQueries(name, T.nameQueries(name)).map((x) => x.q);
+  assert.ok(oq("2-Pyridyl 3-thienyl ketone").includes("2-Pyridyl 3-thienyl ketone"));
+  assert.ok(oq("Pyrylium, 2,6-dimethyl-4-phenyl-, perchlorate").includes("2,6-dimethyl-4-phenylpyrylium perchlorate"));
+  assert.deepEqual(oq("Porphyrin, zinc(II)"), []);
+  assert.deepEqual(oq("Tetrabenzoporphyrin, zinc(II)"), []);
+  assert.ok(!oq("1,3-Butadiene, di(2-thienyl)-").some((q) => /^di\(/.test(q)));
+  // known misprints of the handbook
+  assert.ok(T.nameQueries("1,4-Benzoquinone,tetrachioro-").some((x) => x.exact && x.q === "tetrachloro-1,4-Benzoquinone"));
+  assert.ok(T.nameQueries("1,8-Naphthalenedicarboximide, N-methy-").some((x) => x.exact && x.q === "N-methyl-1,8-naphthalimide"));
 }
 
 // 6. admin.html wiring checks
@@ -577,6 +643,7 @@ for (const needle of [
   'id="pdf-files"',
   "worker-src blob:",
   "'wasm-unsafe-eval'",
+  "https://www.ebi.ac.uk",
 ]) {
   assert.ok(adminHtml.includes(needle), `admin.html missing: ${needle}`);
 }
