@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co https://pubchem.ncbi.nlm.nih.gov https://doi.org; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>TrEnDB · Triplet Energy Database</title>
 <meta name="description" content="Curated triplet energies of energy-transfer donors and acceptors, with method, source and structure search.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -262,6 +262,11 @@
               <label class="field">Used in photocatalysis: DOI of a paper (optional)<input id="fm-usedoi" class="mono" type="text" placeholder="10.xxxx/…" spellcheck="false" autocomplete="off"></label>
               <label class="field">What it was used for, briefly<input id="fm-usenote" type="text" placeholder="e.g. sensitizer for [2+2] cycloaddition of enones" autocomplete="off"></label>
             </div>
+            <div class="rx-host">
+              <p class="rx-host-title">Reactions it was employed in (optional)</p>
+              <p class="hint">Draw up to 10 example reactions. Each one needs the DOI of its paper first. As a donor the molecule sits above the arrow as the photocatalyst; as an acceptor it is a reactant.</p>
+              <div id="fm-reactions"></div>
+            </div>
             <label class="field">Your name or contact (optional, seen only by curators)<input id="fm-by" type="text" autocomplete="off"></label>
             <div class="hp" aria-hidden="true"><label>Leave this field empty<input id="fm-website" type="text" tabindex="-1" autocomplete="off"></label></div>
           </fieldset>
@@ -319,6 +324,7 @@
 <script src="assets/score.js"></script>
 <script src="assets/chem-render.js"></script>
 <script src="assets/common.js"></script>
+<script src="assets/reactions.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

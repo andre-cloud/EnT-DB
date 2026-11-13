@@ -169,7 +169,17 @@
   var FIELDS = ["name", "commercial_name", "cas", "cls", "smiles", "role", "et", "unit", "unc", "origin", "kind", "tech", "solvent", "temp",
                 "func", "basis", "solv", "cite", "doi", "loc", "quote", "uv_lmax", "uv_eps", "uv_cond", "direct_src", "direct_nm",
                 "usedoi", "usenote", "by", "website"];
-  function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); return p; }
+  /* reactions the molecule was employed in: drawn with the reaction sketcher */
+  var rxEd = Ent.reactionsEditor({
+    substrate: function () { return $("fm-smiles").value.trim(); },
+    name: function () { return $("fm-commercial_name").value.trim() || $("fm-name").value.trim() || "this molecule"; },
+    defaultDoi: function () { return $("fm-usedoi").value.trim(); },
+    defaultRole: function () { return $("fm-role").value; },
+    max: EntScore.MAX_REACTIONS
+  });
+  $("fm-reactions").appendChild(rxEd.el);
+  var lastSubstrate = "";
+  function payload() { var p = {}; FIELDS.forEach(function (k) { p[k] = $("fm-" + k).value; }); p.reactions = rxEd.value(); return p; }
   function context(f) {
     var ok = Ent.structureOk(f.smiles), same = null;
     if (ok) { var id = Ent.idCode(f.smiles); same = state.docs.filter(function (d) { return Ent.idCode(d.smiles) === id; }); }
@@ -177,6 +187,7 @@
   }
   function updateForm() {
     var f = EntScore.normalize(payload()), ctx = context(f);
+    if (f.smiles !== lastSubstrate) { lastSubstrate = f.smiles; rxEd.refresh(); }
     $("fm-exp").hidden = f.origin === "calc"; $("fm-calc").hidden = f.origin !== "calc";
     var info = f.smiles ? Ent.molInfo(f.smiles) : null, pv = $("fm-preview");
     if (info) { pv.innerHTML = info.svg; $("fm-formula").textContent = info.formula; }
@@ -211,16 +222,16 @@
       onSave: function (s) { $("fm-smiles").value = s; updateForm(); return true; }
     });
   });
-  $("fm-reset").addEventListener("click", function () { $("form").reset(); fmMsg(); updateForm(); });
+  $("fm-reset").addEventListener("click", function () { $("form").reset(); rxEd.reset(); fmMsg(); updateForm(); });
   $("form").addEventListener("submit", function (e) {
     e.preventDefault();
     var u = updateForm();
-    var miss = EntScore.requiredError(u.f, u.ctx); if (miss) { fmMsg("fm-err", miss); return; }
+    var miss = EntScore.requiredError(u.f, u.ctx) || rxEd.pending() || rxStructureError(u.f.reactions); if (miss) { fmMsg("fm-err", miss); return; }
     $("fm-submit").disabled = true; fmMsg();
     var p = payload(); p.access_user = (state.access && state.access.user) || ""; p.access_pass = (state.access && state.access.pass) || "";
     api.submit(p).then(function (r) {
       $("fm-submit").disabled = false;
-      $("form").reset(); updateForm();
+      $("form").reset(); rxEd.reset(); updateForm();
       fmMsg("fm-ok", "Sent for review with a score of " + r.score + " (" + r.grade + "). It will appear in the database once a curator approves it.");
       Ent.toast("Entry sent for review (score " + r.score + " · " + r.grade + ").");
     }, function (err) {
@@ -230,6 +241,11 @@
         : err.status === 400 ? err.message : "The entry could not be sent. Try again in a moment.");
     });
   });
+
+  function rxStructureError(rx) {
+    var bad = rx && rx.smiles ? rx.smiles.filter(function (s) { return Ent.structureOk(s) === false; })[0] : null;
+    return bad ? "A structure in the reactions could not be read: " + bad : "";
+  }
 
   /* ---------- suggesting a correction to an entry in the database ---------- */
   var LONG = { quote: 1, conditions: 1, method: 1, citation: 1, evidence: 1, et_type: 1 };
@@ -303,7 +319,17 @@
       udi.type = "text"; udi.placeholder = "10.xxxx/…"; ud.appendChild(udi);
       var un = el("label", "field", "What it was used for"), uni = el("input"); uni.type = "text"; uni.maxLength = 300; un.appendChild(uni);
       ub.appendChild(ud); ub.appendChild(un); body.appendChild(ub);
-      var lc = el("label", "field", "What is wrong, and where does the correct value come from? (required)"), com = el("textarea"); com.rows = 3; com.maxLength = 1000; lc.appendChild(com); body.appendChild(lc);
+      var haveRx = Array.isArray(d.reactions) ? d.reactions.length : 0;
+      var rxFs = el("fieldset", "rx-host"); rxFs.appendChild(el("legend", null, "Reactions it was employed in (optional)"));
+      rxFs.appendChild(el("p", "hint", "Add example reactions of this molecule from the literature. Each reaction needs the DOI of its paper before the sketcher unlocks." +
+        (haveRx ? " The entry already has " + haveRx + (haveRx === 1 ? " reaction" : " reactions") + "; at most " + EntScore.MAX_REACTIONS + " in total." : "")));
+      var sRx = Ent.reactionsEditor({
+        substrate: function () { return d.smiles || ""; }, name: function () { return Ent.displayName(d); },
+        defaultDoi: function () { return udi.value.trim(); }, defaultRole: function () { return d.role; },
+        max: EntScore.MAX_REACTIONS - haveRx
+      });
+      rxFs.appendChild(sRx.el); body.appendChild(rxFs);
+      var lc = el("label", "field", "What is wrong, and where does the correct value come from? (required when you change a value)"), com = el("textarea"); com.rows = 3; com.maxLength = 1000; lc.appendChild(com); body.appendChild(lc);
       var lb = el("label", "field", "Your name or contact (optional, seen only by curators)"), by = el("input"); by.type = "text"; by.maxLength = 120; lb.appendChild(by); body.appendChild(lb);
       var hp = el("div", "hp"); hp.setAttribute("aria-hidden", "true"); var hpi = el("input"); hpi.type = "text"; hpi.tabIndex = -1; hpi.autocomplete = "off"; hp.appendChild(hpi); body.appendChild(hp);
 
@@ -319,10 +345,19 @@
         var changes = {};
         inputs.forEach(function (x) { if (differs(x.type, x.now, x.inp.value)) changes[x.k] = x.inp.value; });
         if (udi.value.trim() || uni.value.trim()) changes.uses_add = { doi: udi.value, note: uni.value };
-        if (!Object.keys(changes).length) { err.textContent = "Change at least one field, or add a paper."; err.hidden = false; return; }
+        var rxVals = sRx.value();
+        if (rxVals.length) changes.reactions_add = rxVals;
+        if (!Object.keys(changes).length) { err.textContent = "Change at least one field, add a paper or add a reaction."; err.hidden = false; return; }
+        var rxPend = rxVals.length ? sRx.pending() : "";
+        if (rxPend) { err.textContent = rxPend; err.hidden = false; return; }
         var chk = EntScore.checkSuggestion(changes);
         if (chk.error) { err.textContent = chk.error; err.hidden = false; return; }
-        if (!com.value.trim()) { err.textContent = "Explain briefly what is wrong and where the correct value comes from."; err.hidden = false; com.focus(); return; }
+        if (chk.clean.reactions_add) {
+          var rxBad = rxStructureError(EntScore.checkReactions(chk.clean.reactions_add, haveRx));
+          if (rxBad) { err.textContent = rxBad; err.hidden = false; return; }
+        }
+        var onlyAdds = Object.keys(chk.clean).every(function (k) { return k === "uses_add" || k === "reactions_add"; });
+        if (!com.value.trim() && !onlyAdds) { err.textContent = "Explain briefly what is wrong and where the correct value comes from."; err.hidden = false; com.focus(); return; }
         err.hidden = true; send.disabled = true;
         api.submit({ kind: "suggestion", entry_id: d.id, changes: chk.clean, comment: com.value, by: by.value, website: hpi.value,
           access_user: (state.access && state.access.user) || "", access_pass: (state.access && state.access.pass) || "" })

@@ -822,6 +822,19 @@
       });
       c.appendChild(el("p", "hint", "Used in photocatalysis")); c.appendChild(ul);
     }
+    var rxList = Array.isArray(d.reactions) ? d.reactions : [];
+    if (rxList.length && Ent.reactionsAdminList && adm && adm.onPatch) {
+      var rxa = Ent.reactionsAdminList({
+        list: rxList, substrate: d.smiles, name: displayName(d), busy: adm.busy && adm.busy[d.id],
+        open: d.status === "pending",
+        label: d.status === "pending" ? "check them before approving" : "",
+        save: function (next) { return Promise.resolve(adm.onPatch(d.id, { reactions: next.length ? next : null })).then(function (r) { return r !== false; }); }
+      });
+      if (rxa) c.appendChild(rxa);
+    } else if (rxList.length && Ent.reactionsSection) {
+      var rxs = Ent.reactionsSection(rxList.map(function (rx) { return { rx: rx, substrate: d.smiles }; }), displayName(d));
+      if (rxs) c.appendChild(rxs);
+    }
 
     if (o.onSuggest) {
       var sa = el("div", "actions"), sb = el("button", "btn small", "Suggest a correction"); sb.type = "button";
@@ -1081,6 +1094,14 @@
       });
       c.appendChild(el("p", "hint", "Used in photocatalysis")); c.appendChild(ul);
     }
+    var rxAll = [];
+    items.forEach(function (d) {
+      (Array.isArray(d.reactions) ? d.reactions : []).forEach(function (rx) { if (rx && typeof rx === "object") rxAll.push({ rx: rx, substrate: d.smiles || p.smiles }); });
+    });
+    if (rxAll.length && Ent.reactionsSection) {
+      var rxs = Ent.reactionsSection(rxAll, comm || iupac || "molecule");
+      if (rxs) c.appendChild(rxs);
+    }
     return c;
   };
 
@@ -1247,10 +1268,33 @@
     t.appendChild(tr);
     Object.keys(s.changes || {}).forEach(function (k) {
       var r = el("tr"), cur = entry ? (k === "uses_add" ? (Array.isArray(entry.uses) ? entry.uses.map(shown).join("; ") : "") : entry[k]) : "";
-      r.appendChild(elT("td", null, SUGG_LABEL[k] || k)); r.appendChild(el("td", "old", shown(cur))); r.appendChild(el("td", "new", shown(s.changes[k])));
+      var nowTxt = shown(cur), newTxt = shown(s.changes[k]);
+      if (k === "reactions_add" || k === "reactions") {
+        var have = entry && Array.isArray(entry.reactions) ? entry.reactions.length : 0, add = Array.isArray(s.changes[k]) ? s.changes[k].length : 0;
+        nowTxt = have ? have + (have === 1 ? " reaction" : " reactions") : "(none)";
+        newTxt = k === "reactions" ? add + " reactions in total (listed below)" : "+ " + add + (add === 1 ? " reaction" : " reactions") + " (listed below)";
+      }
+      r.appendChild(elT("td", null, SUGG_LABEL[k] || (k === "reactions" ? "Reactions (edited by a curator)" : k))); r.appendChild(el("td", (k === "reactions_add" || k === "uses_add") ? null : "old", nowTxt)); r.appendChild(el("td", "new", newTxt));
       t.appendChild(r);
     });
     wrap.appendChild(t); c.appendChild(wrap);
+    var sgRx = s.changes && (s.changes.reactions_add || s.changes.reactions);
+    if (Array.isArray(sgRx) && sgRx.length && Ent.reactionsAdminList && entry) {
+      var rxKey = s.changes.reactions_add ? "reactions_add" : "reactions";
+      var have2 = Array.isArray(entry.reactions) ? entry.reactions.length : 0;
+      var over = rxKey === "reactions_add" && have2 + sgRx.length > EntScore.MAX_REACTIONS;
+      var rxa = Ent.reactionsAdminList({
+        list: sgRx, substrate: (s.changes.smiles || entry.smiles), name: displayName(entry), busy: h.busy[s.id], open: true,
+        label: rxKey === "reactions_add" ? "proposed" : "after the curator's edit",
+        save: function (next) {
+          var ch = {}; Object.keys(s.changes).forEach(function (k) { ch[k] = s.changes[k]; });
+          if (next.length) ch[rxKey] = next; else delete ch[rxKey];
+          return h.patchChanges ? h.patchChanges(s, ch) : false;
+        }
+      });
+      if (rxa) c.appendChild(rxa);
+      if (over) c.appendChild(el("p", "err", "With these the entry would have " + (have2 + sgRx.length) + " reactions; at most " + EntScore.MAX_REACTIONS + " are allowed. Delete some before approving."));
+    }
     var dl = el("dl"); row(dl, "Reason given", s.comment); row(dl, "Submitted by", s.submitted_by);
     row(dl, "Received", s.created_at ? new Date(s.created_at).toLocaleString() : ""); c.appendChild(dl);
 
@@ -1444,6 +1488,21 @@
       add.addEventListener("click", function () { uses.appendChild(useRow(null, syncDirty)); syncDirty(); });
       var addWrap = el("div", "actions"); addWrap.appendChild(add); usesFs.appendChild(addWrap);
       body.appendChild(usesFs);
+
+      var origRx = Array.isArray(d.reactions) ? d.reactions : [];
+      var initRx = origRx.slice();
+      if (overrides && Array.isArray(overrides.reactions)) initRx = overrides.reactions.slice();
+      else if (overrides && Array.isArray(overrides.reactions_add)) initRx = initRx.concat(overrides.reactions_add);
+      var rxEd = null;
+      if (Ent.reactionsEditor) {
+        var rxFs = el("fieldset"); rxFs.appendChild(el("legend", null, "Reactions it was employed in"));
+        rxEd = Ent.reactionsEditor({
+          substrate: function () { return curSmiles; }, name: function () { return fieldInputs.name.value.trim() || displayName(d); },
+          defaultRole: function () { return fieldInputs.role.value; }, initial: initRx, max: EntScore.MAX_REACTIONS,
+          onChange: function () { syncDirty(); }
+        });
+        rxFs.appendChild(rxEd.el); body.appendChild(rxFs);
+      }
       box.appendChild(body);
 
       var foot = el("div", "ed-foot");
@@ -1508,6 +1567,20 @@
           list.push({ doi: doi, note: note });
         });
         if (JSON.stringify(list) !== JSON.stringify(Array.isArray(d.uses) ? d.uses : [])) patch.uses = list.length ? list : null;
+        if (rxEd) {
+          var rxRaw = rxEd.value(), rxChk = EntScore.checkReactions(rxRaw, 0);
+          var rxNow = rxChk.error ? rxRaw : rxChk.clean;
+          if (validate) {
+            var rxPend = rxEd.pending();
+            if (rxPend) bad = rxPend;
+            else if (rxChk.error) bad = rxChk.error;
+            else {
+              var rxBad = rxChk.smiles.filter(function (x) { return Ent.structureOk(x) === false; })[0];
+              if (rxBad) bad = "A structure in the reactions could not be read: " + rxBad;
+            }
+          }
+          if (JSON.stringify(rxNow) !== JSON.stringify(origRx)) patch.reactions = rxNow.length ? rxNow : null;
+        }
         return { patch: patch, bad: bad };
       }
 
@@ -1705,8 +1778,7 @@
   };
   /* The API returns at most 1000 rows per request, so long lists are read page by page. */
   var PAGE = 1000;
-  var PUBLIC_COLS = "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,role,origin,et_kcal,et_unc,et_reported,et_type,method,conditions,citation,doi,location,quote,evidence,uv_lmax,uv_eps,uv_cond,direct_exc,score,uses";
-  var LEGACY_PUBLIC_COLS = PUBLIC_COLS.replace(",commercial_name,", ",");
+  var PUBLIC_COLS = "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,role,origin,et_kcal,et_unc,et_reported,et_type,method,conditions,citation,doi,location,quote,evidence,uv_lmax,uv_eps,uv_cond,direct_exc,score,uses,reactions";
   function allPages(getPage) {
     var out = [];
     return (function next(offset) {
@@ -1725,12 +1797,16 @@
               { headers: headers(t) }).then(asJson);
           });
         }
-        return fetchWithCols(PUBLIC_COLS).catch(function (err) {
-          if (err && err.status === 400 && /commercial_name/i.test(err.message || "")) {
-            return fetchWithCols(LEGACY_PUBLIC_COLS);
-          }
-          throw err;
-        });
+        /* columns added later (reactions, commercial_name) are dropped while the database does not have them yet */
+        function tryCols(cols) {
+          return fetchWithCols(cols).catch(function (err) {
+            var msg = (err && err.message) || "";
+            if (err && err.status === 400 && /reactions/i.test(msg) && cols.indexOf(",reactions") >= 0) return tryCols(cols.replace(",reactions", ""));
+            if (err && err.status === 400 && /commercial_name/i.test(msg) && cols.indexOf(",commercial_name,") >= 0) return tryCols(cols.replace(",commercial_name,", ","));
+            throw err;
+          });
+        }
+        return tryCols(PUBLIC_COLS);
       });
     }
     return allPages(function (offset) {

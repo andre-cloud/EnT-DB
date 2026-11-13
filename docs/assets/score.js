@@ -112,6 +112,61 @@
     return base || d.uv || "";
   }
 
+  /* ---------- reactions in which a molecule was employed ----------
+     Each reaction comes from a paper given by its DOI. The entry's own molecule is implicit:
+     as a "donor" it is the photocatalyst above the arrow, as an "acceptor" it is the first
+     reactant. Structures are SMILES; the server parses every one of them. */
+  var MAX_REACTIONS = 10, MAX_RX_MOLS = 4, RX_WORDS = 50;
+  function wordCount(t) { t = String(t || "").trim(); return t ? t.split(/\s+/).length : 0; }
+  function smilesList(v) {
+    return (Array.isArray(v) ? v : []).map(function (x) { return str(x, 400); }).filter(Boolean);
+  }
+  /* one reaction -> {clean, error} */
+  function checkReaction(r, n) {
+    var at = n ? "Reaction " + n + ": " : "";
+    function E(m) { return { error: at ? at + m : m.charAt(0).toUpperCase() + m.slice(1) }; }
+    r = r && typeof r === "object" && !Array.isArray(r) ? r : {};
+    var doi = cleanDoi(r.doi);
+    if (!doi) return E("enter the DOI of the paper first.");
+    if (!isDoi(doi)) return E("the paper must be given as a DOI (for example 10.1021/jacs.0c05069), not as a link.");
+    var role = r.role === "donor" ? "donor" : r.role === "acceptor" ? "acceptor" : "";
+    if (!role) return E("choose whether the molecule acts as donor or acceptor.");
+    var reactants = smilesList(r.reactants), products = smilesList(r.products), catalyst = str(r.catalyst, 400);
+    if (reactants.length > MAX_RX_MOLS || products.length > MAX_RX_MOLS) return E("at most " + MAX_RX_MOLS + " reactants and " + MAX_RX_MOLS + " products.");
+    if (role === "donor" && !reactants.length) return E("draw at least one reactant.");
+    if (!products.length) return E("draw at least one product.");
+    if (role === "acceptor" && !catalyst) return E("draw the photocatalyst (sensitizer) that goes above the arrow.");
+    var loading = str(r.loading, 40), temperature = str(r.temperature, 40), solvent = str(r.solvent, 80);
+    var wl = String(r.wavelength == null ? "" : r.wavelength).replace(/\s*nm\s*$/i, "").trim();
+    var wave = parseIntRange(wl, 100, 1500);
+    if (!loading) return E("give the catalyst loading (for example 5 mol%).");
+    if (wave.bad || isNaN(wave.val)) return E("the wavelength must be a whole number of nanometres (100–1500).");
+    if (!temperature) return E("give the temperature (for example 25 °C or rt).");
+    if (!solvent) return E("give the solvent.");
+    var description = str(r.description, 400).replace(/\s+/g, " ");
+    if (wordCount(description) > RX_WORDS) return E("keep the description to " + RX_WORDS + " words or fewer.");
+    var clean = { doi: doi, role: role, reactants: reactants, products: products, catalyst: role === "acceptor" ? catalyst : null,
+      loading: loading, wavelength: wave.val, temperature: temperature, solvent: solvent, description: description };
+    return { clean: clean, error: null };
+  }
+  /* list -> {clean: [...], smiles: [every structure], dois: [distinct DOIs], error}. "existing" counts reactions already stored. */
+  function checkReactions(list, existing) {
+    var out = { clean: [], smiles: [], dois: [], error: null };
+    if (list == null || list === "") return out;
+    if (!Array.isArray(list)) { out.error = "The reactions could not be read."; return out; }
+    if (list.length + (existing || 0) > MAX_REACTIONS) {
+      out.error = "At most " + MAX_REACTIONS + " reactions per entry" + (existing ? " (this entry already has " + existing + ")." : "."); return out;
+    }
+    for (var i = 0; i < list.length; i++) {
+      var c = checkReaction(list[i], list.length > 1 ? i + 1 : 0);
+      if (c.error) { out.error = c.error; return out; }
+      out.clean.push(c.clean);
+      out.smiles = out.smiles.concat(c.clean.reactants, c.clean.products, c.clean.catalyst ? [c.clean.catalyst] : []);
+      if (out.dois.indexOf(c.clean.doi.toLowerCase()) < 0) out.dois.push(c.clean.doi.toLowerCase());
+    }
+    return out;
+  }
+
   /* Raw form payload -> clean, length-capped fields. */
   function normalize(p) {
     p = p || {};
@@ -143,7 +198,8 @@
       uv_cond: str(condIn, 120),
       direct_exc: dir.map, direct_bad: dir.bad,
       by: str(p.by, 120),
-      usedoi: cleanDoi(p.usedoi), usenote: str(p.usenote, 300)
+      usedoi: cleanDoi(p.usedoi), usenote: str(p.usenote, 300),
+      reactions: checkReactions(p.reactions, 0)
     };
   }
 
@@ -241,6 +297,7 @@
     if (f.direct_bad) return "Direct excitation must be a wavelength (100–1500 nm) or a {source: nm} map.";
     if (f.usedoi && !isDoi(f.usedoi)) return "The DOI of the paper where the molecule was used does not look like a DOI.";
     if (f.usenote && !f.usedoi) return "Add the DOI of the paper the description refers to.";
+    if (f.reactions && f.reactions.error) return f.reactions.error;
     return null;
   }
 
@@ -264,6 +321,7 @@
     [["commercial_name", f.commercial_name], ["cas", f.cas], ["cls", f.cls], ["citation", f.cite], ["doi", f.doi], ["location", f.loc], ["quote", f.quote],
      ["uv_cond", f.uv_cond], ["submitted_by", f.by]].forEach(function (p) { if (p[1]) doc[p[0]] = p[1]; });
     if (f.usedoi) doc.uses = [{ doi: f.usedoi, note: f.usenote }];
+    if (f.reactions && f.reactions.clean.length) doc.reactions = f.reactions.clean;
     return doc;
   }
 
@@ -279,7 +337,8 @@
     ["doi", "DOI", "doi"], ["location", "Where in the paper", "text"], ["quote", "Verbatim line", "text"],
     ["uv_lmax", "UV-vis λmax (nm)", "lmax"], ["uv_eps", "UV-vis ε (M⁻¹ cm⁻¹)", "eps"], ["uv_cond", "UV-vis conditions", "text"],
     ["direct_exc", "Direct excitation (e.g. LED: 415)", "direct_map"],
-    ["uses_add", "Add a paper where it was used in photocatalysis", "use"]
+    ["uses_add", "Add a paper where it was used in photocatalysis", "use"],
+    ["reactions_add", "Reactions it was employed in", "reactions"]
   ];
   var ROLES = ["acceptor", "donor", "both"], ORIGINS = ["exp", "calc"];
   /* changes: {field: value} -> {clean: {...}, error: string|null}. Structure parsing is checked separately. */
@@ -296,6 +355,12 @@
         var doi = cleanDoi(v && v.doi), note = str(v && v.note, 300);
         if (!isDoi(doi)) return { clean: clean, error: "Give the paper where it was used as a DOI." };
         clean[k] = { doi: doi, note: note }; continue;
+      }
+      if (type === "reactions") {
+        var rx = checkReactions(v, 0);
+        if (rx.error) return { clean: clean, error: rx.error };
+        if (!rx.clean.length) return { clean: clean, error: "Add at least one reaction, or remove the empty one." };
+        clean[k] = rx.clean; continue;
       }
       if (type === "direct_map") {
         var dm = parseDirectExc(v);
@@ -327,5 +392,7 @@
   root.EntScore = { DOI_RE: DOI_RE, ET_MAX: ET_MAX, num: num, cleanDoi: cleanDoi, isDoi: isDoi, cleanCas: cleanCas, casValid: casValid,
     parseDirectExc: parseDirectExc, formatDirectExc: formatDirectExc, formatUv: formatUv,
     SUGGEST_FIELDS: SUGGEST_FIELDS, checkSuggestion: checkSuggestion,
+    MAX_REACTIONS: MAX_REACTIONS, MAX_RX_MOLS: MAX_RX_MOLS, RX_WORDS: RX_WORDS, wordCount: wordCount,
+    checkReaction: checkReaction, checkReactions: checkReactions,
     normalize: normalize, gradeOf: gradeOf, scoreEntry: scoreEntry, requiredError: requiredError, toDoc: toDoc };
 })(typeof globalThis !== "undefined" ? globalThis : this);

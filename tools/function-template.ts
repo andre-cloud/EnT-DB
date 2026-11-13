@@ -88,6 +88,23 @@ async function doiResolves(doi) {
   }
 }
 
+// Every structure of the proposed reactions must parse, and every reaction DOI must exist.
+// -> null when fine, else a Response to send back.
+async function reactionProblems(rx) {
+  if (!rx || !rx.clean || !rx.clean.length) return null;
+  const smiles = [...new Set(rx.smiles)];
+  const [checks, found] = await Promise.all([
+    Promise.all(smiles.map((s) => checkStructure(s))),
+    Promise.all(rx.dois.map((d) => doiResolves(d))),
+  ]);
+  if (checks.some((c) => c.ok === null)) return json({ error: "The structures could not be checked right now. Try again in a few minutes." }, 503);
+  const bad = checks.findIndex((c) => !c.ok);
+  if (bad >= 0) return json({ error: `A structure in the reactions could not be read: ${smiles[bad].slice(0, 60)}` }, 400);
+  const missing = found.findIndex((r) => r === false);
+  if (missing >= 0) return json({ error: `doi.org does not know the DOI ${rx.dois[missing]}. Check the reaction's paper.` }, 400);
+  return null;
+}
+
 async function notify(row) {
   const site = (Deno.env.get("SITE_URL") || "").replace(/\/+$/, "");
   const reviewUrl = site ? `${site}/admin.html` : "";
@@ -150,7 +167,7 @@ async function overLimits(ipHash, extra) {
 async function handleSuggestion(payload, ipHash, tooMany) {
   const id = String(payload.entry_id || "");
   if (!/^[0-9a-f-]{36}$/i.test(id)) return json({ error: "The entry to correct was not found." }, 400);
-  const target = await rest(`entries?select=id,name,status&id=eq.${id}&limit=1`);
+  const target = await rest(`entries?select=id,name,status,reactions&id=eq.${id}&limit=1`);
   if (!target.ok) return json({ error: "The entry could not be checked." }, 500);
   const entry = (await target.json())[0];
   if (!entry || entry.status !== "approved") return json({ error: "Only entries in the database can be corrected." }, 400);
@@ -163,8 +180,17 @@ async function handleSuggestion(payload, ipHash, tooMany) {
     if (st.ok === null) return json({ error: "The structure could not be checked right now. Try again in a few minutes." }, 503);
     if (!st.ok) return json({ error: "The proposed SMILES could not be read." }, 400);
   }
+  if (chk.clean.reactions_add) {
+    const have = Array.isArray(entry.reactions) ? entry.reactions.length : 0;
+    const rx = EntScore.checkReactions(chk.clean.reactions_add, have);
+    if (rx.error) return json({ error: rx.error }, 400);
+    const problem = await reactionProblems(rx);
+    if (problem) return problem;
+  }
   const comment = String(payload.comment || "").trim().slice(0, 1000);
-  if (!comment) return json({ error: "Explain briefly what is wrong and where the correct value comes from." }, 400);
+  // Only adding a paper or reactions needs no explanation; changing a value does.
+  const onlyAdds = Object.keys(chk.clean).every((k) => k === "uses_add" || k === "reactions_add");
+  if (!comment && !onlyAdds) return json({ error: "Explain briefly what is wrong and where the correct value comes from." }, 400);
 
   const row = { entry_id: id, changes: chk.clean, comment, submitted_by: String(payload.by || "").trim().slice(0, 120) || null, ip_hash: ipHash };
   const ins = await rest("suggestions", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(row) });
@@ -217,7 +243,7 @@ Deno.serve(async (req) => {
   let payload;
   try {
     const text = await req.text();
-    if (text.length > 20000) return json({ error: "The submission is too large." }, 400);
+    if (text.length > 80000) return json({ error: "The submission is too large." }, 400);
     payload = JSON.parse(text);
   } catch (_e) {
     return json({ error: "The submission could not be read." }, 400);
@@ -264,6 +290,8 @@ Deno.serve(async (req) => {
 
   const missing = EntScore.requiredError(f, ctx);
   if (missing) return json({ error: missing }, 400);
+  const rxProblem = await reactionProblems(f.reactions);
+  if (rxProblem) return rxProblem;
 
   const sc = EntScore.scoreEntry(f, ctx);
   const row = { ...EntScore.toDoc(f, sc), status: "pending", idcode: structure.idcode, ip_hash: ipHash };

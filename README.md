@@ -16,6 +16,12 @@ Site: https://nuniwo-source.github.io/TrEnDB/
 - **Review.** A submission is stored as *pending* and the curator is notified. Accepting a value (or a
   reader's correction) requires verification from **two different curators** on the review page (`admin.html`);
   the first verification keeps it in the queue at `1/2`, and the second publishes it.
+- **Reactions it was employed in.** The submission form and "Suggest a correction" have a reaction sketcher: up
+  to 10 example reactions per entry, each from a paper given by its DOI (the sketcher unlocks only once the DOI is
+  well formed and known to doi.org). As a *donor* the molecule sits above the arrow as the photocatalyst, with
+  loading, wavelength, temperature and solvent; as an *acceptor* it is a reactant and the photocatalyst is drawn
+  too. Each reaction can carry a description of at most 50 words. Curators can edit or delete single reactions
+  before approving, and the public card shows them only when "Reactions it was employed in" is clicked.
 - **One card per molecule.** The public page groups values of the same molecule (same CAS number, else same
   structure with E/Z and R/S kept apart, else same SMILES) on one card, with every value and its source listed.
 - **Duplicates.** A queued entry carrying the *same value* as one already in the database (both measured or both
@@ -46,7 +52,8 @@ method fully specified, DOI resolves, agreement with existing entries). It does 
 | --- | --- |
 | `docs/` | The static site served by GitHub Pages |
 | `docs/assets/config.js` | The two public settings that connect the site to the backend |
-| `docs/assets/score.js` | The scoring rules (shared by browser and server) |
+| `docs/assets/score.js` | The scoring rules and the reaction checks (shared by browser and server) |
+| `docs/assets/reactions.js` | The reaction sketcher, the reaction drawings and the curator's per-reaction edit/delete |
 | `supabase/schema.sql` | Database tables, access rules and the public view |
 | `supabase/seed.sql` | First batch of literature entries, imported as pending |
 | `docs/batches/` | Literature batches (JSON). A curator imports new ones into the queue from the review page |

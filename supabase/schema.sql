@@ -63,6 +63,11 @@ alter table public.entries add column if not exists import_key text;
 create unique index if not exists entries_import_key_idx on public.entries (import_key);
 -- Papers in which the molecule was used in photocatalysis: [{"doi": "...", "note": "..."}]
 alter table public.entries add column if not exists uses jsonb;
+-- Reactions the molecule was employed in (at most 10), drawn with the reaction sketcher:
+-- [{"doi", "role": "donor"|"acceptor", "reactants": [smiles], "products": [smiles], "catalyst": smiles|null,
+--   "loading", "wavelength": nm, "temperature", "solvent", "description" (<= 50 words)}]
+-- The entry's own molecule is implicit: the photocatalyst for "donor", the first reactant for "acceptor".
+alter table public.entries add column if not exists reactions jsonb;
 -- CAS registry number, the first key used to recognise the same molecule.
 alter table public.entries add column if not exists cas text;
 -- Commercial or common name (optional; displayed as main title with IUPAC name underneath when set).
@@ -132,6 +137,25 @@ alter table public.entries add constraint entries_uv_eps_nonneg
 alter table public.entries drop constraint if exists entries_direct_exc_object;
 alter table public.entries add constraint entries_direct_exc_object
   check (direct_exc is null or jsonb_typeof(direct_exc) = 'object') not valid;
+alter table public.entries drop constraint if exists entries_reactions_shape;
+alter table public.entries add constraint entries_reactions_shape
+  check (reactions is null or (jsonb_typeof(reactions) = 'array' and jsonb_array_length(reactions) <= 10)) not valid;
+-- Every reaction names its paper by DOI only (never a link), like the entry's own source.
+create or replace function public.reactions_dois_ok(p jsonb)
+returns boolean
+language sql immutable
+set search_path = ''
+as $$
+  select p is null or jsonb_typeof(p) <> 'array' or not exists (
+    select 1 from jsonb_array_elements(p) r
+    where jsonb_typeof(r) <> 'object'
+       or coalesce(r->>'doi', '') !~ '^10\.[0-9]{4,9}/[^[:space:]]+$'
+       or coalesce(r->>'role', '') not in ('donor', 'acceptor')
+  );
+$$;
+alter table public.entries drop constraint if exists entries_reactions_dois;
+alter table public.entries add constraint entries_reactions_dois
+  check (public.reactions_dois_ok(reactions)) not valid;
 alter table public.entries drop constraint if exists entries_approvals_array;
 alter table public.entries add constraint entries_approvals_array
   check (jsonb_typeof(approvals) = 'array') not valid;
@@ -285,7 +309,8 @@ begin
       new.uv_eps is distinct from old.uv_eps or
       new.uv_cond is distinct from old.uv_cond or
       new.direct_exc is distinct from old.direct_exc or
-      new.uses is distinct from old.uses
+      new.uses is distinct from old.uses or
+      new.reactions is distinct from old.reactions
     ) then
       new.approvals := '[]'::jsonb;
     end if;
@@ -649,7 +674,7 @@ create view public.public_entries as
 select id, created_at, name, commercial_name, cas, smiles, idcode, structure_note, cls, role,
        origin, et_kcal, et_unc, et_reported, et_type, method, conditions,
        citation, doi, location, quote, evidence,
-       uv_lmax, uv_eps, uv_cond, direct_exc, score, uses
+       uv_lmax, uv_eps, uv_cond, direct_exc, score, uses, reactions
        -- verify_level and verify_note are curators' working notes: never public
 from public.entries
 where status = 'approved';

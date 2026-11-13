@@ -272,7 +272,8 @@
     if (shownSugg.length) {
       var cards = shownSugg.map(function (sg) {
         return Ent.suggestionCard(sg, byId[sg.entry_id] || null, {
-          email: myEmail(), busy: state.busy, approve: approveSuggestion, revoke: revokeSuggestion, reject: rejectSuggestion, edit: editSuggestion
+          email: myEmail(), busy: state.busy, approve: approveSuggestion, revoke: revokeSuggestion, reject: rejectSuggestion, edit: editSuggestion,
+          patchChanges: patchSuggestionChanges
         });
       });
       list.prepend.apply(list, cards);
@@ -508,6 +509,7 @@
     var patch = {}, ch = sg.changes || {};
     Object.keys(ch).forEach(function (k) {
       if (k === "uses_add") patch.uses = (Array.isArray(entry.uses) ? entry.uses : []).concat([ch[k]]);
+      else if (k === "reactions_add") patch.reactions = (Array.isArray(entry.reactions) ? entry.reactions : []).concat(ch[k] || []);
       else if (ch[k] !== entry[k]) patch[k] = ch[k];
     });
     if ("smiles" in patch) { patch.idcode = Ent.idCode(patch.smiles); patch.smiles_checked = false; }
@@ -527,6 +529,12 @@
     var ap = Ent.approvalState(sg, myEmail());
     if (ap.byMe) {
       toast("You already verified this correction; a second curator must approve it.");
+      return;
+    }
+    var addRx = sg.changes && Array.isArray(sg.changes.reactions_add) ? sg.changes.reactions_add.length : 0;
+    var haveRx = Array.isArray(entry.reactions) ? entry.reactions.length : 0;
+    if (addRx && haveRx + addRx > EntScore.MAX_REACTIONS) {
+      toast("The entry would have " + (haveRx + addRx) + " reactions; at most " + EntScore.MAX_REACTIONS + " are allowed. Delete some of the proposed reactions first.");
       return;
     }
     state.busy[sg.id] = true; render();
@@ -585,6 +593,14 @@
       next[k] = patch[k];
     });
     var orig = sg.changes || {};
+    if ("reactions" in next) {
+      /* the entry's own reactions untouched and new ones after them: keep it as "reactions to add" */
+      var have = Array.isArray(entry.reactions) ? entry.reactions : [], all = next.reactions || [];
+      if (JSON.stringify(all.slice(0, have.length)) === JSON.stringify(have)) {
+        delete next.reactions;
+        if (all.length > have.length) next.reactions_add = all.slice(have.length);
+      }
+    }
     if (orig.uses_add && Array.isArray(next.uses)) {
       var expectedUses = (Array.isArray(entry.uses) ? entry.uses : []).concat([orig.uses_add]);
       if (JSON.stringify(next.uses) === JSON.stringify(expectedUses)) {
@@ -630,6 +646,26 @@
         return false;
       });
     }, { title: "Edit & verify correction · " + (entry.name || ""), saveLabel: "Save & verify correction", banner: bannerText, overrides: sg.changes || {} });
+  }
+
+  /* A curator edits or deletes single proposed reactions on the card. Changing a pending
+     correction resets its verifications (enforced in the database). */
+  function patchSuggestionChanges(sg, changes) {
+    if (!Object.keys(changes).length) {
+      toast("Nothing would be left of this correction. Reject it instead.");
+      return Promise.resolve(false);
+    }
+    state.busy[sg.id] = true; render();
+    return api.adminPatchSuggestion(sg.id, { changes: changes }).then(function (rows) {
+      delete state.busy[sg.id];
+      if (!rows || !rows[0]) { state.busy[sg.id] = "err"; render(); return false; }
+      replaceSuggestionRow(rows[0]); render();
+      toast(Ent.approvalsOf(sg).length ? "Reactions updated; the correction needs two verifications again." : "Reactions updated.");
+      return true;
+    }, function (err) {
+      if (err && err.status === 401) { signedOut("Your session ended. Sign in again."); return false; }
+      state.busy[sg.id] = "err"; render(); return false;
+    });
   }
 
   function rejectSuggestion(sg, note) {
