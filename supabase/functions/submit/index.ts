@@ -150,9 +150,11 @@
     var role = r.role === "donor" ? "donor" : r.role === "acceptor" ? "acceptor" : "";
     if (!role) return E("choose whether the molecule acts as donor or acceptor.");
     var reactants = smilesList(r.reactants), products = smilesList(r.products), catalyst = str(r.catalyst, 400);
+    /* an acceptor can also be what the reaction makes (e.g. the Z isomer of an E/Z isomerisation) */
+    var asProduct = role === "acceptor" && r.as_product === true;
     if (reactants.length > MAX_RX_MOLS || products.length > MAX_RX_MOLS) return E("at most " + MAX_RX_MOLS + " reactants and " + MAX_RX_MOLS + " products.");
-    if (role === "donor" && !reactants.length) return E("draw at least one reactant.");
-    if (!products.length) return E("draw at least one product.");
+    if ((role === "donor" || asProduct) && !reactants.length) return E(asProduct ? "draw the reactant this molecule is made from (e.g. the other isomer)." : "draw at least one reactant.");
+    if (!products.length && !asProduct) return E("draw at least one product.");
     if (role === "acceptor" && !catalyst) return E("draw the photocatalyst (sensitizer) that goes above the arrow.");
     var loading = str(r.loading, 40), temperature = str(r.temperature, 40), solvent = str(r.solvent, 80);
     var wl = String(r.wavelength == null ? "" : r.wavelength).replace(/\s*nm\s*$/i, "").trim();
@@ -165,6 +167,7 @@
     if (wordCount(description) > RX_WORDS) return E("keep the description to " + RX_WORDS + " words or fewer.");
     var clean = { doi: doi, role: role, reactants: reactants, products: products, catalyst: role === "acceptor" ? catalyst : null,
       loading: loading, wavelength: wave.val, temperature: temperature, solvent: solvent, description: description };
+    if (asProduct) clean.as_product = true;   /* only stored when set, so older reactions stay unchanged */
     return { clean: clean, error: null };
   }
   /* list -> {clean: [...], smiles: [every structure], dois: [distinct DOIs], error}. "existing" counts reactions already stored. */

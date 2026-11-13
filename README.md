@@ -19,8 +19,8 @@ Site: https://nuniwo-source.github.io/TrEnDB/
 - **Reactions it was employed in.** The submission form and "Suggest a correction" have a reaction sketcher: up
   to 10 example reactions per entry, each from a paper given by its DOI (the sketcher unlocks only once the DOI is
   well formed and known to doi.org). As a *donor* the molecule sits above the arrow as the photocatalyst, with
-  loading, wavelength, temperature and solvent; as an *acceptor* it is a reactant and the photocatalyst is drawn
-  too. Reactants and photocatalysts can be picked from the molecules already in the database
+  loading, wavelength, temperature and solvent; as an *acceptor* it is a reactant (or, when ticked, the product,
+  e.g. the isomer formed in an E/Z isomerisation) and the photocatalyst is drawn too. Reactants and photocatalysts can be picked from the molecules already in the database
   ("Search database"), and a product can start from a copy of the chosen reactants ("Copy from reactants"), so atoms
   that end up in the product need not be redrawn. Each reaction can carry a description of at most 50 words. Curators can edit or delete single reactions
   before approving, and the public card shows them only when "Reactions it was employed in" is clicked.

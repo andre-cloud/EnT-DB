@@ -5,10 +5,12 @@
      and on the review page. It unlocks only once the paper's DOI is valid and known to doi.org.
    - Ent.reactionsSection is the collapsed "Reactions it was employed in" line on a card.
    Data shape (checked by EntScore.checkReaction, here and on the server):
-   {doi, role: "donor"|"acceptor", reactants: [smiles], products: [smiles], catalyst: smiles|null,
+   {doi, role: "donor"|"acceptor", as_product: true (acceptor made by the reaction, optional),
+    reactants: [smiles], products: [smiles], catalyst: smiles|null,
     loading, wavelength (nm), temperature, solvent, description (≤ 50 words)}
    The entry's own molecule is never stored in a reaction: as a donor it is the photocatalyst,
-   as an acceptor it is the first reactant. */
+   as an acceptor it is the first reactant, or the first product when as_product is set
+   (e.g. the Z isomer formed in an E/Z isomerisation). */
 (function () {
   "use strict";
   var el = Ent.el, elT = Ent.elT;
@@ -48,11 +50,13 @@
     var left = el("div", "rx-side"), right = el("div", "rx-side");
     var reactants = (rx.reactants || []).slice();
     var items = [];
-    if (rx.role === "acceptor") items.push(molBox(substrate, 150, 105, "this molecule"));
+    var asProduct = rx.role === "acceptor" && rx.as_product === true;
+    if (rx.role === "acceptor" && !asProduct) items.push(molBox(substrate, 150, 105, "this molecule"));
     reactants.forEach(function (smi) { items.push(molBox(smi, 150, 105)); });
     if (!items.length) items.push(el("span", "rx-empty", "reactants"));
     items.forEach(function (it, i) { if (i) left.appendChild(plus()); left.appendChild(it); });
     var prods = (rx.products || []).map(function (smi) { return molBox(smi, 150, 105); });
+    if (asProduct) prods.unshift(molBox(substrate, 150, 105, "this molecule"));
     if (!prods.length) prods.push(el("span", "rx-empty", "products"));
     prods.forEach(function (it, i) { if (i) right.appendChild(plus()); right.appendChild(it); });
 
@@ -66,14 +70,14 @@
     arrow.appendChild(above); arrow.appendChild(line); arrow.appendChild(below);
     s.appendChild(left); s.appendChild(arrow); s.appendChild(right);
     s.setAttribute("role", "img");
-    s.setAttribute("aria-label", "Reaction: " + (rx.role === "donor" ? "this molecule is the photocatalyst" : "this molecule is a reactant") + (condText(rx) ? ", " + condText(rx) : ""));
+    s.setAttribute("aria-label", "Reaction: " + (rx.role === "donor" ? "this molecule is the photocatalyst" : asProduct ? "this molecule is the product" : "this molecule is a reactant") + (condText(rx) ? ", " + condText(rx) : ""));
     return s;
   };
   /* scheme + description + source; extra: optional element appended (e.g. curator buttons) */
   Ent.reactionBlock = function (rx, substrate, extra, n) {
     var b = el("div", "rx-block");
     var head = el("div", "rx-head");
-    head.appendChild(el("span", "chip " + (rx.role === "donor" ? "rx-donor" : "rx-acceptor"), rx.role === "donor" ? "Donor (photocatalyst)" : "Acceptor (substrate)"));
+    head.appendChild(el("span", "chip " + (rx.role === "donor" ? "rx-donor" : "rx-acceptor"), rx.role === "donor" ? "Donor (photocatalyst)" : rx.as_product === true ? "Acceptor (product)" : "Acceptor (substrate)"));
     if (n) head.insertBefore(el("strong", null, "Reaction " + n), head.firstChild);
     if (rx.doi) head.appendChild(Ent.doiLink(rx.doi, "doi:" + EntScore.cleanDoi(rx.doi)));
     b.appendChild(head);
@@ -211,7 +215,7 @@
   /* One reaction card. opts: {substrate(): smiles, name(): string, defaultDoi(): string, onChange(), onRemove(), number} */
   function reactionCard(init, opts) {
     var rx = {
-      doi: (init && init.doi) || "", role: (init && init.role) || "acceptor",
+      doi: (init && init.doi) || "", role: (init && init.role) || "acceptor", as_product: !!(init && init.as_product === true),
       reactants: ((init && init.reactants) || []).slice(), products: ((init && init.products) || []).slice(),
       catalyst: (init && init.catalyst) || "", loading: (init && init.loading) || "",
       wavelength: init && init.wavelength != null ? String(init.wavelength) : "", temperature: (init && init.temperature) || "",
@@ -238,13 +242,20 @@
     var roleBox = el("div", "rx-role"); roleBox.setAttribute("role", "radiogroup");
     var roleTitle = el("span", "rx-role-title"); roleBox.appendChild(roleTitle);
     var roleInputs = {}, roleName = "rx-role-" + Math.random().toString(36).slice(2);
-    [["donor", "Donor: the photocatalyst above the arrow"], ["acceptor", "Acceptor: a reactant"]].forEach(function (o) {
+    [["donor", "Donor: the photocatalyst above the arrow"], ["acceptor", "Acceptor: receives the energy (a reactant, or the product if ticked below)"]].forEach(function (o) {
       var l = el("label", "rx-role-opt"), r = el("input");
       r.type = "radio"; r.name = roleName; r.value = o[0]; r.checked = rx.role === o[0];
       r.addEventListener("change", function () { if (r.checked) { rx.role = o[0]; draw(); changed(); } });
       roleInputs[o[0]] = r;
       l.appendChild(r); l.appendChild(document.createTextNode(" " + o[1])); roleBox.appendChild(l);
     });
+    /* acceptor only: the molecule may be what the reaction makes instead of what it starts from */
+    var prodLab = el("label", "rx-role-opt rx-as-product"), prodBox = el("input");
+    prodBox.type = "checkbox"; prodBox.checked = rx.as_product;
+    prodBox.addEventListener("change", function () { rx.as_product = prodBox.checked; draw(); changed(); });
+    prodLab.appendChild(prodBox);
+    prodLab.appendChild(document.createTextNode(" The molecule is the product of this reaction (e.g. the isomer formed in an E/Z isomerisation)"));
+    roleBox.appendChild(prodLab);
     panel.appendChild(roleBox);
 
     var slots = el("div", "rx-slots"); panel.appendChild(slots);
@@ -288,7 +299,7 @@
       var box = el("div", "rx-picker rx-copy");
       box.appendChild(el("p", "hint", "Choose the reactants whose atoms end up in the product. They open together in the sketcher: join or edit them into the product."));
       var sources = [];
-      if (rx.role === "acceptor") sources.push({ smiles: opts.substrate(), label: "this molecule" });
+      if (rx.role === "acceptor" && !rx.as_product) sources.push({ smiles: opts.substrate(), label: "this molecule" });
       rx.reactants.forEach(function (smi, i) { sources.push({ smiles: smi, label: "reactant " + (i + 1) }); });
       sources = sources.filter(function (x) { return x.smiles; });
       var chosen = {};
@@ -316,7 +327,8 @@
     function slot(label, list, max, what) {
       var box = el("div", "rx-slot"); box.appendChild(el("span", "rx-slot-title", label));
       var row = el("div", "rx-chips");
-      if (what === "reactant" && rx.role === "acceptor") row.appendChild(fixedChip(opts.substrate(), "this molecule"));
+      if (what === "reactant" && rx.role === "acceptor" && !rx.as_product) row.appendChild(fixedChip(opts.substrate(), "this molecule"));
+      if (what === "product" && rx.role === "acceptor" && rx.as_product) row.appendChild(fixedChip(opts.substrate(), "this molecule"));
       list.forEach(function (smi, i) {
         row.appendChild(slotChip(smi,
           function () { sketch("Sketcher · " + what, smi, function (s) { list[i] = s; }); },
@@ -367,6 +379,7 @@
     function drawPreview() { prev.replaceChildren(Ent.reactionScheme(value(), opts.substrate())); }
     function draw() {
       roleTitle.textContent = "Role of " + (opts.name ? opts.name() : "this molecule") + " in this reaction:";
+      prodLab.hidden = rx.role !== "acceptor";
       slots.replaceChildren(
         slot("Reactants", rx.reactants, EntScore.MAX_RX_MOLS, "reactant"),
         catSlot(),
@@ -404,9 +417,11 @@
     doiIn.addEventListener("input", function () { rx.doi = doiIn.value; checkDoi(); changed(); });
 
     function value() {
-      return { doi: EntScore.cleanDoi(doiIn.value.trim()), role: rx.role, reactants: rx.reactants.slice(), products: rx.products.slice(),
+      var out = { doi: EntScore.cleanDoi(doiIn.value.trim()), role: rx.role, reactants: rx.reactants.slice(), products: rx.products.slice(),
         catalyst: rx.role === "acceptor" ? (rx.catalyst || null) : null, loading: rx.loading.trim(), wavelength: rx.wavelength.trim(),
         temperature: rx.temperature.trim(), solvent: rx.solvent.trim(), description: rx.description.trim() };
+      if (rx.role === "acceptor" && rx.as_product) out.as_product = true;
+      return out;
     }
     var api = {
       el: card, value: value,
