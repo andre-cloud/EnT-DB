@@ -712,3 +712,10 @@ button.chip.slide-chip:hover{border-color:var(--bad);color:var(--bad)}
 @media (max-width:560px){ .sum-foot{flex-direction:column;align-items:stretch;gap:2px} .sum-doi{max-width:100%} }
 .mol-page{display:flex;flex-direction:column;gap:12px;align-items:stretch}
 .mol-page .mol-back{align-self:flex-start}
+/* ---------- install as an app, offline note ---------- */
+.install{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--accent);border-radius:14px;padding:12px 14px}
+.install-icon img{display:block;border-radius:10px}
+.install-text{display:flex;flex-direction:column;gap:2px;flex:1 1 240px;min-width:0;font-size:.9rem}
+.install-text svg{vertical-align:-3px;margin:0 2px}
+.offline-note{margin:0;padding:8px 12px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:.88rem}
+@media (display-mode: standalone){.topbar{padding-top:env(safe-area-inset-top)}}

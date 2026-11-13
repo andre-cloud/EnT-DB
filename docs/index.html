@@ -11,7 +11,12 @@
 <link rel="stylesheet" href="assets/style.css">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#12301F">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TrEnDB">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 </head>
 <body class="pub-page">
 <div class="wrap">
@@ -45,6 +50,7 @@
   </form>
 
   <div class="stack" id="app-body" hidden>
+    <p class="offline-note" id="offline-note" role="status" hidden></p>
     <nav class="sections" id="sections" aria-label="Sections">
       <a href="#home" data-sec="home">Home</a>
       <a href="#db" data-sec="db">Database</a>
@@ -77,6 +83,15 @@
         </a>
       </div>
       <p class="hint">You can switch between the two at any time from the bar above.</p>
+      <div class="install" id="install" hidden>
+        <span class="install-icon" aria-hidden="true"><img src="assets/icon-192.png" alt="" width="44" height="44"></span>
+        <div class="install-text">
+          <strong>Install TrEnDB on this device</strong>
+          <span id="install-how">It opens full-screen like an app, updates itself and keeps working offline with the last copy of the database.</span>
+        </div>
+        <button class="btn primary small" id="install-btn" type="button" hidden>Install</button>
+        <button class="btn small" id="install-close" type="button" aria-label="Hide this">Not now</button>
+      </div>
     </section>
 
     <section id="plot-view" class="plotent" aria-label="PlotEnT" hidden></section>
