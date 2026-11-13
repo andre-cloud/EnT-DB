@@ -105,8 +105,51 @@
     if (s.normalize) s = s.normalize("NFKC");
     // Publisher symbol fonts: U+0002 is the minus of "mol-1", and "ð ... Þ" are tall brackets.
     s = s.replace(/\u0002(?=\s*\d)/g, "-").replace(/ð([^ðÞ\n]{1,80})Þ/g, "($1)");
+    // Symbol fonts put digits and signs in the private area: U+F02B is "+", U+F02D the minus.
+    s = s.replace(/[\uf028\uf029\uf02b-\uf03e]/g, function (ch) { return String.fromCharCode(ch.charCodeAt(0) - 0xf000); });
     return s.replace(CTRL_CHARS_RE, " ").replace(CHAR_MAP_RE, function (ch) { return CHAR_MAP[ch] != null ? CHAR_MAP[ch] : ch; });
   }
+  /* Some fonts put the fi/fl ligatures in the private area (U+E104 for "fl": "avone" for flavone).
+     For each such character pick the ligature that turns its words into words the same document
+     already spells out. */
+  var LIGATURES = ["fl", "fi", "ff", "ffi", "ffl"];
+  var COMMON_LIG_WORDS = ("flavone flavonoid fluorescence fluorescent fluorinated fluoride fluorene flow first field figure " +
+    "efficient efficiency sufficient specific significant difficult effect effective modified identified purified " +
+    "configuration affect afford offer different differ suffix benefit finally find fine fixed").split(" ");
+  function fixPrivateLigatures(doc) {
+    var all = (doc.pages || []).map(function (pg) { return String(pg.text || ""); }).join("\n");
+    var chars = {}, m, re = /[a-z]?([\ue000-\uf8ff])[a-z]/gi;
+    while ((m = re.exec(all)) !== null) chars[m[1]] = 1;
+    var keys = Object.keys(chars);
+    if (!keys.length) return [];
+    var vocab = {};
+    (all.toLowerCase().match(/[a-z]{3,}/g) || []).forEach(function (w) { vocab[w] = 1; });
+    COMMON_LIG_WORDS.forEach(function (w) { vocab[w] = vocab[w] || 0.5; });
+    var map = {}, unresolved = [];
+    keys.forEach(function (ch) {
+      var words = all.match(new RegExp("[A-Za-z]*" + ch + "[A-Za-z]*", "g")) || [], best = null, bestScore = 0;
+      LIGATURES.forEach(function (lig) {
+        var seen = {}, score = 0;
+        words.forEach(function (w) {
+          var cand = w.split(ch).join(lig).toLowerCase();
+          if (!seen[cand] && vocab[cand]) { seen[cand] = 1; score += vocab[cand]; }
+        });
+        if (score > bestScore) { bestScore = score; best = lig; }
+      });
+      if (best) map[ch] = best; else unresolved.push(ch);
+    });
+    var codes = Object.keys(map);
+    if (codes.length) {
+      var rx = new RegExp("[" + codes.join("") + "]", "g"), fix = function (t) { return String(t || "").replace(rx, function (c) { return map[c]; }); };
+      doc.pages.forEach(function (pg) {
+        pg.text = fix(pg.text);
+        pg.layoutText = fix(pg.layoutText);
+        pg.tables = (pg.tables || []).map(function (tb) { return tb.map(function (row) { return row.map(fix); }); });
+      });
+    }
+    return codes.map(function (c) { return "U+" + c.charCodeAt(0).toString(16).toUpperCase() + " read as \u201c" + map[c] + "\u201d"; });
+  }
+
   function normalizeCell(cell) {
     return normalizeText(cell).replace(/\n/g, " ").trim();
   }
@@ -911,7 +954,7 @@
   var PROSE_WORD_RE = /\b(?:the|of|to|and|is|are|was|were|that|which|with|for|in|by|this|these)\b/gi;
   var HEADER_CONT_RE = /\b(?:kcal|mole?|kj|ev|nm|temp|solvent|condition|matrix|ref|method|basis|concn|sec-?1|isomer|wavelength)\b/i;
   var PURE_NUM_CELL_RE = /^\d{2,3}(?:\.\d+)?(?:\s*[*†‡§]|[a-z])?$/i;
-  var RANGE_OR_NEG_PREFIX_RE = /(?:(?:>|>=|≥|<|<=|≤)\s*|\b(?:between|from|ranging\s+from|rather\s+than|instead\s+of|more\s+than|less\s+than|higher\s+than|lower\s+than|greater\s+than|smaller\s+than|below|above|under|over|upwards\s+of|at\s+least|at\s+most|exceeding|differ(?:s|ence)?\s+by|deficient[^.;\n]{0,25}\bby)\s*|\b(?:between|from|ranging\s+from)\s+\d+(?:[.,]\d+)?\s+(?:and|to)\s*|\d+(?:[.,]\d+)?\s*(?:[-–—]|to)\s*)$/i;
+  var RANGE_OR_NEG_PREFIX_RE = /(?:(?:>|>=|≥|<|<=|≤)\s*|\b(?:between|from|ranging\s+from|rather\s+than|instead\s+of|more\s+than|less\s+than|higher\s+than|lower\s+than|greater\s+than|smaller\s+than|below|above|under|over|upwards\s+of|up\s+to|as\s+high\s+as|(?:do|does|did)\s+not\s+(?:typically\s+|usually\s+|generally\s+|normally\s+)?exceed|not\s+exceeding|exceed(?:s|ed)?|surpass(?:es|ed)?|(?:differ(?:s|ence)?\s+)?by\s*[~≈∼]?|at\s+least|at\s+most|exceeding|differ(?:s|ence)?\s+by|deficient[^.;\n]{0,25}\bby)\s*|\b(?:between|from|ranging\s+from)\s+\d+(?:[.,]\d+)?\s+(?:and|to)\s*|\d+(?:[.,]\d+)?\s*(?:[-–—]|to)\s*)$/i;
   var TRIPLET_CONTEXT_RE = /\b(?:triplet|phosphorescence|singlet[-–]triplet|s0\s*(?:→|->)\s*t1)\b|\b(?:E_?\s*T|T_?\s*1)\b/i;
   var CLAUSE_SPLIT_RE = /[;,]|\b(?:whereas|while|but|and)\b/gi;
   var SINGLET_WORD_RE = /\bsinglet(?:\s+oxygen)?\b|\bfluorescence\b|\breorganization\s+energy\b|\bactivation(?:\s+energy|\s+barrier)?\b|\bbarrier\b|\bbond\s+dissociation\b|\bBDE\b|\bredox\b|\boxidation\b|\breduction\b|\bHOMO\b|\bLUMO\b|\bband\s*gap\b|\b1O2\b|\bexcitation\s+of\s+oxygen\b|\bS0\s*(?:→|->)\s*S1\b/i;
@@ -1179,6 +1222,8 @@
             continue;
           }
           var rawName = row[nameCol].trim().replace(/\s*[*†‡§]+$/, "").trim();
+          // "[Ru(bpy)2(BCF) 2] 390 (7500)": the absorption column ran into the name cell
+          rawName = tightenComplexFormulas(rawName).replace(/\s+\d{2,4}(?:\.\d+)?\s*\(\s*\d[\d\s,.]*\)\s*$/, "").trim();
           var solvCode = null;
           if (blockName && (!rawName || /^[a-z]$/i.test(rawName) || /^\d{1,4}$/.test(rawName))) {
             var mCode = /^([np])(?:\s|$)/i.exec(filled[0] || "");
@@ -1301,7 +1346,7 @@
 
   /* Subscripts come out of a PDF as loose digits: "Ir*[dF(CF 3 )ppy] 2 (dtbbpy)", "(PF6 )2".
      Close those gaps, but only inside a metal-complex formula. */
-  var COMPLEX_START_RE = /(?:fac-|mer-)?\[?(?:Ir|Ru|Os|Re|Pt|Cu)\*?[\[(]/g;
+  var COMPLEX_START_RE = /(?<![a-z])(?:fac-|mer-)?\[?(?:Ir|Ru|Os|Re|Pt|Cu|Au|Ag|Pd|Rh|Co|Fe|Ni|Cr|Mo|W|Zn)\*?[\[(]/g;
   function tightenComplexFormulas(text) {
     var out = "", last = 0, m;
     COMPLEX_START_RE.lastIndex = 0;
@@ -1335,7 +1380,7 @@
       for (; i < sentence.length && i < m.index + 90; i++) {
         var ch = sentence[i];
         // "Ru(bpy)3(PF6)2(ET = 46.8 kcal/mol)": the bracket with the energy is not part of the name
-        if (ch === "(" && depth === 0 && /^\(\s*(?:E_?\s?T\b|triplet\b|[^()]{0,25}=)/.test(sentence.slice(i, i + 30))) break;
+        if (ch === "(" && depth === 0 && /^\(\s*(?:E_?\s?T\b|triplet\b|[^()]{0,25}=|where\b|see\b|ref|fig|e\.g|i\.e|abbrev|hereafter|denoted|PhotAu)/i.test(sentence.slice(i, i + 30))) break;
         if (ch === "(" || ch === "[") depth++;
         else if (ch === ")" || ch === "]") { depth--; if (depth < 0) break; }
         else if (depth === 0 && !/[A-Za-z0-9+*\-]/.test(ch)) break;
@@ -1354,7 +1399,7 @@
      excited-state star are dropped. "Ir*[dF(CF3)ppy]2(dtbbpy)" = "[Ir(dF(CF3)ppy)2(dtbbpy)]PF6". */
   function complexKey(name) {
     var t = String(name || "").toLowerCase().replace(/^(?:fac|mer)-/, "");
-    if (!/^\[?(?:ir|ru|os|re|pt|cu)[*\[(]/.test(t)) return "";
+    if (!/^\[?(?:ir|ru|os|re|pt|cu|au|ag|pd|rh|co|fe|ni|cr|mo|w|zn)[*\[(]/.test(t)) return "";
     t = t.replace(/\s+/g, "").replace(/dtbpy/g, "dtbbpy").replace(/\(?(?:pf6|bf4|otf|clo4|cl)\)?\d?$/, "").replace(/\d?[+]$/, "").replace(/\](?:\d?\+)?$/, "]");
     return t.replace(/[^a-z0-9]+/g, "");
   }
@@ -1366,7 +1411,9 @@
   var LETTER_LABEL_AFTER_RE = /^\s+(\d+[a-z]{1,2}(?:-\s?[EZ])?)(?![A-Za-z0-9])/;
   /* "thioxanthone 1 derivative", "coumarin fragment 57", "xanthone-based": not the parent compound. */
   var DERIVATIVE_AFTER_RE = /^((?:\s+\d+[a-z]?)?[\s-]+(?:derivatives?|fragments?|analogues?|analogs?|moiet(?:y|ies)|units?|cores?|scaffolds?|based|type|substituted)(?:\s+\d+[a-z]?)?)(?![A-Za-z])/i;
-  var EXTRA_NAME_RE = /\b(?:(?:\d(?:,\d)+-)?\d(?:Cz|DPA)[A-Za-z]{1,8}N|norbornadiene|quadricyclane|fumaronitrile|tetracene|pentacene|azulene|camphorquinone)\b/g;
+  var EXTRA_NAME_RE = /\b(?:(?:\d(?:,\d)+-)?\d(?:Cz|DPA)[A-Za-z]{1,8}N|norbornadiene|quadricyclane|fumaronitrile|tetracene|pentacene|azulene|camphorquinone|isoprene|piperylene|cinnamaldehyde|cinnamic\s+aldehyde|flavone|chromone|indole|benzofuran|myrcene|cyclooctadiene|1,3-cyclohexadiene)\b/g;
+  /* "trans-methyl cinnamate", "methyl fumarate": an ester is a compound, not a class. */
+  var ESTER_NAME_RE = /\b(?:(?:cis|trans|\(?[EZ]\)?)-)?(?:di)?(?:methyl|ethyl|propyl|isopropyl|butyl|tert-butyl|benzyl|phenyl)\s+(?:cinnamate|fumarate|maleate|acrylate|methacrylate|crotonate|sorbate|benzoate|acetate)\b/gi;
 
   function findMoleculeSpansInSentence(sentence, knownKeys) {
     var casFound = null, cm;
@@ -1395,6 +1442,12 @@
       spans = spans.filter(function (o) { return o[1] <= sp[0] || o[0] >= sp[1] || (o[1] - o[0]) >= (sp[1] - sp[0]); });
       if (!overlaps(sp[0], sp[1])) spans.push(sp);
     });
+
+    ESTER_NAME_RE.lastIndex = 0;
+    var me;
+    while ((me = ESTER_NAME_RE.exec(sentence)) !== null) {
+      if (!overlaps(me.index, me.index + me[0].length)) spans.push([me.index, me.index + me[0].length, me[0]]);
+    }
 
     CHEM_NAME_RE.lastIndex = 0;
     var mc;
@@ -1438,6 +1491,13 @@
     return { spans: spans, cas: casFound };
   }
 
+  /* "... of 64 kcal/mol has represented a plateau": a bound, not the value of a molecule. */
+  function hasNonValueSuffix(sent, end) {
+    // "62.6 kcal/mol - 52.1 kcal/mol": the start of a range or of a change
+    if (/^\s*(?:[-\u2013\u2014\u2212]|\u2192|->)\s*\d/.test(sent.slice(end))) return true;
+    return /^[^.;]{0,45}?\b(?:plateau|upper\s+(?:limit|bound)|lower\s+(?:limit|bound)|threshold|cut-?off|ceiling)\b/i.test(sent.slice(end));
+  }
+
   function hasNonTripletPrefix(sent, valPos) {
     var pfx = sent.slice(Math.max(0, valPos - 45), valPos);
     if (RANGE_OR_NEG_PREFIX_RE.test(pfx)) return true;
@@ -1467,7 +1527,7 @@
         rx.lastIndex = 0;
         while ((m = rx.exec(sent)) !== null) {
           var valPos = (!isNm && m[1]) ? (m.index + m[0].lastIndexOf(m[1])) : m.index;
-          if (hasNonTripletPrefix(sent, valPos)) continue;
+          if (hasNonTripletPrefix(sent, valPos) || hasNonValueSuffix(sent, m.index + m[0].length)) continue;
           if (!isNm && /\b0\s*[-–]\s*0\s+(?:band|transition)/i.test(m[0]) && !TRIPLET_CONTEXT_RE.test(sent)) continue;
           if (matches.some(function (x) { return !(m.index + m[0].length <= x[0] || m.index >= x[1]); })) continue;
           if (isNm) {
@@ -1505,7 +1565,7 @@
       while ((mp = PAIR_UNIT_RE.exec(sent)) !== null) {
         var pe = mp.index + mp[0].length;
         if (covered(mp.index, pe)) continue;
-        if (hasNonTripletPrefix(sent, mp.index) || isSingletValue(sent, mp.index, pe)) continue;
+        if (hasNonTripletPrefix(sent, mp.index) || hasNonValueSuffix(sent, pe) || isSingletValue(sent, mp.index, pe)) continue;
         var uP = normalizeUnit(mp[3]), vp = parseNum(mp[1], uP), up = mp[2] ? parseNum(mp[2], uP) : null;
         if (up != null && !isFinite(up)) up = null;
         if (isFinite(vp)) matches.push([mp.index, pe, vp, up, uP, mp[0]]);
@@ -1522,6 +1582,18 @@
       }
     }
     matches.sort(function (a, b) { return a[0] - b[0]; });
+    // "(62.6 kcal mol- - 52.1 kcal mol)", "from 62.6 to 52.1 kcal/mol": a change, not two values
+    var span = {};
+    for (var di = 0; di + 1 < matches.length; di++) {
+      var a0 = matches[di], b0 = matches[di + 1];
+      var gap = sent.slice(a0[1], b0[6] != null ? b0[6] : b0[0]);
+      if (/^\s*(?:[-\u2013\u2014\u2212]+|\u2192|->)\s*$/.test(gap) ||
+          (/^\s*to\s*$/i.test(gap) && /\bfrom\b[^.;]{0,30}$/i.test(sent.slice(Math.max(0, a0[0] - 40), a0[6] != null ? a0[6] : a0[0])))) {
+        span[di] = span[di + 1] = 1;
+      }
+    }
+    matches = matches.filter(function (_, i) { return !span[i]; });
+    if (!matches.length) return [];
     // "ET = 2.12 eV, 205 kJ mol-1": one quantity in two units is one value
     matches = matches.filter(function (mt, i) {
       if (!i) return true;
@@ -1549,6 +1621,8 @@
     var before = sent.slice(0, open).replace(/\s+$/, "");
     for (var j = 0; j < spans.length; j++) {
       if (spans[j][1] >= before.length - 1 && spans[j][1] <= open) return spans[j][2];
+      // "methyl fumarate E-3a (ET = ...)", "4-chloroanisole 2a (...)"
+      if (spans[j][1] <= open && /^\s+(?:\(?[EZ]\)?-)?\d{1,3}[a-z]{0,2}(?:-\s?[EZ])?$/.test(before.slice(spans[j][1]))) return spans[j][2];
     }
     var m = /((?:[A-Za-z][A-Za-z0-9,'′\-\[\]]{3,}\s+)?(?:\d+\s?[a-z]{1,2}(?:-\s?[EZ])?|\d+[a-z]?-\s?[EZ]|[A-Z]\d{1,2}[a-z]?)|\d+·[A-Z][A-Za-z0-9 ]{1,6}|(?:[Uu]sing|with|of|for|and|by)\s+\d{1,3}|[A-Za-z][A-Za-z0-9,'′\-\[\]]{4,})$/.exec(before);
     if (!m) return null;
@@ -1579,6 +1653,11 @@
 
   /* Names for each match plus how they were found. "proximity" means a guess among several
      molecules in the sentence, which the curator must confirm. */
+  var LABEL_TOK = "(\\d{1,3}[a-z]{0,2}(?:-[EZ])?|[A-Z]\\d{1,2}[a-z]?)";
+  var LABEL_BEFORE_VALUE_RE = new RegExp("(?:triplet\\s+(?:state\\s+)?energ(?:y|ies)|\\bE_?\\s?T)\\s+(?:[a-z]+\\s+){0,2}?(?:of|for)\\s+(?:compound\\s+)?" + LABEL_TOK + "(?![\\w.,])[^()]{0,40}\\(?\\s*$");
+  var LABEL_AFTER_VALUE_RE = new RegExp("^[^.;]{0,6}?\\s(?:for|of)\\s+(?:compound\\s+)?" + LABEL_TOK + "(?![\\w.,])");
+  var SAME_NAME_OK_RE = /\brespectively\b|\bisomers?\b|\bboth\b|\bfac-|\bmer-|\b[EZ]-?\s*and\b/i;
+
   function pairWithConfidence(sent, spans, matches) {
     var how = matches.map(function () { return "anchored"; });
     var names = matches.map(function (mt, i) {
@@ -1587,18 +1666,33 @@
       if (inCue) return inCue;
       var byParen = nameBeforeParen(sent, spans, vp);
       if (byParen === "") { how[i] = "none"; return "(unnamed candidate)"; }
-      return byParen;
+      if (byParen) return byParen;
+      // "the triplet energy of 3 is higher (74.6 ...)", "65.9 kcal/mol for 3g": a compound number
+      var from = Math.max(0, Math.min(mt[0], vp - 70));
+      var lb = LABEL_BEFORE_VALUE_RE.exec(sent.slice(from, vp)) || LABEL_AFTER_VALUE_RE.exec(sent.slice(mt[1], mt[1] + 40));
+      if (lb && !spans.some(function (sp) { return sp[0] >= from && sp[1] <= vp; })) return lb[1];
+      return null;
     });
     if (names.some(function (x) { return x === null; })) {
       var rest = pairByPosition(sent, spans, matches);
-      var distinct = {};
+      var distinct = {}, anchored = {};
       spans.forEach(function (sp) { distinct[normalizeNameKey(sp[2])] = 1; });
+      names.forEach(function (x) { if (x && x !== "(unnamed candidate)") anchored[normalizeNameKey(x)] = 1; });
       var many = Object.keys(distinct).length > 1;
       names = names.map(function (x, i) {
         if (x !== null) return x;
+        // the only molecule left is already tied to another value of this sentence
+        if (matches.length > 1 && anchored[normalizeNameKey(rest[i])]) { how[i] = "none"; return "(unnamed candidate)"; }
         how[i] = rest[i] === "(unnamed candidate)" ? "none" : (many ? "proximity" : "single");
         return rest[i];
       });
+    }
+    // "triplet energies of 2.99 and 2.84 eV" with one molecule named: the second value is someone else's
+    for (var k = 1; k < matches.length; k++) {
+      if (matches[k][5] === matches[k - 1][5] && names[k] === names[k - 1] && names[k] !== "(unnamed candidate)" &&
+          how[k] !== "anchored" && !SAME_NAME_OK_RE.test(sent)) {
+        names[k] = "(unnamed candidate)"; how[k] = "none";
+      }
     }
     return { names: names, how: how };
   }
@@ -1703,6 +1797,9 @@
     });
   }
 
+  var CLASS_STATEMENT_RE = /\b(?:certain|some|most|many|several|various|typical|other|common(?:ly\s+used)?)\s+(?:[A-Za-z()\-]+\s+){0,3}[A-Za-z\-]{3,}s\b|\bsubstrates?\s+with\b|\bfor\s+both\b|\besters\s+of\b/i;
+  var BACK_REF_RE = /^\s*(?:This|These|Its|Their|The\s+(?:new\s+)?(?:complex|catalyst|photocatalyst|photosensitizer|PC))\b/;
+
   function extractFromProse(doc, knownMap, knownKeys, opts) {
     var results = [];
     doc.pages.forEach(function (page) {
@@ -1730,10 +1827,18 @@
       paragraphs.forEach(function (pair) {
         var secLabel = pair[0], joined = tightenComplexFormulas(pair[1].replace(/\s+/g, " "));
         var sentences = joined.split(/(?<=[.!?])\s+(?=[A-Z0-9(])/);
+        var lastNamed = null;
         sentences.forEach(function (sent) {
           var matches = extractEnergyMatchesInSentence(sent);
-          if (!matches.length) return;
+          if (!matches.length) {
+            var cxPrev = scanComplexes(sent);
+            if (cxPrev.length) lastNamed = cxPrev[cxPrev.length - 1][2];
+            return;
+          }
           var spRes = findMoleculeSpansInSentence(sent, knownKeys);
+          var prevNamed = lastNamed;
+          var cxHere = scanComplexes(sent);
+          if (cxHere.length) lastNamed = cxHere[cxHere.length - 1][2];
           var pairing = pairWithConfidence(sent, spRes.spans, matches), paired = pairing.names;
           var origin = classifyOrigin(sent, "exp");
           var mc = extractMethodAndConditions(sent, origin);
@@ -1749,6 +1854,12 @@
             // approximately 60 kcal/mol") describes a class, not an entry.
             if ((molName === "(unnamed candidate)" || (/s$/.test(molName) && !knownMap[normalizeNameKey(molName)])) &&
                 HEDGE_RE.test(sent.slice(Math.max(0, mt[0] - 25), mt[1]))) return;
+            // "certain styrenes (ET 250 kJ/mol)", "the two model diazenes", "for both photosensitizers"
+            var vpos = mt[6] != null ? mt[6] : mt[0];
+            if (molName === "(unnamed candidate)" &&
+                CLASS_STATEMENT_RE.test(sent.slice(Math.max(0, vpos - 120), Math.min(sent.length, mt[1] + 40)))) return;
+            // "This new complex exhibits ... 2.99 eV": the name is in the sentence before
+            var suggestName = (molName === "(unnamed candidate)" && prevNamed && BACK_REF_RE.test(sent)) ? prevNamed : null;
             results.push({
               name: molName.slice(0, 200),
               raw_cas: spRes.cas || null,
@@ -1784,6 +1895,7 @@
               basis: origin === "calc" ? mc.bOrTemp : null,
               solv: origin === "calc" ? mc.solvModel : null,
               warnings: [],
+              suggest_name: suggestName,
               pdf_file: doc.name,
               page_num: page.pageNum
             });
@@ -1931,7 +2043,8 @@
     }
     add(n0, true);
     // "1,4-Benzoquinone,tetrachloro-" (comma without space), "l0-methyl" (letter l read for 1)
-    var fixed = n0.replace(/,(?=[A-Za-z]{4})/g, ", ").replace(/(^|[\s,\-(])l(?=\d)/g, "$11");
+    var fixed = n0.replace(/,(?=[A-Za-z]{4})/g, ", ").replace(/(^|[\s,\-(])l(?=\d)/g, "$11")
+      .replace(/chio(?=ro)/g, "chlo").replace(/\bmethy(?=-|$)/g, "methyl");
     add(fixed, true);
     var stripped = fixed.replace(TRAILING_LABEL_RE, "").trim();
     if (stripped !== fixed && !/\((?:I{1,3}|IV)\)$/.test(fixed)) add(stripped, true);
@@ -1964,7 +2077,7 @@
       body: "name=" + encodeURIComponent(q)
     }).then(function (r) {
       // PubChem answers 503/429 when asked too fast: wait and ask again instead of giving up
-      if ((r.status === 503 || r.status === 429) && tries < 3) {
+      if ((r.status === 503 || r.status === 429 || r.status >= 500) && tries < 3) {
         return sleep(1200 * (tries + 1)).then(function () { return lookupSmilesByName(q, tries + 1); });
       }
       if (r.status === 400 || r.status === 404 || !r.ok) return "";
@@ -1972,9 +2085,36 @@
         var p = j && j.PropertyTable && j.PropertyTable.Properties && j.PropertyTable.Properties[0];
         return (p && (p.IsomericSMILES || p.CanonicalSMILES || p.SMILES || p.ConnectivitySMILES)) || "";
       });
-    }).catch(function () { return ""; });
+    }).catch(function () {
+      // a dropped connection is not "not found": try again once
+      return tries < 1 ? sleep(1500).then(function () { return lookupSmilesByName(q, tries + 1); }) : "";
+    });
   }
   EntPdf.lookupSmilesByName = lookupSmilesByName;
+
+  /* OPSIN turns systematic names into structures ("2-pyridyl 3-thienyl ketone") where PubChem has no entry. */
+  function lookupSmilesOpsin(query) {
+    var q = String(query || "").trim();
+    if (!q || q.length > 250 || looksLikeAnonymousLabel(q)) return Promise.resolve("");
+    return fetch("https://www.ebi.ac.uk/opsin/ws/" + encodeURIComponent(q) + ".smi").then(function (r) {
+      return r.ok ? r.text() : "";
+    }).then(function (t) {
+      t = String(t || "").trim();
+      return (/^\S+$/.test(t) && t.length < 600) ? t : "";
+    }).catch(function () { return ""; });
+  }
+  EntPdf.lookupSmilesOpsin = lookupSmilesOpsin;
+
+  /* Names OPSIN may be asked. Not metal compounds (it drops or detaches the metal) and not
+     multiplied substituents without locants ("di(2-thienyl)-1,3-butadiene"), where it guesses positions. */
+  var OPSIN_METAL_RE = /\b(?:zinc|magnesium|copper|palladium|platinum|nickel|cobalt|iron|tin|alumin(?:i)?um|iridium|ruthenium|gold|silver)\b|\((?:I{1,3}|IV)\)/i;
+  function opsinQueries(name, queries) {
+    if (OPSIN_METAL_RE.test(String(name || ""))) return [];
+    return (queries || []).filter(function (x) {
+      return x.exact && !OPSIN_METAL_RE.test(x.q) && !/(?:^|[\s,])(?:di|tri|tetra|bis|tris)[(\[]/i.test(x.q);
+    }).slice(0, 5);
+  }
+  EntPdf.isAnonymousLabel = looksLikeAnonymousLabel;
 
   function sleep(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
 
@@ -2029,11 +2169,29 @@
             });
           }, Promise.resolve(null));
         };
+        var opsinHit = function (list) {
+          return list.reduce(function (p, x) {
+            return p.then(function (hit) {
+              if (hit) return hit;
+              return sleep(150).then(function () { return lookupSmilesOpsin(x.q); }).then(function (found) {
+                return found ? { smiles: found, q: x.q } : null;
+              });
+            });
+          }, Promise.resolve(null));
+        };
         pSmi = firstHit(exactQs).then(function (hit) {
           if (hit) {
             return { smiles: hit.smiles, cas: "", clsHint: null, roleHint: null, src: "pubchem_name",
                      via: hit.q.toLowerCase() !== nm.toLowerCase() ? hit.q : null };
           }
+          return opsinHit(opsinQueries(nm, qs)).then(function (oh) {
+            if (oh && !(Ent.structureOk && Ent.structureOk(oh.smiles) === false)) {
+              return { smiles: oh.smiles, cas: "", clsHint: null, roleHint: null, src: "opsin", via: oh.q };
+            }
+            return null;
+          });
+        }).then(function (hit) {
+          if (hit) return hit;
           return firstHit(guessQs).then(function (g) {
             return { smiles: "", cas: "", clsHint: null, roleHint: null, src: "unresolved",
                      suggest: g ? { smiles: g.smiles, query: g.q, why: g.why } : null };
@@ -2102,7 +2260,8 @@
     } else {
       structureNote = "Automatically resolved; verify against paper.";
     }
-    if (item.via) structureNote = structureNote.replace("Automatically resolved", "Found on PubChem as \u201c" + item.via + "\u201d");
+    if (item.src === "opsin") structureNote = structureNote.replace("Automatically resolved", "Structure from OPSIN (name parser) for \u201c" + item.via + "\u201d");
+    else if (item.via) structureNote = structureNote.replace("Automatically resolved", "Found on PubChem as \u201c" + item.via + "\u201d");
     var doi = cand.doi ? EntScore.cleanDoi(cand.doi) : null;
     if (doi && !EntScore.isDoi(doi)) doi = null;
     var cas = item.cas ? EntScore.cleanCas(item.cas) : null;
@@ -2262,6 +2421,8 @@
               : "No readable text, even with OCR" + (doc.warnings.length ? " (" + doc.warnings[0] + ")" : "") + ".", "no_text"));
             return;
           }
+          var ligNotes = fixPrivateLigatures(doc);
+          if (ligNotes.length) doc.warnings.push("Ligature characters fixed: " + ligNotes.join(", ") + ".");
           var twin = docs.filter(function (d) {
             return d.pages.length === doc.pages.length && d.chars === doc.chars &&
               squash((d.pages[0] || {}).text).slice(0, 600) === squash((doc.pages[0] || {}).text).slice(0, 600);
@@ -2365,7 +2526,9 @@
                   : "Could not resolve SMILES automatically; draw, paste SMILES, or search PubChem.",
                 doiOk: doiOk,
                 draftSmiles: sg ? sg.smiles : "",
-                note: sg ? ("Not found as written. PubChem has \u201c" + sg.query + "\u201d (" + sg.why +
+                draftName: item.cand.suggest_name || null,
+                note: (item.cand.suggest_name && !sg) ? ("The sentence refers back to \u201c" + item.cand.suggest_name +
+                  "\u201d named just before: check that this value is for it, then look it up.") : sg ? ("Not found as written. PubChem has \u201c" + sg.query + "\u201d (" + sg.why +
                   "): it may not be the same species, so check the structure before adding.") : "",
                 noteIsErr: false
               });
@@ -2472,7 +2635,9 @@
     scanComplexes: scanComplexes,
     complexKey: complexKey,
     uninvertIndexName: uninvertIndexName,
+    fixPrivateLigatures: fixPrivateLigatures,
     nameQueries: nameQueries,
+    opsinQueries: opsinQueries,
     labelDefinitions: labelDefinitions,
     applyLabelDefinitions: applyLabelDefinitions,
     findMoleculeSpansInSentence: findMoleculeSpansInSentence,

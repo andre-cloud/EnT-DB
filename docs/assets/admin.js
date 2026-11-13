@@ -1159,6 +1159,12 @@
     parts[0] = plural(fileCount - failedN, "PDF", "PDFs") + " processed";
     if (failedN) parts.push(failedN + " could not be read");
     var summary = parts.join(" · ") + "." + (pdfResult.cancelled ? " Cancelled before the end: results are partial." : "");
+    if (pdfResult.memoHidden || pdfResult.memoResolved) {
+      summary += " From your earlier review: " + [
+        pdfResult.memoResolved ? plural(pdfResult.memoResolved, "value", "values") + " resolved with a structure you gave before" : "",
+        pdfResult.memoHidden ? plural(pdfResult.memoHidden, "value", "values") + " you dismissed before left out" : ""
+      ].filter(Boolean).join(", ") + ".";
+    }
     $("pdf-summary").textContent = summary;
     var ul = $("pdf-files");
     ul.replaceChildren();
@@ -1245,13 +1251,101 @@
     if (pdfModalReturn && pdfModalReturn.focus) pdfModalReturn.focus();
     pdfModalReturn = null;
   }
+  /* ---------- Curator decisions on PDF candidates, remembered in this browser ---------- */
+  var PDF_MEMO_KEY = "trendb.pdfReview.v1";
+  function readPdfMemo() {
+    try {
+      var m = JSON.parse(localStorage.getItem(PDF_MEMO_KEY) || "null");
+      if (m && m.names && m.dismissed) return m;
+    } catch (e) {}
+    return { names: {}, dismissed: {} };
+  }
+  function writePdfMemo(m) { try { localStorage.setItem(PDF_MEMO_KEY, JSON.stringify(m)); } catch (e) {} }
+  function pdfSource(cand) { return String(cand.doi || cand.pdf_file || "").toLowerCase(); }
+  function pdfPlainName(cand) {
+    var n = String(cand.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    return n === "(unnamed candidate)" ? "" : n;
+  }
+  // A written name means the same compound in any paper; a label ("3a", "C2") only in its own paper.
+  function memoNameKey(cand) {
+    var n = pdfPlainName(cand);
+    if (!n) return "";
+    return (EntPdf.isAnonymousLabel && EntPdf.isAnonymousLabel(n) ? pdfSource(cand) + "|" : "") + n;
+  }
+  function memoValueKey(cand) {
+    return [pdfSource(cand), pdfPlainName(cand), Number(cand.et_kcal).toFixed(1), cand.origin === "calc" ? "calc" : "exp"].join("|");
+  }
+  function rememberDismissed(cands) {
+    var m = readPdfMemo();
+    cands.forEach(function (c) { m.dismissed[memoValueKey(c)] = Date.now(); });
+    writePdfMemo(m);
+  }
+  function rememberStructure(paperName, cand, smiles, cas, iupac) {
+    var k = memoNameKey({ name: paperName, doi: cand.doi, pdf_file: cand.pdf_file });
+    if (!k) return;
+    var m = readPdfMemo();
+    m.names[k] = { smiles: smiles, cas: cas || null, iupac: iupac || null, ts: Date.now() };
+    writePdfMemo(m);
+  }
+  /* Apply earlier decisions to a fresh extraction: dismissed values stay out, names whose
+     structure the curator already gave become ready rows. */
+  function applyPdfMemo(res) {
+    var m = readPdfMemo(), keep = [], toResolve = [], hidden = 0;
+    res.reviewItems.forEach(function (it) {
+      if (m.dismissed[memoValueKey(it.cand)]) { hidden++; return; }
+      var k = memoNameKey(it.cand), known = k && m.names[k];
+      if (known && known.smiles && Ent.structureOk(known.smiles) !== false) toResolve.push({ it: it, known: known });
+      else keep.push(it);
+    });
+    res.reviewItems = keep;
+    return toResolve.reduce(function (p, x) {
+      return p.then(function () {
+        var paperName = x.it.cand.name;
+        return res.resolveCandidate(x.it.cand, x.known.smiles, x.known.cas, x.known.iupac || paperName).then(function (row) {
+          row.structure_note = "Paper name: " + paperName + ". Structure entered earlier by a curator for this name; verify against paper.";
+          res.readyRows.push(row);
+        }, function () { res.reviewItems.push(x.it); });
+      });
+    }, Promise.resolve()).then(function () {
+      res.memoHidden = hidden;
+      res.memoResolved = toResolve.length;
+      return res;
+    });
+  }
+
+  /* One card per compound: the values of the same name in the same PDF share one structure. */
+  function pdfReviewGroups(items) {
+    var groups = [], byKey = {};
+    items.forEach(function (it) {
+      var n = pdfPlainName(it.cand);
+      var k = n ? (it.cand.pdf_file || "") + "|" + n : null;
+      if (k && byKey[k]) { byKey[k].items.push(it); return; }
+      var g = { items: [it] };
+      if (k) byKey[k] = g;
+      groups.push(g);
+    });
+    return groups;
+  }
+  function removeReviewItems(list) {
+    pdfResult.reviewItems = pdfResult.reviewItems.filter(function (it) { return list.indexOf(it) < 0; });
+    drawPdfResult();
+    if (!pdfResult.reviewItems.length) closePdfModal();
+    else drawPdfModal();
+  }
+
   function drawPdfModal() {
     var ul = $("pdf-modal-list"), empty = $("pdf-modal-empty"), items = (pdfResult && pdfResult.reviewItems) || [];
-    $("pdf-modal-meta").textContent = plural(items.length, "unresolved candidate", "unresolved candidates") +
+    var groups = pdfReviewGroups(items);
+    $("pdf-modal-meta").textContent = plural(items.length, "unresolved value", "unresolved values") +
+      (groups.length !== items.length ? " in " + plural(groups.length, "card", "cards") : "") +
       " · " + (pdfResult ? plural(pdfResult.readyRows.length, "ready row", "ready rows") : "");
     empty.hidden = items.length > 0;
-    ul.replaceChildren.apply(ul, items.map(function (it, idx) {
-      var cand = it.cand;
+    ul.replaceChildren.apply(ul, groups.map(function (g) {
+      var it = g.items[0], cand = it.cand;
+      g.items.forEach(function (o) {
+        if (!it.draftSmiles && o.draftSmiles) { it.draftSmiles = o.draftSmiles; it.note = it.note || o.note; }
+        if (it.draftName == null && o.draftName != null) it.draftName = o.draftName;
+      });
       var li = el("li", "ei-card pdf-unres-card");
       var infoCol = el("div", "ei-col-info");
       var thumb = el("div", "ei-thumb");
@@ -1267,14 +1361,35 @@
       var head = el("div", "ei-head");
       head.appendChild(el("strong", "ei-name", cand.name || "(unnamed)"));
       var badges = el("span", "ei-badges");
-      badges.appendChild(el("span", "ei-status", Ent.fmt(Number(cand.et_kcal), 1) + " kcal/mol"));
-      badges.appendChild(el("span", "ei-tool", cand.origin === "calc" ? "Computed" : "Experimental"));
-      if (cand.location) badges.appendChild(el("span", "ei-status", cand.location));
+      if (g.items.length === 1) {
+        badges.appendChild(el("span", "ei-status", Ent.fmt(Number(cand.et_kcal), 1) + " kcal/mol"));
+        badges.appendChild(el("span", "ei-tool", cand.origin === "calc" ? "Computed" : "Experimental"));
+        if (cand.location) badges.appendChild(el("span", "ei-status", cand.location));
+      } else {
+        badges.appendChild(el("span", "ei-tool", plural(g.items.length, "value", "values") + " · one structure for all"));
+      }
       head.appendChild(badges);
       meta.appendChild(head);
       meta.appendChild(el("div", "ei-reason", it.reason));
-      if (cand.quote) meta.appendChild(el("div", "pdf-unres-quote", cand.quote));
-      if (cand.evidence) meta.appendChild(el("div", "hint", cand.evidence));
+      if (g.items.length === 1) {
+        if (cand.quote) meta.appendChild(el("div", "pdf-unres-quote", cand.quote));
+        if (cand.evidence) meta.appendChild(el("div", "hint", cand.evidence));
+      } else {
+        var vl = el("ul", "pdf-unres-values");
+        g.items.forEach(function (o) {
+          var row = el("li");
+          row.appendChild(el("strong", null, Ent.fmt(Number(o.cand.et_kcal), 1) + " kcal/mol"));
+          row.appendChild(document.createTextNode(" · " + (o.cand.origin === "calc" ? "Computed" : "Experimental") +
+            (o.cand.location ? " · " + o.cand.location : "") + (o.cand.quote ? " · “" + o.cand.quote + "”" : "")));
+          var x = el("button", "btn small reject", "Drop"); x.type = "button";
+          x.title = "Drop only this value";
+          x.addEventListener("click", function () { rememberDismissed([o.cand]); removeReviewItems([o]); });
+          row.appendChild(document.createTextNode(" "));
+          row.appendChild(x);
+          vl.appendChild(row);
+        });
+        meta.appendChild(vl);
+      }
       if (cand.doi) meta.appendChild(el("div", "hint mono", "DOI: " + cand.doi));
       infoCol.appendChild(meta);
       li.appendChild(infoCol);
@@ -1283,7 +1398,7 @@
       var nameRow = el("div", "ei-fix-row");
       var nameInp = el("input"); nameInp.type = "text"; nameInp.className = "grow";
       nameInp.placeholder = "Compound or IUPAC name";
-      nameInp.value = it.draftName != null ? it.draftName : (cand.name || "");
+      nameInp.value = it.draftName != null ? it.draftName : (cand.name === "(unnamed candidate)" ? "" : (cand.name || ""));
       nameInp.addEventListener("input", function () { it.draftName = nameInp.value; });
       var lookupBtn = el("button", "btn small", "Lookup SMILES"); lookupBtn.type = "button";
       nameRow.appendChild(nameInp); nameRow.appendChild(lookupBtn);
@@ -1295,8 +1410,8 @@
       smiInp.value = it.draftSmiles || "";
       smiInp.addEventListener("input", function () { it.draftSmiles = smiInp.value; drawThumb(smiInp.value.trim()); });
       var skBtn = el("button", "btn small", "Sketcher…"); skBtn.type = "button";
-      var addBtn = el("button", "btn small primary", "Add to JSON"); addBtn.type = "button";
-      var dropBtn = el("button", "btn small reject", "Dismiss"); dropBtn.type = "button";
+      var addBtn = el("button", "btn small primary", g.items.length > 1 ? "Add all to JSON" : "Add to JSON"); addBtn.type = "button";
+      var dropBtn = el("button", "btn small reject", g.items.length > 1 ? "Dismiss all" : "Dismiss"); dropBtn.type = "button";
       smiRow.appendChild(smiInp); smiRow.appendChild(skBtn); smiRow.appendChild(addBtn); smiRow.appendChild(dropBtn);
       fixCol.appendChild(smiRow);
 
@@ -1310,15 +1425,18 @@
         if (!q) { it.note = "Enter a compound name or CAS first."; it.noteIsErr = true; drawPdfModal(); return; }
         lookupBtn.disabled = true;
         EntPdf.lookupSmilesByName(q).then(function (found) {
+          if (found || !EntPdf.lookupSmilesOpsin) return { smiles: found, from: "PubChem" };
+          return EntPdf.lookupSmilesOpsin(q).then(function (o) { return { smiles: o, from: "OPSIN (name parser)" }; });
+        }).then(function (r) {
           lookupBtn.disabled = false;
-          if (!found) { it.note = "Not found on PubChem; draw it in Sketcher."; it.noteIsErr = true; drawPdfModal(); return; }
-          it.draftSmiles = found;
-          it.note = "Found SMILES on PubChem — verify preview and click Add to JSON.";
+          if (!r.smiles) { it.note = "Not found on PubChem or by OPSIN; draw it in Sketcher."; it.noteIsErr = true; drawPdfModal(); return; }
+          it.draftSmiles = r.smiles;
+          it.note = "Found SMILES with " + r.from + " — verify preview and click Add to JSON.";
           it.noteIsErr = false;
           drawPdfModal();
         }, function () {
           lookupBtn.disabled = false;
-          it.note = "PubChem lookup failed."; it.noteIsErr = true; drawPdfModal();
+          it.note = "Lookup failed."; it.noteIsErr = true; drawPdfModal();
         });
       });
 
@@ -1344,43 +1462,32 @@
           it.note = "Enter a valid SMILES first."; it.noteIsErr = true; drawPdfModal(); return;
         }
         var paperName = cand.name || "";
-        cand.name = (nameInp.value.trim() || cand.name || "").slice(0, 200);
-        // The same compound usually comes back with other values: offer this structure there too.
-        var twins = 0;
-        if (paperName && paperName !== "(unnamed candidate)") {
-          items.forEach(function (other) {
-            if (other === it || other.draftSmiles || other.cand.name !== paperName || other.cand.pdf_file !== cand.pdf_file) return;
-            other.draftSmiles = smi;
-            other.draftName = cand.name;
-            other.note = "Same name as an entry just added: structure copied from it. Check it and click Add to JSON.";
-            other.noteIsErr = false;
-            twins++;
-          });
-        }
-        addBtn.disabled = true;
+        var newName = (nameInp.value.trim() || cand.name || "").slice(0, 200);
+        addBtn.disabled = true; dropBtn.disabled = true;
         Promise.all([
           Ent.lookupIupac ? Ent.lookupIupac(smi).catch(function () { return ""; }) : Promise.resolve(""),
           Ent.lookupCas ? Ent.lookupCas(smi).catch(function () { return []; }) : Promise.resolve([])
         ]).then(function (metaRes) {
-          return pdfResult.resolveCandidate(cand, smi, (metaRes[1] && metaRes[1][0]) || null, metaRes[0] || cand.name);
-        }).then(function (row) {
-          pdfResult.readyRows.push(row);
-          pdfResult.reviewItems.splice(idx, 1);
-          drawPdfResult();
-          if (!pdfResult.reviewItems.length) closePdfModal();
-          else drawPdfModal();
-          toast("Added “" + (row.name || "entry") + "” to batch JSON." +
-            (twins ? " Structure copied to " + plural(twins, "other candidate", "other candidates") + " with the same name." : ""));
+          var cas = (metaRes[1] && metaRes[1][0]) || null, iupac = metaRes[0] || newName;
+          rememberStructure(paperName, cand, smi, cas, iupac);
+          return g.items.reduce(function (p, o) {
+            return p.then(function (rows) {
+              o.cand.name = newName;
+              return pdfResult.resolveCandidate(o.cand, smi, cas, iupac).then(function (row) { rows.push(row); return rows; });
+            });
+          }, Promise.resolve([]));
+        }).then(function (rows) {
+          rows.forEach(function (row) { pdfResult.readyRows.push(row); });
+          removeReviewItems(g.items);
+          toast("Added " + plural(rows.length, "entry", "entries") + " for “" + ((rows[0] && rows[0].name) || newName) + "” to batch JSON.");
         }, function () {
-          addBtn.disabled = false;
+          addBtn.disabled = false; dropBtn.disabled = false;
           it.note = "Could not build entry row."; it.noteIsErr = true; drawPdfModal();
         });
       });
       dropBtn.addEventListener("click", function () {
-        pdfResult.reviewItems.splice(idx, 1);
-        drawPdfResult();
-        if (!pdfResult.reviewItems.length) closePdfModal();
-        else drawPdfModal();
+        rememberDismissed(g.items.map(function (o) { return o.cand; }));
+        removeReviewItems(g.items);
       });
       return li;
     }));
@@ -1429,6 +1536,8 @@
           prog.max = Math.max(1, tot || 1);
           prog.value = Math.min(prog.max, fi || 0);
         }
+      }).then(function (res) {
+        return applyPdfMemo(res);
       }).then(function (res) {
         pdfBusy = false; pdfResult = res;
         prog.value = prog.max; prog.hidden = true;
