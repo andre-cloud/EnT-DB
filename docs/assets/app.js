@@ -126,11 +126,24 @@
     var h = (location.hash || "").replace(/^#/, ""), parts = h.split("/");
     if (parts[0] === "db") { state.section = "db"; state.view = "db"; }
     else if (parts[0] === "submit") { state.section = "db"; state.view = "submit"; }
+    else if (parts[0] === "mol") {
+      state.section = "db"; state.view = "mol";
+      var raw = parts.slice(1).join("/");
+      try { state.molKey = decodeURIComponent(raw); } catch (e) { state.molKey = raw; }
+    }
     else if (parts[0] === "plot") { state.section = "plot"; state.plotRoute = { tool: parts[1] || "", data: parts.slice(2).join("/") }; }
     else state.section = "home";
   }
   function go(hash) { if (location.hash !== hash) location.hash = hash; else { readRoute(); render(); } }
-  window.addEventListener("hashchange", function () { readRoute(); render(); window.scrollTo(0, 0); });
+  /* a molecule's page sits on top of the list: going back finds the list as it was, at the same height */
+  window.addEventListener("hashchange", function () {
+    var was = state.section === "db" ? state.view : "";
+    if (was === "db") state.listScroll = window.scrollY;
+    readRoute();
+    if (state.view === "mol") state.cameFromList = was === "db";
+    render();
+    window.scrollTo(0, was === "mol" && state.section === "db" && state.view === "db" ? (state.listScroll || 0) : 0);
+  });
   var plotCtx = {
     docs: function () { return state.docs; },
     loaded: function () { return state.loaded; },
@@ -161,14 +174,17 @@
     if (!renderSections()) return;
     $("n-db").textContent = state.docs.length;
     Ent.fillClasses(state.docs, state.search);
-    $("tab-db").setAttribute("aria-selected", String(state.view === "db"));
-    $("tab-submit").setAttribute("aria-selected", String(state.view === "submit"));
-    var sub = state.view === "submit", list = $("list"), status = $("status");
-    $("db-view").hidden = sub;
-    $("pub-toggle-aside").hidden = sub;
+    var sub = state.view === "submit", mol = state.view === "mol", list = $("list"), status = $("status");
+    $("tab-db").setAttribute("aria-selected", String(!sub));
+    $("tab-submit").setAttribute("aria-selected", String(sub));
+    $("db-view").hidden = sub || mol;
+    $("pub-toggle-aside").hidden = sub || mol;
     $("form").hidden = !sub;
+    $("mol-view").hidden = !mol;
+    if (!mol) document.title = BASE_TITLE;
     syncSlideBar();
     if (sub) { status.hidden = true; updateForm(); return; }
+    if (mol) { renderMolPage(); return; }
     if (!state.loaded) {
       updateSummaryAndPills([], {});
       status.hidden = false; list.replaceChildren();
@@ -185,12 +201,11 @@
     else if (state.triage && TRIAGE_PRED[state.triage]) res.rows = res.rows.filter(TRIAGE_PRED[state.triage]);
 
     Ent.searchInfo(res, state.docs.length);
-    /* one card per molecule, carrying every value that matches the search */
+    /* one summary card per molecule, carrying every value that matches the search; it opens the molecule's page */
     Ent.drawList(list, Ent.groupByMolecule(res.rows), function (items) {
-      return Ent.moleculeCard(items, {
+      return Ent.moleculeSummary(items, {
         scores: res.scores,
         simMode: state.search.ss.mode === "sim",
-        onSuggest: openSuggest,
         isSlidePicked: function (key) { return !!state.slideSel[key]; },
         onSlideToggle: toggleSlideItem
       });
@@ -200,6 +215,33 @@
       status.textContent = state.docs.length ? "No entry matches the current search and filters."
         : "No entries have been approved yet. Use “Submit entry” to propose the first one.";
     }
+  }
+
+  /* ---------- a molecule's own page: the full card with every value it has in the database ---------- */
+  var BASE_TITLE = document.title;
+  function renderMolPage() {
+    var host = $("mol-view"), back = el("button", "btn small mol-back", "← Back to database");
+    back.type = "button";
+    back.addEventListener("click", function () { if (state.cameFromList) history.back(); else go("#db"); });
+    document.title = BASE_TITLE;
+    var nodes = [back], items = state.loaded ? Ent.findMolecule(state.docs, state.molKey) : null;
+    if (!state.loaded) {
+      nodes.push(el("p", "status", state.failed ? "The database could not be loaded. Reload the page to try again." : "Loading the database…"));
+    } else if (!items && /^id:/.test(state.molKey || "") && !window.OCL) {
+      nodes.push(el("p", "status", "Loading the structure library…"));
+    } else if (!items) {
+      nodes.push(el("p", "status", "This molecule is not in the database. It may have been removed, or merged with another entry."));
+    } else {
+      var card = Ent.moleculeCard(items, {
+        onSuggest: openSuggest,
+        isSlidePicked: function (key) { return !!state.slideSel[key]; },
+        onSlideToggle: toggleSlideItem
+      });
+      nodes.push(card);
+      var h = card.querySelector("h2");
+      document.title = (h ? h.textContent + " · " : "") + "TrEnDB";
+    }
+    host.replaceChildren.apply(host, nodes);
   }
 
   /* ---------- submission form ---------- */

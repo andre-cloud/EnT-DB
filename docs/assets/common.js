@@ -999,37 +999,151 @@
     };
   };
 
+  /* what every view of one molecule shows: the best value first, names, role, class, CAS */
+  function groupSummary(items) {
+    items = items.slice().sort(byQuality);
+    var p = items[0], roles = {};
+    items.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
+    return {
+      items: items, p: p, many: items.length > 1, key: Ent.slideItemKey(items),
+      comm: items.map(function (d) { return trimStr(d.commercial_name); }).filter(Boolean)[0] || "",
+      iupac: trimStr(p.name) || items.map(function (d) { return trimStr(d.name); }).filter(Boolean)[0] || "",
+      role: roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor",
+      cls: items.map(function (d) { return d.cls; }).filter(Boolean)[0] || "",
+      cas: items.map(function (d) { return d.cas; }).filter(Boolean)[0] || ""
+    };
+  }
+  function roleLabel(role) { return role === "donor" ? "Donor" : role === "both" ? "Donor and acceptor" : "Acceptor"; }
+  function bestSimilarity(items, o) {
+    if (!o.simMode || !o.scores) return null;
+    var best = null; items.forEach(function (d) { var x = o.scores[d.id]; if (x != null && (best == null || x > best)) best = x; });
+    return best;
+  }
+  function slidePickBtn(items, o, picked) {
+    var pickBtn = el("button", "chip slide-pick", picked ? "✓ Slide" : "+ Slide");
+    pickBtn.type = "button";
+    pickBtn.setAttribute("aria-pressed", String(picked));
+    pickBtn.title = "Select multiple molecules to compare in one E_T slide";
+    pickBtn.addEventListener("click", function (ev) {
+      ev.preventDefault(); ev.stopPropagation();
+      o.onSlideToggle(Ent.slideItemFromGroup(items));
+    });
+    return pickBtn;
+  }
+
+  /* the address of a molecule's own page: the same key the slide selection uses */
+  Ent.moleculeKey = function (items) { return groupSummary(items).key; };
+  Ent.moleculeHref = function (items) { return "#mol/" + encodeURIComponent(Ent.moleculeKey(items)); };
+  /* -> every value of the molecule a key names, or null. Any value of the group may carry the key,
+     so the page is found whatever order the values arrive in. */
+  Ent.findMolecule = function (docs, key) {
+    var m = /^(cas|id|smi):([\s\S]*)$/.exec(String(key || ""));
+    if (!m || !m[2]) return null;
+    var kind = m[1], val = m[2];
+    var groups = Ent.groupByMolecule(docs);
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].some(function (d) { return keysOf(d)[kind] === val; })) return groups[i];
+    }
+    return null;
+  };
+
+  /* The list shows one summary card per molecule: structure, every E_T value as a tick on the
+     40–80 scale (filled green: experimental; hollow purple: computed) and the best value's source.
+     The whole card links to the molecule's own page, where Ent.moleculeCard shows everything.
+     o = {scores, simMode, isSlidePicked(key), onSlideToggle(item)} */
+  Ent.moleculeSummary = function (items, o) {
+    o = o || {};
+    var g = groupSummary(items), p = g.p;
+    items = g.items;
+    var picked = o.isSlidePicked ? !!o.isSlidePicked(g.key) : false;
+    var c = el("article", "card mol mol-sum" + (picked ? " mol-picked" : "")), head = el("div", "head");
+
+    var chips = el("div", "chips");
+    chips.appendChild(el("span", "chip", roleLabel(g.role)));
+    var hasExp = items.some(function (d) { return d.origin !== "calc"; });
+    var hasCalc = items.some(function (d) { return d.origin === "calc"; });
+    chips.appendChild(el("span", "chip " + (hasExp ? "exp" : "calc"), hasExp && hasCalc ? "Experimental and computed" : hasExp ? "Experimental" : "Computed"));
+    if (g.cls) chips.appendChild(el("span", "chip plain", g.cls));
+    if (g.many) chips.appendChild(el("span", "chip plain", items.length + " values"));
+    var sim = bestSimilarity(items, o);
+    if (sim != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(sim, 2)));
+    if (o.onSlideToggle && Ent.slideGraphic) chips.appendChild(slidePickBtn(items, o, picked));
+    head.appendChild(chips);
+
+    var title = renderMolTitle(head, { name: g.iupac, commercial_name: g.comm }), h2 = title.querySelector("h2");
+    var link = el("a", "mol-link", h2.textContent);
+    link.href = Ent.moleculeHref(items);
+    link.title = "Open the full card";
+    h2.replaceChildren(link);
+    c.appendChild(head);
+
+    var body = el("div", "sum-body");
+    var paper = el("div", "paper"), info = molInfo(p.smiles);
+    if (info) paper.innerHTML = info.svg;
+    else paper.textContent = window.OCL ? "SMILES could not be read" : "Drawing not available";
+    body.appendChild(paper);
+
+    var panel = el("div", "sum-et");
+    panel.appendChild(elT("p", "sum-lab", "Triplet energy (E_T)"));
+    var vals = items.map(function (d) { return Number(d.et_kcal); }).filter(isFinite);
+    var et = el("div", "et" + (hasExp && !hasCalc ? " exp" : !hasExp && hasCalc ? " calc" : ""));
+    if (vals.length) {
+      var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+      var one = vals.length === 1;
+      et.appendChild(el("span", "v", one ? fmt(lo, 1) + (p.et_unc ? " ± " + p.et_unc : "") : lo === hi ? fmt(lo, 1) : fmt(lo, 1) + "–" + fmt(hi, 1)));
+      et.appendChild(el("span", "u", "kcal/mol"));
+      panel.appendChild(et);
+      panel.appendChild(el("p", "alt", one
+        ? fmt(lo * 4.184, 0) + " kJ/mol · " + fmt(lo / 23.0605, 2) + " eV"
+        : vals.length + " values · " + fmt(lo * 4.184, 0) + (lo === hi ? "" : "–" + fmt(hi * 4.184, 0)) + " kJ/mol"));
+      if (lo < S_MIN || hi > S_MAX) panel.appendChild(el("span", "chip warn", "Off scale (" + (lo < S_MIN ? "<40" : ">80") + ")"));
+    } else {
+      et.appendChild(el("span", "v", "—"));
+      panel.appendChild(et);
+    }
+    panel.appendChild(scale(items));
+    var meta = el("div", "sum-meta");
+    if (info && info.formula) meta.appendChild(el("span", "formula", info.formula));
+    if (g.cas) meta.appendChild(el("span", "formula", "CAS " + g.cas));
+    var how = [trimStr(p.method), trimStr(p.conditions)].filter(Boolean).join(" · ");
+    if (how) { var hw = el("span", "sum-how", how); hw.title = how; meta.appendChild(hw); }
+    if (meta.childNodes.length) panel.appendChild(meta);
+    body.appendChild(panel);
+    c.appendChild(body);
+
+    var srcSeen = {}, nSrc = 0;
+    items.forEach(function (d) {
+      var k = (EntScore.cleanDoi(d.doi || "") || trimStr(d.citation)).toLowerCase();
+      if (k && !srcSeen[k]) { srcSeen[k] = 1; nSrc++; }
+    });
+    var cite = trimStr(p.citation);
+    if (cite || p.doi) {
+      var foot = el("div", "sum-foot");
+      var ct = el("span", "sum-cite", cite + (nSrc > 1 ? (cite ? " · " : "") + "+" + (nSrc - 1) + (nSrc === 2 ? " other source" : " other sources") : ""));
+      ct.title = cite;
+      foot.appendChild(ct);
+      if (p.doi) foot.appendChild(el("span", "sum-doi", "doi:" + (EntScore.cleanDoi(p.doi) || p.doi)));
+      c.appendChild(foot);
+    }
+    return c;
+  };
+
   /* items: entries of one molecule; o = {scores, simMode, onSuggest(d), isSlidePicked(key), onSlideToggle(item)} */
   Ent.moleculeCard = function (items, o) {
-    o = o || {}; items = items.slice().sort(byQuality);
-    var p = items[0], many = items.length > 1, molKey = Ent.slideItemKey(items);
-    var comm = items.map(function (d) { return trimStr(d.commercial_name); }).filter(Boolean)[0] || "";
-    var iupac = trimStr(p.name) || items.map(function (d) { return trimStr(d.name); }).filter(Boolean)[0] || "";
+    o = o || {};
+    var g = groupSummary(items), p = g.p, many = g.many, molKey = g.key, comm = g.comm, iupac = g.iupac, role = g.role;
+    items = g.items;
     var picked = o.isSlidePicked ? !!o.isSlidePicked(molKey) : false;
     var c = el("article", "card mol" + (picked ? " mol-picked" : "")), head = el("div", "head");
     renderMolTitle(head, { name: iupac, commercial_name: comm });
-    var chips = el("div", "chips"), roles = {};
-    items.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
-    var role = roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor";
-    chips.appendChild(el("span", "chip", role === "donor" ? "Donor" : role === "both" ? "Donor and acceptor" : "Acceptor"));
-    var cls = items.map(function (d) { return d.cls; }).filter(Boolean)[0];
+    var chips = el("div", "chips");
+    chips.appendChild(el("span", "chip", roleLabel(role)));
+    var cls = g.cls;
     if (cls) chips.appendChild(el("span", "chip plain", cls));
     if (many) chips.appendChild(el("span", "chip plain", items.length + " values"));
-    if (o.simMode && o.scores) {
-      var best = null; items.forEach(function (d) { var x = o.scores[d.id]; if (x != null && (best == null || x > best)) best = x; });
-      if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
-    }
-    if (o.onSlideToggle && Ent.slideGraphic) {
-      var pickBtn = el("button", "chip slide-pick", picked ? "✓ Slide" : "+ Slide");
-      pickBtn.type = "button";
-      pickBtn.setAttribute("aria-pressed", String(picked));
-      pickBtn.title = "Select multiple molecules to compare in one E_T slide";
-      pickBtn.addEventListener("click", function (ev) {
-        ev.stopPropagation();
-        o.onSlideToggle(Ent.slideItemFromGroup(items));
-      });
-      chips.appendChild(pickBtn);
-    }
+    var best = bestSimilarity(items, o);
+    if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
+    if (o.onSlideToggle && Ent.slideGraphic) chips.appendChild(slidePickBtn(items, o, picked));
     head.appendChild(chips); c.appendChild(head);
 
     if (many) {
