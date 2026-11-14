@@ -1329,10 +1329,11 @@
       var px = pct(x), unc = "";
       if (v.et_unc) {
         var u0 = pct(x - Number(v.et_unc)), u1 = pct(x + Number(v.et_unc));
-        unc = '<rect x="' + u0 + '" y="' + sy + '" width="' + Math.max(3, u1 - u0) + '" height="6" rx="3" fill="' + th.accent + '" opacity="0.28"/>';
+        unc = '<rect x="' + u0 + '" y="' + sy + '" width="' + Math.max(3, u1 - u0) + '" height="6" rx="3" fill="' + (v.origin === "calc" ? th.calc : th.accent) + '" opacity="0.28"/>';
       }
-      var mark = (vals.length > 1 && v.origin === "calc")
-        ? '<rect x="' + (px - 4) + '" y="' + (sy - 8) + '" width="8" height="22" rx="3" fill="' + th.card + '" stroke="' + th.accent + '" stroke-width="2.4"/>'
+      /* the same legend as the cards: filled green experimental, hollow purple computed */
+      var mark = v.origin === "calc"
+        ? '<rect x="' + (px - 4) + '" y="' + (sy - 8) + '" width="8" height="22" rx="3" fill="' + th.card + '" stroke="' + th.calc + '" stroke-width="2.4"/>'
         : '<rect x="' + (px - 3) + '" y="' + (sy - 8) + '" width="6" height="22" rx="3" fill="' + th.accent + '"/>';
       return unc + mark;
     }).join("");
