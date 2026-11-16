@@ -11,13 +11,20 @@
   var el = Ent.el = function (tag, cls, text) {
     var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e;
   };
-  /* Writes text into an element, showing "E_T" as E with a subscript T. */
+  /* Writes text into an element, showing "E_T", "E_red", "E_ox", "E*_red", "E*_ox" and "E_00"
+     as E with a subscript (and the star of an excited state). */
+  var SUB_RE = /E(\*?)_(T|red|ox|00)/g;
   var setText = Ent.setText = function (node, text) {
     node.replaceChildren();
-    String(text == null ? "" : text).split("E_T").forEach(function (part, i) {
-      if (i) { node.appendChild(document.createTextNode("E")); node.appendChild(el("sub", null, "T")); }
-      if (part) node.appendChild(document.createTextNode(part));
-    });
+    var t = String(text == null ? "" : text), last = 0, m;
+    SUB_RE.lastIndex = 0;
+    while ((m = SUB_RE.exec(t))) {
+      if (m.index > last) node.appendChild(document.createTextNode(t.slice(last, m.index)));
+      node.appendChild(document.createTextNode("E" + m[1]));
+      node.appendChild(el("sub", null, m[2] === "00" ? "0,0" : m[2]));
+      last = SUB_RE.lastIndex;
+    }
+    if (last < t.length) node.appendChild(document.createTextNode(t.slice(last)));
     return node;
   };
   var elT = Ent.elT = function (tag, cls, text) { return setText(el(tag, cls), text); };
@@ -258,22 +265,49 @@
   }
 
   /* ---------- search state and controls ---------- */
-  Ent.newSearch = function (sort) { return { q: "", cas: "", origin: "", role: "", cls: "", etmin: NaN, etmax: NaN, sort: sort || "added", defSort: sort || "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
+  Ent.newSearch = function (sort) { return { q: "", cas: "", origin: "", role: "", cls: "", etmin: NaN, etmax: NaN, prop: "", category: "", emin: NaN, emax: NaN, sort: sort || "added", defSort: sort || "added", ss: { smiles: "", mode: "sub", thr: 0.5 }, pager: { shown: 0 } }; };
+  /* numbers first in the chosen direction, rows without a number last */
+  function byNumber(get, dir) {
+    return function (a, b) {
+      var x = get(a), y = get(b), fx = isFinite(x), fy = isFinite(y);
+      return fx && fy ? dir * (x - y) : fx ? -1 : fy ? 1 : 0;
+    };
+  }
+  function etOf(d) { return isRedox(d) ? NaN : Number(d.et_kcal); }
+  /* docs may mix triplet-energy rows and redox rows (Ent.isRedox). st.prop: "" (any), "et",
+     "redox" or one quantity ("e_red", "e_ox", "e_star_red", "e_star_ox"); st.emin/emax are
+     potentials against the chosen reference (Ent.redoxRef). */
   Ent.filterRows = function (docs, st) {
     var q = st.q.trim().toLowerCase(), r = structureHits(docs, st.ss), hits = r.hits;
+    var eWindow = (st.emin != null && !isNaN(st.emin)) || (st.emax != null && !isNaN(st.emax)), ref = eWindow ? Ent.redoxRef() : null;
     var rows = docs.filter(function (d) {
+      var rx = isRedox(d);
+      if (st.prop) {
+        if (st.prop === "et" ? rx : st.prop === "redox" ? !rx : !(rx && quantityOf(d) === st.prop)) return false;
+      }
       if (st.origin && d.origin !== st.origin) return false;
       if (st.cas && String(d.cas || "").indexOf(st.cas) !== 0) return false;
       if (st.role && d.role !== st.role && d.role !== "both") return false;
+      if (st.category && !(rx && d.category === st.category)) return false;
       if (st.cls && (d.cls || "") !== st.cls) return false;
-      if (!isNaN(st.etmin) && !(Number(d.et_kcal) >= st.etmin)) return false;
-      if (!isNaN(st.etmax) && !(Number(d.et_kcal) <= st.etmax)) return false;
+      if (!isNaN(st.etmin) && !(etOf(d) >= st.etmin)) return false;
+      if (!isNaN(st.etmax) && !(etOf(d) <= st.etmax)) return false;
+      if (eWindow) {
+        var pv = rx ? potentialOf(d, ref) : NaN;
+        if (!isFinite(pv)) return false;
+        if (st.emin != null && !isNaN(st.emin) && pv < st.emin) return false;
+        if (st.emax != null && !isNaN(st.emax) && pv > st.emax) return false;
+      }
       if (hits && !(d.id in hits)) return false;
-      if (q) { var hay = [d.name, d.commercial_name, d.cas, d.smiles, d.citation, d.cls, d.method, d.doi].join(" ").toLowerCase(); if (hay.indexOf(q) < 0) return false; }
+      if (q) { var hay = [d.name, d.commercial_name, d.cas, d.smiles, d.citation, d.cls, d.method, d.doi, d.activated_group, d.e_type].join(" ").toLowerCase(); if (hay.indexOf(q) < 0) return false; }
       return true;
     });
-    if (st.sort === "et-asc") rows.sort(function (a, b) { return a.et_kcal - b.et_kcal; });
-    else if (st.sort === "et-desc") rows.sort(function (a, b) { return b.et_kcal - a.et_kcal; });
+    if (st.sort === "et-asc") rows.sort(byNumber(etOf, 1));
+    else if (st.sort === "et-desc") rows.sort(byNumber(etOf, -1));
+    else if (st.sort === "e-asc" || st.sort === "e-desc") {
+      var sref = Ent.redoxRef();
+      rows.sort(byNumber(function (d) { return isRedox(d) ? potentialOf(d, sref) : NaN; }, st.sort === "e-asc" ? 1 : -1));
+    }
     else if (st.sort === "received-desc") rows.sort(function (a, b) {
       var ta = Date.parse(a.created_at || "") || 0, tb = Date.parse(b.created_at || "") || 0;
       return tb - ta || (String(b.id) < String(a.id) ? -1 : String(b.id) > String(a.id) ? 1 : 0);
@@ -298,20 +332,34 @@
   Ent.bindSearch = function (st, rerender) {
     var t = null;
     var render = function () { if (st.pager) st.pager.shown = 0; rerender(); };
-    $("q").addEventListener("input", function (e) { st.q = e.target.value; render(); });
-    $("f-origin").addEventListener("change", function (e) { st.origin = e.target.value; render(); });
-    $("f-cas").addEventListener("input", function (e) { st.cas = EntScore.cleanCas(e.target.value); render(); });
-    $("f-sort").addEventListener("change", function (e) { st.sort = e.target.value; render(); });
-    $("f-role").addEventListener("change", function (e) { st.role = e.target.value; render(); });
-    $("f-cls").addEventListener("change", function (e) { st.cls = e.target.value; render(); });
-    $("f-etmin").addEventListener("input", function (e) { st.etmin = parseFloat(e.target.value); render(); });
-    $("f-etmax").addEventListener("input", function (e) { st.etmax = parseFloat(e.target.value); render(); });
+    /* each page has its own set of filters (TrEnDB: role, E_T range; PhotoreDBox: property, potential window, reference) */
+    function on(id, ev, fn) { var n = $(id); if (n) n.addEventListener(ev, fn); }
+    on("f-prop", "change", function (e) { st.prop = e.target.value; render(); });
+    on("f-category", "change", function (e) { st.category = e.target.value; render(); });
+    on("f-emin", "input", function (e) { st.emin = parseFloat(String(e.target.value).replace("−", "-")); render(); });
+    on("f-emax", "input", function (e) { st.emax = parseFloat(String(e.target.value).replace("−", "-")); render(); });
+    var erefSel = $("f-eref");
+    if (erefSel) {
+      erefSel.replaceChildren();
+      EntScore.redox.DISPLAY_REFS.forEach(function (d) { erefSel.appendChild(new Option(d.id, d.id)); });
+      erefSel.value = Ent.redoxRef().id;
+      erefSel.addEventListener("change", function (e) { Ent.setRedoxRef(e.target.value); render(); });
+    }
+    on("q", "input", function (e) { st.q = e.target.value; render(); });
+    on("f-origin", "change", function (e) { st.origin = e.target.value; render(); });
+    on("f-cas", "input", function (e) { st.cas = EntScore.cleanCas(e.target.value); render(); });
+    on("f-sort", "change", function (e) { st.sort = e.target.value; render(); });
+    on("f-role", "change", function (e) { st.role = e.target.value; render(); });
+    on("f-cls", "change", function (e) { st.cls = e.target.value; render(); });
+    on("f-etmin", "input", function (e) { st.etmin = parseFloat(e.target.value); render(); });
+    on("f-etmax", "input", function (e) { st.etmax = parseFloat(e.target.value); render(); });
     $("f-reset").addEventListener("click", function () {
       var fresh = Ent.newSearch(st.defSort);
-      ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "sort"].forEach(function (k) { st[k] = fresh[k]; });
+      ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "prop", "category", "emin", "emax", "sort"].forEach(function (k) { st[k] = fresh[k]; });
       st.ss.smiles = ""; st.ss.mode = fresh.ss.mode; st.ss.thr = fresh.ss.thr;
-      ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "ss-smiles"].forEach(function (id) { $(id).value = ""; });
-      $("f-sort").value = st.sort; $("ss-mode").value = st.ss.mode; $("ss-thr").value = String(st.ss.thr); $("ss-thr").hidden = true;
+      ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "f-prop", "f-category", "f-emin", "f-emax", "ss-smiles"].forEach(function (id) { var n = $(id); if (n) n.value = ""; });
+      if ($("f-sort")) $("f-sort").value = st.sort;
+      $("ss-mode").value = st.ss.mode; $("ss-thr").value = String(st.ss.thr); $("ss-thr").hidden = true;
       render();
     });
     $("ss-smiles").addEventListener("input", function (e) {
@@ -319,7 +367,7 @@
     });
     $("ss-mode").addEventListener("change", function (e) {
       st.ss.mode = e.target.value;
-      if (st.ss.mode === "sim") { st.sort = "sim"; $("f-sort").value = "sim"; }
+      if (st.ss.mode === "sim") { st.sort = "sim"; if ($("f-sort")) $("f-sort").value = "sim"; }
       $("ss-thr").hidden = st.ss.mode !== "sim"; render();
     });
     $("ss-thr").addEventListener("change", function (e) {
@@ -532,29 +580,108 @@
     if (d.quote) row(dl, "Verbatim", callout(d.quote, true));
     if (d.evidence) row(dl, "What it says", callout(d.evidence, false));
   }
-  /* one entry, or several values of the same molecule (green filled: experimental; purple hollow: computed) */
-  function scale(list) {
+  /* one entry, or several values of the same molecule (green filled: experimental; purple hollow: computed).
+     spec says what is drawn: the triplet-energy scale (default) or a potential scale (redoxScaleSpec). */
+  var ET_SCALE = {
+    min: S_MIN, max: S_MAX, refs: REFS, ends: [String(S_MIN), String(S_MAX)],
+    get: function (d) { return Number(d.et_kcal); }, unc: function (d) { return Number(d.et_unc) || 0; },
+    label: function (list) { return "Triplet energy " + list.map(function (d) { return d.et_kcal; }).join(", ") + " kcal/mol on a 40 to 80 scale"; }
+  };
+  function scale(list, spec) {
+    spec = spec || ET_SCALE;
     list = Array.isArray(list) ? list : [list];
-    var s = el("div", "scale"); s.appendChild(el("div", "track"));
-    REFS.forEach(function (r) {
-      var t = el("div", "ref"); t.style.left = pct(r.v) + "%"; s.appendChild(t);
-      var l = el("div", "lab", r.l); l.style.left = pct(r.v) + "%"; s.appendChild(l);
+    function P(v) { return Math.max(0, Math.min(100, (v - spec.min) / (spec.max - spec.min) * 100)); }
+    var s = el("div", "scale" + (spec.cls ? " " + spec.cls : "")); s.appendChild(el("div", "track"));
+    spec.refs.forEach(function (r) {
+      if (!(r.v >= spec.min && r.v <= spec.max)) return;   /* a landmark beyond the scale is not drawn */
+      var t = el("div", "ref"); t.style.left = P(r.v) + "%"; s.appendChild(t);
+      var l = el("div", "lab", r.l); l.style.left = P(r.v) + "%"; s.appendChild(l);
     });
     list.forEach(function (d) {
-      if (d.et_unc) {
-        var b = el("div", "band " + (d.origin === "calc" ? "calc" : "exp")), a = pct(d.et_kcal - d.et_unc), z = pct(Number(d.et_kcal) + Number(d.et_unc));
+      var v = spec.get(d), u = spec.unc(d);
+      if (u && isFinite(v)) {
+        var b = el("div", "band " + (d.origin === "calc" ? "calc" : "exp")), a = P(v - u), z = P(v + u);
         b.style.left = a + "%"; b.style.width = (z - a) + "%"; s.appendChild(b);
       }
     });
     list.forEach(function (d) {
-      var m = el("div", "mark " + (d.origin === "calc" ? "calc" : "exp")); m.style.left = pct(d.et_kcal) + "%"; s.appendChild(m);
+      var v = spec.get(d); if (!isFinite(v)) return;
+      var m = el("div", "mark " + (d.origin === "calc" ? "calc" : "exp")); m.style.left = P(v) + "%"; s.appendChild(m);
     });
-    var e0 = el("div", "end", String(S_MIN)); e0.style.left = "0"; s.appendChild(e0);
-    var e1 = el("div", "end", String(S_MAX)); e1.style.right = "0"; s.appendChild(e1);
+    var e0 = el("div", "end", spec.ends[0]); e0.style.left = "0"; s.appendChild(e0);
+    var e1 = el("div", "end", spec.ends[1]); e1.style.right = "0"; s.appendChild(e1);
     s.setAttribute("role", "img");
-    s.setAttribute("aria-label", "Triplet energy " + list.map(function (d) { return d.et_kcal; }).join(", ") + " kcal/mol on a 40 to 80 scale");
+    s.setAttribute("aria-label", spec.label(list));
     return s;
   }
+
+  /* ---------- redox potentials (rows of public_redox) ----------
+     A row carries e_v against e_ref as reported and, when the reference converts, e_sce.
+     The site shows every potential against one reference the reader chooses (the "unit" of
+     potentials), kept per browser like the theme. */
+  var isRedox = Ent.isRedox = function (d) { return !!d && d.e_v != null && d.e_ref != null; };
+  var REDOX_REF_KEY = "entdb-redox-ref";
+  Ent.redoxRef = function () {
+    var list = EntScore.redox.DISPLAY_REFS, id = "SCE";
+    try { id = localStorage.getItem(REDOX_REF_KEY) || "SCE"; } catch (e) {}
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return list[0];
+  };
+  Ent.setRedoxRef = function (id) { try { localStorage.setItem(REDOX_REF_KEY, id); } catch (e) {} };
+  /* -> potential (V) of a row against ref (default: the chosen one); NaN when it cannot be converted */
+  var potentialOf = Ent.potentialOf = function (d, ref) {
+    ref = ref || Ent.redoxRef();
+    var sce = d && d.e_sce != null ? Number(d.e_sce) : NaN;
+    return isFinite(sce) ? EntScore.redox.fromSce(sce, ref.ref, ref.solvent) : NaN;
+  };
+  var REDOX_QTY = Ent.REDOX_QTY = [
+    { id: "e_red", label: "E_red", name: "Reduction potential", couple: "M/M•−" },
+    { id: "e_ox", label: "E_ox", name: "Oxidation potential", couple: "M•+/M" },
+    { id: "e_star_red", label: "E*_red", name: "Excited-state reduction potential", couple: "M*/M•−" },
+    { id: "e_star_ox", label: "E*_ox", name: "Excited-state oxidation potential", couple: "M•+/M*" }
+  ];
+  var quantityOf = Ent.redoxQuantity = function (d) { return (d.state && d.state !== "S0" ? "e_star_" : "e_") + (d.kind === "ox" ? "ox" : "red"); };
+  function qtyInfo(id) { for (var i = 0; i < REDOX_QTY.length; i++) if (REDOX_QTY[i].id === id) return REDOX_QTY[i]; return REDOX_QTY[0]; }
+  /* Representative value of one quantity, V vs SCE: the mean of the measured values, else of the
+     computed ones (as trendb.redox.rep_value). -> {mean, sd, n, lo, hi, origin} or null */
+  var repE = Ent.repE = function (rows, qty) {
+    var sel = rows.filter(function (d) { return isRedox(d) && quantityOf(d) === qty && d.e_sce != null && isFinite(Number(d.e_sce)); });
+    var origins = ["exp", "calc"];
+    for (var i = 0; i < origins.length; i++) {
+      var v = sel.filter(function (d) { return (d.origin || "exp") === origins[i]; }).map(function (d) { return Number(d.e_sce); });
+      if (!v.length) continue;
+      var m = v.reduce(function (a, b) { return a + b; }, 0) / v.length;
+      var sd = v.length > 1 ? Math.sqrt(v.reduce(function (a, b) { return a + (b - m) * (b - m); }, 0) / (v.length - 1)) : null;
+      return { mean: Math.round(m * 1000) / 1000, sd: sd, n: v.length, lo: Math.min.apply(null, v), hi: Math.max.apply(null, v), origin: origins[i] };
+    }
+    return null;
+  };
+  /* signed volts with a typographic minus: "+1.21", "−1.37" */
+  var fmtV = Ent.fmtV = function (v, d) { return isFinite(v) ? (v > 0 ? "+" : v < 0 ? "−" : "") + fmt(Math.abs(v), d == null ? 2 : d) : "—"; };
+  /* Landmarks of the potential scale, V vs SCE (like Ru, Ir, TX, BP on the triplet-energy scale):
+     Li+/Li −3.04 V vs SHE − 0.241 V; Ru(bpy)3 2+/+ and 3+/2+ in MeCN from Prier, Rankic, MacMillan,
+     Chem. Rev. 2013 (doi:10.1021/cr300503r), Table 1. Drawn against the chosen reference. */
+  var REDOX_LANDMARKS = Ent.REDOX_LANDMARKS = [
+    { l: "Li", name: "Li+/Li", v: -3.28 },
+    { l: "Ru²⁺/⁺", name: "Ru(bpy)3 2+/+", v: -1.33 },
+    { l: "SCE", name: "SCE", v: 0 },
+    { l: "Ru³⁺/²⁺", name: "Ru(bpy)3 3+/2+", v: 1.29 }
+  ];
+  var REDOX_MIN = Ent.REDOX_MIN = -3.5, REDOX_MAX = Ent.REDOX_MAX = 3;
+  /* the landmarks against a display reference (SCE values shifted by the reference's offset) */
+  Ent.redoxLandmarks = function (ref) {
+    ref = ref || Ent.redoxRef();
+    return REDOX_LANDMARKS.map(function (r) { return { l: r.l, name: r.name, sce: r.v, v: EntScore.redox.fromSce(r.v, ref.ref, ref.solvent) }; });
+  };
+  function redoxScaleSpec(ref) {
+    return {
+      min: REDOX_MIN, max: REDOX_MAX, refs: Ent.redoxLandmarks(ref), ends: ["−3.5 V", "+3 V"], cls: "scale-v",
+      get: function (d) { return potentialOf(d, ref); }, unc: function (d) { return Number(d.e_unc) || 0; },
+      label: function (list) { return "Potentials " + list.map(function (d) { return fmtV(potentialOf(d, ref)); }).join(", ") + " V vs " + ref.id + " on a −3.5 to +3 V scale"; }
+    };
+  }
+  /* the chosen reference, with its rule: "V vs Fc+/Fc (MeCN)" */
+  function vsLabel(ref) { return "V vs " + ref.id; }
   function scoreDetails(d) {
     var g = EntScore.gradeOf(d.score);
     if (!Array.isArray(d.score_items) || !d.score_items.length) {
@@ -670,12 +797,79 @@
     return null;
   }
 
+  /* ---------- redox rows on the review card (PhotoreDBox) ---------- */
+  function isApprox(d) { return /approximate/i.test(d.verify_note || ""); }
+  function toVerify(d) { return d.verify_level === "abstract" || d.verify_level === "secondaria" || isApprox(d); }
+  /* "E*_red −1.73 V vs SCE" (against the chosen reference when it converts, else as reported) */
+  var redoxValueText = Ent.redoxValueText = function (d, ref) {
+    ref = ref || Ent.redoxRef();
+    var q = qtyInfo(quantityOf(d)), pv = potentialOf(d, ref);
+    return q.label + " " + (isFinite(pv) ? fmtV(pv) + " " + vsLabel(ref) : fmtV(Number(d.e_v)) + " V vs " + d.e_ref);
+  };
+  /* the value as on the public card, plus the value as reported and against SCE */
+  function redoxCardValue(d) {
+    var ref = Ent.redoxRef(), q = qtyInfo(quantityOf(d)), pv = potentialOf(d, ref), calc = d.origin === "calc";
+    var box = el("div", "et " + (calc ? "calc" : "exp"));
+    box.appendChild(elT("span", "q", q.label));
+    var unc = d.e_unc != null && d.e_unc !== "" ? " ± " + fmt(Number(d.e_unc), 2) : "";
+    var asRep = "As reported: " + fmtV(Number(d.e_v)) + " V vs " + d.e_ref;
+    var sce = d.e_sce != null && isFinite(Number(d.e_sce)) ? Number(d.e_sce) : NaN;
+    if (isFinite(pv)) {
+      box.appendChild(el("span", "v", fmtV(pv) + unc));
+      box.appendChild(el("span", "u", vsLabel(ref)));
+      var alts = [];
+      if (d.e_ref !== ref.ref || (d.e_ref === "Fc+/Fc" && ref.solvent && (d.solvent || "") !== ref.solvent)) alts.push(asRep);
+      if (ref.id !== "SCE" && isFinite(sce)) alts.push(fmtV(sce) + " V vs SCE");
+      if (alts.length) box.appendChild(el("span", "alt", alts.join(" · ")));
+      if (pv < REDOX_MIN || pv > REDOX_MAX) box.appendChild(el("span", "chip warn", "Off scale"));
+    } else {
+      box.appendChild(el("span", "v", fmtV(Number(d.e_v)) + unc));
+      box.appendChild(el("span", "u", "V vs " + d.e_ref));
+      box.appendChild(el("span", "alt", isFinite(sce) ? fmtV(sce) + " V vs SCE" : "Not converted to SCE"));
+    }
+    return box;
+  }
+  /* What else changes with a redox patch: the value against SCE when e_v, e_ref or the solvent
+     change, and the E* fields of a ground-state row. -> a copy of patch with those added */
+  Ent.redoxDerivedPatch = function (patch, d) {
+    var out = {}; Object.keys(patch || {}).forEach(function (k) { out[k] = patch[k]; });
+    function cur(k) { return k in out ? out[k] : d[k]; }
+    if ("e_v" in out || "e_ref" in out || "solvent" in out) {
+      var v = cur("e_v"), sce = EntScore.redox.toSce(v == null || v === "" ? NaN : Number(v), cur("e_ref"), cur("solvent"));
+      sce = isFinite(sce) ? sce : null;
+      var old = d.e_sce == null || d.e_sce === "" ? null : Number(d.e_sce);
+      if (sce !== old) out.e_sce = sce; else delete out.e_sce;
+    }
+    if ((cur("state") || "S0") === "S0") {
+      ["excited_from", "e00_ev"].forEach(function (k) { if (d[k] != null) out[k] = null; else delete out[k]; });
+    }
+    return out;
+  };
+  function redoxCardRows(dl, d) {
+    row(dl, "Quantity", qtyInfo(quantityOf(d)).name + (d.state && d.state !== "S0" ? " (" + d.state + ")" : ""));
+    row(dl, "Couple", d.couple);
+    row(dl, "Reported value", d.e_reported);
+    row(dl, "Value type", d.e_type);
+    if (d.state && d.state !== "S0") {
+      row(dl, "E* derivation", d.excited_from === "estimated" ? "Estimated from E_00" : d.excited_from === "direct" ? "Measured directly" : "Not stated");
+    }
+    if (d.e00_ev != null) row(dl, "E_00 used", fmt(Number(d.e00_ev), 2) + " eV" + (d.e00_note ? " · " + d.e00_note : ""));
+    row(dl, "Method", d.method);
+    row(dl, "Conditions", d.conditions);
+    row(dl, "Solvent", d.solvent);
+    row(dl, "Supporting electrolyte", d.electrolyte);
+    if (d.tau_ns != null) row(dl, "Excited-state lifetime", fmt(Number(d.tau_ns), Number(d.tau_ns) < 10 ? 1 : 0) + " ns");
+    if (d.uv_lmax != null) row(dl, "UV-vis λmax", d.uv_lmax + " nm");
+    row(dl, "Activated group", d.activated_group);
+    if (d.import_key) row(dl, "Import key", d.import_key);
+  }
+
   /* o.scores, o.simMode, o.dup = Ent.duplicates result, o.clusterTag, o.onSuggest(d),
      o.admin = {email, busy, drafts, activeId, onFocusCard, onPatch(id, patch) -> Promise<bool>, approve(d, note), reject(d, note), revoke(d, note), selected, onSelect, onDelete} */
   Ent.card = function (d, o) {
     o = o || {}; var adm = o.admin || null, dup = o.dup || null;
-    var ap = adm ? Ent.approvalState(d, adm.email) : null;
-    var cls = "card" + (dup && dup.flag ? " dup" : "") + (adm && adm.activeId === d.id ? " kb-focus" : "");
+    var ap = adm ? Ent.approvalState(d, adm.email) : null, rx = isRedox(d);
+    var cls = "card" + (rx ? " val-redox" : "") + (dup && dup.flag ? " dup" : "") + (adm && adm.activeId === d.id ? " kb-focus" : "");
     var c = el("article", cls), head = el("div", "head");
     c.setAttribute("data-id", d.id);
     if (adm && adm.onFocusCard) {
@@ -707,14 +901,25 @@
     renderMolTitle(head, d);
 
     var chips = el("div", "chips");
-    chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
+    if (rx) {
+      chips.appendChild(elT("span", "chip", qtyInfo(quantityOf(d)).label));
+      if (d.category) chips.appendChild(el("span", "chip", categoryLabel(d.category)));
+    } else chips.appendChild(el("span", "chip", d.role === "donor" ? "Donor" : d.role === "both" ? "Donor and acceptor" : "Acceptor"));
     chips.appendChild(el("span", "chip " + (d.origin === "calc" ? "calc" : "exp"), d.origin === "calc" ? "Computed" : "Experimental"));
+    if (rx && d.state && d.state !== "S0") chips.appendChild(el("span", "chip", "Excited state (" + d.state + ")"));
+    if (rx && d.excited_from === "estimated") chips.appendChild(elT("span", "chip plain", "Estimated from E_00"));
+    if (rx && !isFinite(potentialOf(d, Ent.redoxRef()))) {
+      var ncChip = el("span", "chip warn", "Not converted");
+      ncChip.title = "This reference cannot be converted to " + Ent.redoxRef().id + "; the value is shown as reported.";
+      chips.appendChild(ncChip);
+    }
     var srcChip = sourceChip(d); if (srcChip) chips.appendChild(srcChip);
     if (d.cls) chips.appendChild(el("span", "chip plain", d.cls));
     if (o.simMode && o.scores && o.scores[d.id] != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(o.scores[d.id], 2)));
     if (d.score != null) chips.appendChild(scoreDetails(d));
     if (d.verify_level === "abstract") chips.appendChild(el("span", "chip warn", "Abstract only"));
     if (d.verify_level === "secondaria") chips.appendChild(el("span", "chip warn", "Source to verify"));
+    if (rx && isApprox(d)) chips.appendChild(el("span", "chip warn", "Approximate value"));
     if (adm && !d.smiles_checked) chips.appendChild(el("span", "chip warn", "Structure unchecked"));
     if (adm && ap && d.status === "pending" && ap.count >= 1) {
       chips.appendChild(el("span", "chip " + (ap.byMe ? "verify1-me" : "verify1-other"), ap.byMe ? "1/2 verified · by you" : "1/2 verified · needs 2nd check"));
@@ -732,20 +937,26 @@
     }
     if (dup && (dup.db.length || dup.queue.length || dup.stereo.length)) c.appendChild(dupNote(dup));
 
-    var etVal = Number(d.et_kcal);
-    var et = el("div", "et " + (d.origin === "calc" ? "calc" : "exp"));
-    et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
-    et.appendChild(el("span", "u", "kcal/mol"));
-    et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
-    if (isFinite(etVal) && (etVal < S_MIN || etVal > S_MAX)) {
-      et.appendChild(el("span", "chip warn", etVal < S_MIN ? "Off scale (<40)" : "Off scale (>80)"));
+    if (rx) {
+      var rref = Ent.redoxRef();
+      c.appendChild(redoxCardValue(d));
+      if (isFinite(potentialOf(d, rref))) c.appendChild(scale(d, redoxScaleSpec(rref)));
+    } else {
+      var etVal = Number(d.et_kcal);
+      var et = el("div", "et " + (d.origin === "calc" ? "calc" : "exp"));
+      et.appendChild(el("span", "v", fmt(etVal, 1) + (d.et_unc ? " ± " + d.et_unc : "")));
+      et.appendChild(el("span", "u", "kcal/mol"));
+      et.appendChild(el("span", "alt", fmt(d.et_kcal * 4.184, 0) + " kJ/mol · " + fmt(d.et_kcal / 23.0605, 2) + " eV"));
+      if (isFinite(etVal) && (etVal < S_MIN || etVal > S_MAX)) {
+        et.appendChild(el("span", "chip warn", etVal < S_MIN ? "Off scale (<40)" : "Off scale (>80)"));
+      }
+      c.appendChild(et); c.appendChild(scale(d));
     }
-    c.appendChild(et); c.appendChild(scale(d));
 
     var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(d.smiles);
     if (info) {
       paper.innerHTML = info.svg;
-      bindPaperPreview(paper, function () {
+      if (!rx) bindPaperPreview(paper, function () {
         return {
           name: d.name, commercial_name: d.commercial_name, smiles: d.smiles, role: d.role, origin: d.origin, cls: d.cls,
           cas: d.cas, et_kcal: d.et_kcal, et_unc: d.et_unc, formula: info.formula,
@@ -791,10 +1002,13 @@
     st.appendChild(si); c.appendChild(st);
 
     var dl = el("dl");
-    row(dl, "Reported value", d.et_reported);
-    row(dl, "Value type", d.et_type);
-    row(dl, "Method", d.method);
-    row(dl, "Conditions", d.conditions);
+    if (rx) redoxCardRows(dl, d);
+    else {
+      row(dl, "Reported value", d.et_reported);
+      row(dl, "Value type", d.et_type);
+      row(dl, "Method", d.method);
+      row(dl, "Conditions", d.conditions);
+    }
     row(dl, "Source", d.citation);
     paperExcerptRows(dl, d);
     if (d.doi) {
@@ -803,11 +1017,12 @@
       doiRow.appendChild(copyBtn(EntScore.cleanDoi(d.doi) || d.doi, "Copy DOI"));
       row(dl, "DOI", doiRow);
     }
+    if (rx && d.verify_level) row(dl, "Verification level", d.verify_level === "primaria" ? "Checked against the source" : d.verify_level === "secondaria" ? "From a review table" : d.verify_level);
     if (d.verify_note) {
-      var vn = el("span", (d.verify_level === "abstract" || d.verify_level === "secondaria") ? "verify-callout" : null, d.verify_note);
+      var vn = el("span", (rx ? toVerify(d) : d.verify_level === "abstract" || d.verify_level === "secondaria") ? "verify-callout" : null, d.verify_note);
       row(dl, "Verification", vn);
     }
-    var uvTxt = EntScore.formatUv(d), dirTxt = EntScore.formatDirectExc(d.direct_exc);
+    var uvTxt = rx ? "" : EntScore.formatUv(d), dirTxt = rx ? "" : EntScore.formatDirectExc(d.direct_exc);
     if (uvTxt) row(dl, "UV-vis", uvTxt);
     if (dirTxt) row(dl, "Direct excitation", dirTxt);
     c.appendChild(dl);
@@ -1002,10 +1217,14 @@
   /* what every view of one molecule shows: the best value first, names, role, class, CAS */
   function groupSummary(items) {
     items = items.slice().sort(byQuality);
-    var p = items[0], roles = {};
-    items.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
+    var et = items.filter(function (d) { return !isRedox(d); }), rx = items.filter(isRedox);
+    var p = et[0] || items[0], roles = {};
+    et.forEach(function (d) { roles[d.role || "acceptor"] = 1; });
+    var cat = rx.map(function (d) { return d.category; }).filter(Boolean);
     return {
-      items: items, p: p, many: items.length > 1, key: Ent.slideItemKey(items),
+      et: et, rx: rx, hasRole: et.length > 0,
+      category: cat.indexOf("photocatalyst") >= 0 ? "photocatalyst" : cat[0] || "",
+      items: items, p: p, many: et.length > 1, key: Ent.slideItemKey(items),
       comm: items.map(function (d) { return trimStr(d.commercial_name); }).filter(Boolean)[0] || "",
       iupac: trimStr(p.name) || items.map(function (d) { return trimStr(d.name); }).filter(Boolean)[0] || "",
       role: roles.both || (roles.donor && roles.acceptor) ? "both" : roles.donor ? "donor" : "acceptor",
@@ -1059,15 +1278,16 @@
     var c = el("article", "card mol mol-sum" + (picked ? " mol-picked" : "")), head = el("div", "head");
 
     var chips = el("div", "chips");
-    chips.appendChild(el("span", "chip", roleLabel(g.role)));
+    if (g.hasRole) chips.appendChild(el("span", "chip", roleLabel(g.role)));
+    if (g.category) chips.appendChild(el("span", "chip", categoryLabel(g.category)));
     var hasExp = items.some(function (d) { return d.origin !== "calc"; });
     var hasCalc = items.some(function (d) { return d.origin === "calc"; });
     chips.appendChild(el("span", "chip " + (hasExp ? "exp" : "calc"), hasExp && hasCalc ? "Experimental and computed" : hasExp ? "Experimental" : "Computed"));
     if (g.cls) chips.appendChild(el("span", "chip plain", g.cls));
-    if (g.many) chips.appendChild(el("span", "chip plain", items.length + " values"));
+    if (items.length > 1) chips.appendChild(el("span", "chip plain", items.length + " values"));
     var sim = bestSimilarity(items, o);
     if (sim != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(sim, 2)));
-    if (o.onSlideToggle && Ent.slideGraphic) chips.appendChild(slidePickBtn(items, o, picked));
+    if (o.onSlideToggle && Ent.slideGraphic && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
     /* the whole card already links to the page (the title's overlay); this only says so, top right */
     var top = el("div", "sum-top"), more = el("span", "sum-more", "See more →");
     more.setAttribute("aria-hidden", "true");
@@ -1089,9 +1309,12 @@
     body.appendChild(paper);
 
     var panel = el("div", "sum-et");
+    var etRows = g.et;
+    if (etRows.length) {
+    var etExp = etRows.some(function (d) { return d.origin !== "calc"; }), etCalc = etRows.some(function (d) { return d.origin === "calc"; });
     panel.appendChild(elT("p", "sum-lab", "Triplet energy (E_T)"));
-    var vals = items.map(function (d) { return Number(d.et_kcal); }).filter(isFinite);
-    var et = el("div", "et" + (hasExp && !hasCalc ? " exp" : !hasExp && hasCalc ? " calc" : ""));
+    var vals = etRows.map(function (d) { return Number(d.et_kcal); }).filter(isFinite);
+    var et = el("div", "et" + (etExp && !etCalc ? " exp" : !etExp && etCalc ? " calc" : ""));
     if (vals.length) {
       var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
       var one = vals.length === 1;
@@ -1106,7 +1329,9 @@
       et.appendChild(el("span", "v", "—"));
       panel.appendChild(et);
     }
-    panel.appendChild(scale(items));
+    panel.appendChild(scale(etRows));
+    }
+    if (g.rx.length) panel.appendChild(redoxSummary(g.rx));
     var meta = el("div", "sum-meta");
     if (info && info.formula) meta.appendChild(el("span", "formula", info.formula));
     if (g.cas) meta.appendChild(el("span", "formula", "CAS " + g.cas));
@@ -1142,25 +1367,27 @@
     var c = el("article", "card mol" + (picked ? " mol-picked" : "")), head = el("div", "head");
     renderMolTitle(head, { name: iupac, commercial_name: comm });
     var chips = el("div", "chips");
-    chips.appendChild(el("span", "chip", roleLabel(role)));
+    if (g.hasRole) chips.appendChild(el("span", "chip", roleLabel(role)));
+    if (g.category) chips.appendChild(el("span", "chip", categoryLabel(g.category)));
     var cls = g.cls;
     if (cls) chips.appendChild(el("span", "chip plain", cls));
-    if (many) chips.appendChild(el("span", "chip plain", items.length + " values"));
+    if (items.length > 1) chips.appendChild(el("span", "chip plain", items.length + " values"));
     var best = bestSimilarity(items, o);
     if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
-    if (o.onSlideToggle && Ent.slideGraphic) chips.appendChild(slidePickBtn(items, o, picked));
+    if (o.onSlideToggle && Ent.slideGraphic && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
     head.appendChild(chips); c.appendChild(head);
 
+    var etRows = g.et;
     if (many) {
-      var vals = items.map(function (d) { return Number(d.et_kcal); }), lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-      var hasExp = items.some(function (d) { return d.origin !== "calc"; });
-      var hasCalc = items.some(function (d) { return d.origin === "calc"; });
+      var vals = etRows.map(function (d) { return Number(d.et_kcal); }), lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+      var hasExp = etRows.some(function (d) { return d.origin !== "calc"; });
+      var hasCalc = etRows.some(function (d) { return d.origin === "calc"; });
       var rangeCls = (hasExp && !hasCalc) ? " exp" : (!hasExp && hasCalc) ? " calc" : "";
       var et = el("div", "et" + rangeCls);
       et.appendChild(el("span", "v", lo === hi ? fmt(lo, 1) : fmt(lo, 1) + "–" + fmt(hi, 1)));
       et.appendChild(el("span", "u", "kcal/mol"));
-      et.appendChild(elT("span", "alt", items.length + " E_T values, listed below (filled green: experimental; hollow purple: computed)"));
-      c.appendChild(et); c.appendChild(scale(items));
+      et.appendChild(elT("span", "alt", etRows.length + " E_T values, listed below (filled green: experimental; hollow purple: computed)"));
+      c.appendChild(et); c.appendChild(scale(etRows));
     }
 
     var st = el("div", "struct"), paper = el("div", "paper"), info = molInfo(p.smiles);
@@ -1170,7 +1397,7 @@
       bindPaperPreview(paper, function () {
         return {
           name: iupac, commercial_name: comm, smiles: p.smiles, role: role, cls: cls, cas: cas,
-          values: items, formula: info.formula, method: p.method,
+          values: etRows.length ? etRows : items, formula: info.formula, method: p.method,
           conditions: p.conditions, citation: p.citation, doi: p.doi
         };
       });
@@ -1188,7 +1415,7 @@
     if (p.structure_note) si.appendChild(el("span", "hint", p.structure_note));
     st.appendChild(si); c.appendChild(st);
 
-    items.forEach(function (d) { c.appendChild(valueBlock(d, o, many)); });
+    etRows.forEach(function (d) { c.appendChild(valueBlock(d, o, many)); });
 
     var firstUv = items.map(EntScore.formatUv).filter(Boolean)[0];
     var firstDir = items.map(function (d) { return EntScore.formatDirectExc(d.direct_exc); }).filter(Boolean)[0];
@@ -1221,8 +1448,114 @@
       var rxs = Ent.reactionsSection(rxAll, comm || iupac || "molecule");
       if (rxs) c.appendChild(rxs);
     }
+    if (g.rx.length) c.appendChild(redoxSection(g.rx, o));
     return c;
   };
+
+  function categoryLabel(c) { return c === "photocatalyst" ? "Photocatalyst" : c === "substrate" ? "Substrate" : c; }
+  function byQuantity(a, b) {
+    var ia = REDOX_QTY.indexOf(qtyInfo(quantityOf(a))), ib = REDOX_QTY.indexOf(qtyInfo(quantityOf(b)));
+    return ia - ib || byQuality(a, b);
+  }
+  /* list card: the representative potential of each quantity against the chosen reference */
+  function redoxSummary(rx) {
+    var ref = Ent.redoxRef(), box = el("div", "sum-redox");
+    box.appendChild(el("p", "sum-lab", "Redox potentials (" + vsLabel(ref) + ")"));
+    var grid = el("div", "redox-grid");
+    REDOX_QTY.forEach(function (q) {
+      var r = repE(rx, q.id); if (!r) return;
+      var cell = el("div", "redox-cell " + (r.origin === "calc" ? "calc" : "exp"));
+      cell.appendChild(elT("span", "q", q.label));
+      cell.appendChild(el("span", "v", fmtV(EntScore.redox.fromSce(r.mean, ref.ref, ref.solvent))));
+      cell.title = q.name + (r.n > 1 ? ": mean of " + r.n + " values" : "") + (r.origin === "calc" ? " (computed)" : "");
+      grid.appendChild(cell);
+    });
+    if (!grid.childNodes.length) grid.appendChild(el("span", "hint", "Reported against a reference that cannot be converted to " + ref.id));
+    box.appendChild(grid);
+    var shown = rx.filter(function (d) { return isFinite(potentialOf(d, ref)); });
+    if (shown.length) box.appendChild(scale(shown, redoxScaleSpec(ref)));
+    return box;
+  }
+  /* molecule page: summary of each quantity, the scale, then every value */
+  function redoxSection(rx, o) {
+    var ref = Ent.redoxRef(), sec = el("section", "redox-sec");
+    sec.appendChild(el("h3", "redox-h", "Redox potentials"));
+    sec.appendChild(el("p", "hint", "In " + vsLabel(ref) + ". Change the reference with “Potentials vs” in the database filters. E* is the excited state."));
+    var dl = el("dl", "redox-sum");
+    REDOX_QTY.forEach(function (q) {
+      var r = repE(rx, q.id); if (!r) return;
+      var to = function (v) { return EntScore.redox.fromSce(v, ref.ref, ref.solvent); };
+      var txt = fmtV(to(r.mean)) + " V" + (r.n > 1
+        ? " (mean of " + r.n + (r.origin === "calc" ? " computed" : " measured") + " values" + (r.sd != null ? ", SD " + fmt(r.sd, 2) : "") + "; " + fmtV(to(r.lo)) + " to " + fmtV(to(r.hi)) + ")"
+        : r.origin === "calc" ? " (computed)" : "");
+      row(dl, q.label + " (" + q.couple + ")", txt);
+    });
+    if (dl.childNodes.length) sec.appendChild(dl);
+    var shown = rx.filter(function (d) { return isFinite(potentialOf(d, ref)); });
+    if (shown.length) sec.appendChild(scale(shown, redoxScaleSpec(ref)));
+    rx.slice().sort(byQuantity).forEach(function (d) { sec.appendChild(redoxValueBlock(d, o, ref, rx.length > 1)); });
+    return sec;
+  }
+  function redoxValueBlock(d, o, ref, many) {
+    var v = el("section", "val val-redox"), top = el("div", "valtop");
+    var q = qtyInfo(quantityOf(d)), pv = potentialOf(d, ref), calc = d.origin === "calc";
+    var box = el("div", "et " + (calc ? "calc" : "exp"));
+    box.appendChild(elT("span", "q", q.label));
+    if (isFinite(pv)) {
+      box.appendChild(el("span", "v", fmtV(pv) + (d.e_unc ? " ± " + fmt(Number(d.e_unc), 2) : "")));
+      box.appendChild(el("span", "u", vsLabel(ref)));
+      if (d.e_ref !== ref.ref || (d.e_ref === "Fc+/Fc" && ref.solvent && (d.solvent || "") !== ref.solvent)) {
+        box.appendChild(el("span", "alt", "Reported: " + fmtV(Number(d.e_v)) + " V vs " + d.e_ref));
+      }
+    } else {
+      box.appendChild(el("span", "v", fmtV(Number(d.e_v))));
+      box.appendChild(el("span", "u", "V vs " + d.e_ref));
+    }
+    top.appendChild(box);
+    var chips = el("div", "chips");
+    chips.appendChild(el("span", "chip " + (calc ? "calc" : "exp"), calc ? "Computed" : "Experimental"));
+    if (d.state && d.state !== "S0") chips.appendChild(el("span", "chip", "Excited state (" + d.state + ")"));
+    if (d.excited_from === "estimated") chips.appendChild(elT("span", "chip plain", "Estimated from E_00"));
+    if (!isFinite(pv)) {
+      var nc = el("span", "chip warn", "Not converted");
+      nc.title = "This reference cannot be converted to " + ref.id + "; the value is shown as reported.";
+      chips.appendChild(nc);
+    }
+    var srcChip = sourceChip(d); if (srcChip) chips.appendChild(srcChip);
+    if (d.score != null) chips.appendChild(scoreDetails(d));
+    top.appendChild(chips); v.appendChild(top);
+    var dl = el("dl");
+    row(dl, "Couple", d.couple);
+    row(dl, "Reported value", d.e_reported);
+    row(dl, "Value type", d.e_type);
+    if (d.e00_ev != null) row(dl, "E_00 used", fmt(Number(d.e00_ev), 2) + " eV" + (d.e00_note ? " · " + d.e00_note : ""));
+    row(dl, "Method", d.method);
+    row(dl, "Conditions", d.conditions);
+    if (d.tau_ns != null) row(dl, "Excited-state lifetime", fmt(Number(d.tau_ns), Number(d.tau_ns) < 10 ? 1 : 0) + " ns");
+    row(dl, "Activated group", d.activated_group);
+    row(dl, "Source", d.citation);
+    if (d.doi) {
+      var doiRow = el("div", "copy-row"), dw = el("span", "doi-wrap");
+      dw.appendChild(doiLink(d.doi, d.doi)); doiRow.appendChild(dw);
+      doiRow.appendChild(copyBtn(EntScore.cleanDoi(d.doi) || d.doi, "Copy DOI"));
+      row(dl, "DOI", doiRow);
+    }
+    v.appendChild(dl);
+    if (d.location || d.quote || d.evidence) {
+      var det = el("details", "paper-details");
+      det.appendChild(el("summary", null, "Paper details"));
+      var pdl = el("dl");
+      paperExcerptRows(pdl, d);
+      det.appendChild(pdl);
+      v.appendChild(det);
+    }
+    if (o.onSuggest) {
+      var sa = el("div", "actions"), sb = el("button", "btn small", many ? "Suggest a correction to this value" : "Suggest a correction"); sb.type = "button";
+      sb.addEventListener("click", function () { o.onSuggest(d); });
+      sa.appendChild(sb); v.appendChild(sa);
+    }
+    return v;
+  }
 
   /* ---------- duplicates ----------
      The same molecule is recognised, in order of priority, by CAS number, by structure
@@ -1264,7 +1597,22 @@
      computed and either come from the same paper and agree within 1 kcal/mol, or agree within
      0.1 kcal/mol (the same number cited by another paper). Anything else is a new value, which
      is kept beside the existing ones on the molecule's card. */
+  /* Redox potentials (both rows redox): the same origin and quantity (kind and state), and against
+     SCE within 0.05 V from the same paper or 0.01 V otherwise; rows that do not convert to SCE are
+     compared as reported, against the same reference (and solvent). */
+  function sameRedoxValue(a, b) {
+    if ((a.origin || "exp") !== (b.origin || "exp") || quantityOf(a) !== quantityOf(b)) return false;
+    var x = Number(a.e_sce), y = Number(b.e_sce), dv;
+    if (a.e_sce != null && b.e_sce != null && isFinite(x) && isFinite(y)) dv = Math.abs(x - y);
+    else if (a.e_ref === b.e_ref && (a.e_ref !== "Fc+/Fc" || (a.solvent || "") === (b.solvent || ""))) dv = Math.abs(Number(a.e_v) - Number(b.e_v));
+    else return false;
+    if (isNaN(dv)) return false;
+    var p = EntScore.cleanDoi(a.doi || "").toLowerCase(), q = EntScore.cleanDoi(b.doi || "").toLowerCase();
+    return p && p === q ? dv <= 0.05 + 1e-9 : dv <= 0.01 + 1e-9;
+  }
   var sameValue = Ent.sameValue = function (a, b) {
+    var ra = isRedox(a), rb = isRedox(b);
+    if (ra || rb) return ra && rb && sameRedoxValue(a, b);
     if ((a.origin || "exp") !== (b.origin || "exp")) return false;
     var dv = Math.abs(Number(a.et_kcal) - Number(b.et_kcal));
     if (isNaN(dv)) return false;
@@ -1293,7 +1641,7 @@
   function describe(e) {
     var comm = trimStr(e.commercial_name), iupac = trimStr(e.name);
     var label = comm && iupac && comm.toLowerCase() !== iupac.toLowerCase() ? (comm + " (" + iupac + ")") : (comm || iupac || "(unnamed)");
-    return label + " · " + fmt(Number(e.et_kcal), 1) + " kcal/mol · " + (e.origin === "calc" ? "computed" : "experimental")
+    return label + " · " + (isRedox(e) ? redoxValueText(e) : fmt(Number(e.et_kcal), 1) + " kcal/mol") + " · " + (e.origin === "calc" ? "computed" : "experimental")
       + (e.doi ? " · " + e.doi : "");
   }
   function dupNote(dup) {
@@ -1301,11 +1649,11 @@
     var tag = function (m) { return " (" + m.why + (m.same ? "; same value" : "; different value") + ")"; };
     if (dup.db.length) {
       box.appendChild(el("p", null, dup.dbSame.length ? "Already in the database:" : "This molecule is in the database; this is a new value and will be added to its card:"));
-      var ul = el("ul"); dup.db.forEach(function (m) { ul.appendChild(el("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(ul);
+      var ul = el("ul"); dup.db.forEach(function (m) { ul.appendChild(elT("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(ul);
     }
     if (dup.queue.length) {
       box.appendChild(el("p", null, "Also waiting in the queue:"));
-      var uq = el("ul"); dup.queue.forEach(function (m) { uq.appendChild(el("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(uq);
+      var uq = el("ul"); dup.queue.forEach(function (m) { uq.appendChild(elT("li", m.same ? "same" : null, describe(m.entry) + tag(m))); }); box.appendChild(uq);
     }
     if (dup.stereo.length) {
       box.appendChild(el("p", "hint", "A different stereoisomer (E/Z or enantiomer) is in the database: " + dup.stereo.map(function (e) { return displayName(e); }).join("; ") + ". This is not treated as a duplicate."));
@@ -1332,6 +1680,7 @@
 
   /* ---------- suggested corrections (purple cards in the queue) ---------- */
   var SUGG_LABEL = {}; EntScore.SUGGEST_FIELDS.forEach(function (f) { SUGG_LABEL[f[0]] = f[1]; });
+  var REDOX_SUGG_LABEL = {}; EntScore.redox.SUGGEST_FIELDS.forEach(function (f) { REDOX_SUGG_LABEL[f[0]] = f[1]; });
   function shown(v) {
     if (v == null || v === "") return "(empty)";
     if (Array.isArray(v)) return v.length ? v.map(shown).join("; ") : "(empty)";
@@ -1349,7 +1698,8 @@
   }
   /* s: suggestion row, entry: current entry or null, h = {email, busy, approve(s, note), revoke(s, note), reject(s, note), edit(s, entry, note)} */
   Ent.suggestionCard = function (s, entry, h) {
-    var ap = Ent.approvalState(s, h && h.email);
+    var ap = Ent.approvalState(s, h && h.email), rx = !!s.redox_id || isRedox(entry);
+    var labels = rx ? REDOX_SUGG_LABEL : SUGG_LABEL;
     var c = el("article", "card sugg"), head = el("div", "head");
     if (entry) renderMolTitle(head, entry, "Suggested correction · ");
     else head.appendChild(el("h2", null, "Suggested correction · entry no longer available"));
@@ -1359,7 +1709,8 @@
     }
     if (entry && entry.cas) chips.appendChild(el("span", "chip plain", "CAS " + entry.cas));
     if (entry && entry.origin) chips.appendChild(el("span", "chip " + (entry.origin === "calc" ? "calc" : "exp"), entry.origin === "calc" ? "Computed" : "Experimental"));
-    if (entry && entry.et_kcal != null) chips.appendChild(el("span", "chip plain", fmt(Number(entry.et_kcal), 1) + " kcal/mol"));
+    if (entry && rx && isRedox(entry)) chips.appendChild(elT("span", "chip plain", redoxValueText(entry)));
+    else if (entry && entry.et_kcal != null) chips.appendChild(el("span", "chip plain", fmt(Number(entry.et_kcal), 1) + " kcal/mol"));
     head.appendChild(chips); c.appendChild(head);
     var apBox = approvalNoteBox(ap, s.status || "pending", "correction");
     if (apBox) c.appendChild(apBox);
@@ -1393,10 +1744,18 @@
         nowTxt = have ? have + (have === 1 ? " reaction" : " reactions") : "(none)";
         newTxt = k === "reactions" ? add + " reactions in total (listed below)" : "+ " + add + (add === 1 ? " reaction" : " reactions") + " (listed below)";
       }
-      r.appendChild(elT("td", null, SUGG_LABEL[k] || (k === "reactions" ? "Reactions (edited by a curator)" : k))); r.appendChild(el("td", (k === "reactions_add" || k === "uses_add") ? null : "old", nowTxt)); r.appendChild(el("td", "new", newTxt));
+      r.appendChild(elT("td", null, labels[k] || (k === "reactions" ? "Reactions (edited by a curator)" : k))); r.appendChild(el("td", (k === "reactions_add" || k === "uses_add") ? null : "old", nowTxt)); r.appendChild(el("td", "new", newTxt));
       t.appendChild(r);
     });
     wrap.appendChild(t); c.appendChild(wrap);
+    if (rx && entry && isRedox(entry)) {
+      var after = Ent.redoxDerivedPatch(s.changes || {}, entry);
+      if ("e_sce" in after) {
+        var ns = after.e_sce;
+        c.appendChild(el("p", "hint", "On approval the value against SCE becomes " + (ns == null ? "not converted (this reference and solvent do not convert)" : fmtV(ns) + " V") +
+          " (now " + (entry.e_sce != null ? fmtV(Number(entry.e_sce)) + " V" : "not converted") + ")."));
+      }
+    }
     var sgRx = s.changes && (s.changes.reactions_add || s.changes.reactions);
     if (Array.isArray(sgRx) && sgRx.length && Ent.reactionsAdminList && entry) {
       var rxKey = s.changes.reactions_add ? "reactions_add" : "reactions";
@@ -1471,6 +1830,33 @@
     ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
   ];
   var EDIT_MAP = {}; EDIT.forEach(function (f) { EDIT_MAP[f[0]] = f; });
+  /* the same editor for a redox potential (PhotoreDBox) */
+  var REDOX_EDIT = [
+    ["name", "IUPAC name", "text"], ["commercial_name", "Commercial name (optional)", "text"], ["cas", "CAS number", "text"], ["cls", "Class", "text"],
+    ["category", "Photocatalyst or substrate", "select", [["", "Not stated"], ["photocatalyst", "Photocatalyst"], ["substrate", "Substrate"]]],
+    ["kind", "Reduction or oxidation", "select", [["red", "Reduction"], ["ox", "Oxidation"]]],
+    ["state", "State", "select", [["S0", "Ground state (S0)"], ["S1", "Excited singlet (S1)"], ["T1", "Excited triplet (T1)"]]],
+    ["origin", "Origin", "select", [["exp", "Experimental"], ["calc", "Computed"]]],
+    ["e_v", "Potential as reported (V)", "number"], ["e_unc", "± Uncertainty (V)", "number"],
+    ["e_ref", "Reference electrode", "select", EntScore.redox.REFS.map(function (r) { return [r, r]; })],
+    ["e_reported", "Value as reported", "text"], ["e_type", "Value type", "text"],
+    ["couple", "Redox couple", "text"],
+    ["excited_from", "E* measured or estimated", "select", [["", "Not stated"], ["direct", "Measured directly"], ["estimated", "Estimated from E0,0"]]],
+    ["e00_ev", "E_00 used (eV)", "number"], ["e00_note", "Where E_00 comes from", "text"],
+    ["method", "Method", "area"], ["conditions", "Conditions", "text"], ["solvent", "Solvent", "text"], ["electrolyte", "Supporting electrolyte", "text"],
+    ["citation", "Citation", "area"], ["doi", "DOI", "text"], ["location", "Where in the paper", "text"],
+    ["quote", "Verbatim line", "text"], ["evidence", "What it says", "area"],
+    ["uv_lmax", "UV-vis λmax (nm)", "number"], ["tau_ns", "Excited-state lifetime (ns)", "number"], ["activated_group", "Activated bond or group", "text"],
+    ["structure_note", "Structure note", "text"], ["verify_note", "Verification note", "text"]
+  ];
+  var REDOX_EDIT_MAP = {}; REDOX_EDIT.forEach(function (f) { REDOX_EDIT_MAP[f[0]] = f; });
+  var REDOX_EDIT_GROUPS = [
+    { legend: "Molecule", rows: [["name"], ["commercial_name"], ["cas", "cls", "category"], ["structure_note"]] },
+    { legend: "Redox potential", rows: [["kind", "state", "origin"], ["e_v", "e_unc", "e_ref"], ["e_reported", "e_type"], ["couple", "excited_from"], ["e00_ev", "e00_note"], ["method", "conditions"], ["solvent", "electrolyte"]] },
+    { legend: "Source & verification", rows: [["citation"], ["doi", "location"], ["quote"], ["evidence"], ["verify_note"]] },
+    { legend: "Absorption, lifetime & reactivity", rows: [["uv_lmax", "tau_ns", "activated_group"]] }
+  ];
+  var REDOX_SCORED = ["name", "kind", "state", "couple", "excited_from", "e00_ev", "origin", "e_v", "e_unc", "e_ref", "e_type", "method", "conditions", "solvent", "electrolyte", "citation", "doi", "location", "quote"];
   var EDIT_GROUPS = [
     { legend: "Molecule", rows: [["name"], ["commercial_name"], ["cas", "cls", "role"], ["structure_note"]] },
     { legend: "Triplet energy", rows: [["origin", "et_kcal", "et_unc"], ["et_reported", "et_type"], ["method", "conditions"]] },
@@ -1521,11 +1907,31 @@
     });
     wrap.appendChild(b); wrap.appendChild(msg); return wrap;
   };
+  /* Checks of a redox patch (only what changed, as for triplet energies). -> message or "" */
+  function redoxEditError(patch, d) {
+    var R = EntScore.redox;
+    function has(k) { return k in patch; }
+    if (has("e_v") && patch.e_v == null) return "The potential cannot be empty.";
+    if (has("e_v") && !(Math.abs(patch.e_v) <= R.E_MAX)) return "The potential must be between −" + R.E_MAX + " and +" + R.E_MAX + " V. Check the value and the unit.";
+    if (has("e_ref") && !patch.e_ref) return "Choose the reference electrode.";
+    if (has("e_unc") && patch.e_unc != null && !(patch.e_unc >= 0 && patch.e_unc <= 1)) return "The uncertainty must be between 0 and 1 V.";
+    if (has("e00_ev") && patch.e00_ev != null && !(patch.e00_ev > 0 && patch.e00_ev <= 6)) return "E0,0 must be above 0 and at most 6 eV.";
+    if (has("uv_lmax") && patch.uv_lmax != null && !(Math.floor(patch.uv_lmax) === patch.uv_lmax && patch.uv_lmax >= 100 && patch.uv_lmax <= 1500)) return "UV-vis λmax must be an integer between 100 and 1500 nm.";
+    if (has("tau_ns") && patch.tau_ns != null && !(patch.tau_ns >= 0)) return "The excited-state lifetime must be a positive number of nanoseconds.";
+    if (has("origin") && !patch.origin) return "Choose experimental or computed.";
+    var doi = has("doi") ? patch.doi : d.doi, cite = has("citation") ? patch.citation : d.citation;
+    if ((has("doi") || has("citation")) && !doi && !cite) return "Keep a citation or a DOI so the value can be traced.";
+    if ((has("e_v") || has("e_unc") || has("e_ref")) && !has("e_reported") && d.e_reported)
+      return "You changed the value: update “Value as reported” too, so the card does not contradict itself.";
+    return "";
+  }
   var edCanClose = null;
   Ent.editor = {
     open: function (d, onSave, opts) {
       opts = opts || {};
       var overrides = opts.overrides || null;
+      var rxEdit = isRedox(d), EDITF = rxEdit ? REDOX_EDIT : EDIT, EMAP = rxEdit ? REDOX_EDIT_MAP : EDIT_MAP;
+      var GROUPS = rxEdit ? REDOX_EDIT_GROUPS : EDIT_GROUPS, SCOREDF = rxEdit ? REDOX_SCORED : SCORED, sceHint = null;
       var origSmiles = d.smiles || "", curSmiles = (overrides && overrides.smiles) || origSmiles;
       var box = el("div", "sk-box ed-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
 
@@ -1563,7 +1969,7 @@
 
       var fieldLabs = {}, fieldInputs = {};
       function buildField(k) {
-        var f = EDIT_MAP[k]; if (!f) return null;
+        var f = EMAP[k]; if (!f) return null;
         var lab = el("label", "field"), lbl = elT("span", null, f[1]), inp;
         lab.appendChild(lbl);
         if (f[2] === "select") { inp = el("select"); f[3].forEach(function (o) { inp.appendChild(new Option(o[1], o[0])); }); }
@@ -1575,6 +1981,9 @@
         }
         inp.id = "ed-" + f[0];
         var init = overrides && (f[0] in overrides) ? overrides[f[0]] : d[f[0]];
+        if (rxEdit && f[2] === "select" && !f[3].some(function (o) { return o[0] === (init == null ? "" : String(init)); })) {
+          inp.appendChild(new Option(init == null ? "(not set)" : String(init), init == null ? "" : String(init)));   /* an odd stored value is shown, not replaced */
+        }
         inp.value = f[2] === "direct_map" ? EntScore.formatDirectExc(init) : (init == null ? "" : String(init));
         lab.appendChild(inp);
         if (f[0] === "cas") lab.appendChild(casLookup(inp, function () { return curSmiles; }));
@@ -1584,7 +1993,7 @@
         return lab;
       }
 
-      EDIT_GROUPS.forEach(function (grp) {
+      GROUPS.forEach(function (grp) {
         var fs = el("fieldset"), lg = el("legend", null, grp.legend);
         fs.appendChild(lg);
         grp.rows.forEach(function (rowKeys) {
@@ -1593,6 +2002,10 @@
           rowKeys.forEach(function (k) { var fld = buildField(k); if (fld) fr.appendChild(fld); });
           fs.appendChild(fr);
         });
+        if (rxEdit && grp.legend === "Redox potential") {
+          /* e_sce is never typed: it follows the potential, the reference and the solvent */
+          sceHint = el("p", "hint"); sceHint.setAttribute("aria-live", "polite"); fs.appendChild(sceHint);
+        }
         body.appendChild(fs);
       });
 
@@ -1606,14 +2019,14 @@
       var add = el("button", "btn small", "Add a paper"); add.type = "button";
       add.addEventListener("click", function () { uses.appendChild(useRow(null, syncDirty)); syncDirty(); });
       var addWrap = el("div", "actions"); addWrap.appendChild(add); usesFs.appendChild(addWrap);
-      body.appendChild(usesFs);
+      if (!rxEdit) body.appendChild(usesFs);   /* a redox row has no "used in" papers */
 
       var origRx = Array.isArray(d.reactions) ? d.reactions : [];
       var initRx = origRx.slice();
       if (overrides && Array.isArray(overrides.reactions)) initRx = overrides.reactions.slice();
       else if (overrides && Array.isArray(overrides.reactions_add)) initRx = initRx.concat(overrides.reactions_add);
       var rxEd = null;
-      if (Ent.reactionsEditor) {
+      if (Ent.reactionsEditor && !rxEdit) {
         var rxFs = el("fieldset"); rxFs.appendChild(el("legend", null, "Reactions it was employed in"));
         rxEd = Ent.reactionsEditor({
           substrate: function () { return curSmiles; }, name: function () { return fieldInputs.name.value.trim() || displayName(d); },
@@ -1645,7 +2058,7 @@
           patch.idcode = Ent.idCode(curSmiles);
           patch.smiles_checked = true;
         }
-        EDIT.forEach(function (f) {
+        EDITF.forEach(function (f) {
           var v = fieldInputs[f[0]].value.trim(), out, old = d[f[0]] == null ? null : d[f[0]];
           if (f[2] === "direct_map") {
             var dm = EntScore.parseDirectExc(v);
@@ -1669,10 +2082,18 @@
           }
           patch[f[0]] = out;
         });
+        if (rxEdit) {
+          /* derived fields; then the checks of the redox values */
+          var derived = Ent.redoxDerivedPatch(patch, d);
+          Object.keys(patch).forEach(function (k) { delete patch[k]; });
+          Object.keys(derived).forEach(function (k) { patch[k] = derived[k]; });
+          if (validate) bad = bad || redoxEditError(patch, d);
+        }
         if (validate) {
-          EDIT.forEach(function (f) { var inp = fieldInputs[f[0]]; if (f[2] === "number" && inp.validity && inp.validity.badInput) bad = f[1] + " must be a number."; });
+          EDITF.forEach(function (f) { var inp = fieldInputs[f[0]]; if (f[2] === "number" && inp.validity && inp.validity.badInput) bad = f[1] + " must be a number."; });
           if (("name" in patch && !patch.name) || (!d.name && !("name" in patch))) bad = "The IUPAC name cannot be empty.";
-          if ("et_kcal" in patch && patch.et_kcal == null) bad = "The triplet energy cannot be empty.";
+          if (rxEdit) { /* the triplet-energy checks below do not apply */ }
+          else if ("et_kcal" in patch && patch.et_kcal == null) bad = "The triplet energy cannot be empty.";
           else if ("et_kcal" in patch && !(patch.et_kcal > 0 && patch.et_kcal <= EntScore.ET_MAX)) bad = "The triplet energy must be above 0 and at most " + EntScore.ET_MAX + " kcal/mol.";
           if ("et_unc" in patch && patch.et_unc != null && patch.et_unc < 0) bad = "The uncertainty cannot be negative.";
           if (("et_kcal" in patch || "et_unc" in patch) && !("et_reported" in patch) && d.et_reported)
@@ -1715,14 +2136,20 @@
       function syncDirty() {
         var res = collectState(false), patch = res.patch;
         Object.keys(fieldLabs).forEach(function (k) { fieldLabs[k].classList.toggle("changed", k in patch); });
-        var n = Object.keys(patch).filter(function (k) { return k !== "idcode" && k !== "smiles_checked"; }).length;
+        var n = Object.keys(patch).filter(function (k) { return k !== "idcode" && k !== "smiles_checked" && k !== "e_sce"; }).length;
         dirtyMsg.textContent = n ? n + (n === 1 ? " field modified" : " fields modified") : "No changes yet";
+        if (sceHint) {
+          var sce = "e_sce" in patch ? patch.e_sce : d.e_sce, refNow = fieldInputs.e_ref.value;
+          sce = sce == null || sce === "" ? NaN : Number(sce);
+          setText(sceHint, isFinite(sce) ? "Against SCE: " + fmtV(sce) + " V" + ("e_sce" in patch ? " (recomputed from the potential, the reference and the solvent)" : "") + "."
+            : "Not converted to SCE: " + (refNow === "Fc+/Fc" ? "give a single solvent (MeCN, DMF, CH2Cl2, THF or DMSO) to convert Fc+/Fc." : refNow === "Ag/Ag+" ? "give the Ag+ concentration in the reference to convert it." : "this reference cannot be converted."));
+        }
         if (!n) dirtyBar.hidden = true;
         syncDoiLink();
         return n;
       }
 
-      EDIT.forEach(function (f) {
+      EDITF.forEach(function (f) {
         var inp = fieldInputs[f[0]];
         inp.addEventListener("input", syncDirty);
         inp.addEventListener("change", syncDirty);
@@ -1750,7 +2177,7 @@
         var res = collectState(true), patch = res.patch;
         if (res.bad) { err.textContent = res.bad; err.hidden = false; return; }
         if (!Object.keys(patch).length) { Ent.editor.close(); return; }
-        var touched = SCORED.filter(function (k) { return k in patch; });
+        var touched = SCOREDF.filter(function (k) { return k in patch; });
         if (touched.length && Array.isArray(d.score_items)) {
           patch.score_items = d.score_items.filter(function (i) { return !i.edited; })
             .concat([{ label: "Edited by a curator", got: 0, max: 0, edited: true, note: touched.join(", ") + " on " + new Date().toLocaleDateString("en-CA") }]);
@@ -1933,6 +2360,23 @@
         { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
     });
   };
+  /* Approved redox potentials (public_redox). A database without the redox table yet has none. */
+  var REDOX_COLS = "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,kind,state,couple,excited_from,e00_ev,e00_note,origin,e_v,e_unc,e_ref,e_sce,e_reported,e_type,method,conditions,solvent,electrolyte,category,uv_lmax,tau_ns,activated_group,citation,doi,location,quote,evidence,score";
+  function noTableYet(err) { if (err && (err.status === 404 || /list_redox|redox_entries|schema cache/i.test(err.message || ""))) return []; throw err; }
+  api.listRedox = function (a, useAdmin) {
+    if (useAdmin) {
+      return authed(function (t) {
+        return allPages(function (offset) {
+          return fetch(base + "/rest/v1/redox_entries?select=" + REDOX_COLS + "&status=eq.approved&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
+            { headers: headers(t) }).then(asJson);
+        });
+      }).catch(noTableYet);
+    }
+    return allPages(function (offset) {
+      return fetch(base + "/rest/v1/rpc/list_redox?order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset,
+        { method: "POST", headers: headers(), body: creds(a) }).then(asJson);
+    }).catch(noTableYet);
+  };
   api.submit = function (payload) {
     return api.token().then(function (t) {
       return fetch(base + "/functions/v1/submit", { method: "POST", headers: headers(t || null), body: JSON.stringify(payload) }).then(asJson);
@@ -1982,20 +2426,22 @@
   api.isAdmin = function () {
     return authed(function (t) { return fetch(base + "/rest/v1/rpc/is_admin", { method: "POST", headers: headers(t), body: "{}" }).then(asJson); });
   };
-  api.adminList = function () {
+  /* Curator calls take an optional table: "entries" (triplet energies, the default) or "redox_entries". */
+  function tbl(table) { return table === "redox_entries" ? "redox_entries" : "entries"; }
+  api.adminList = function (table) {
     return authed(function (t) {
       return allPages(function (offset) {
-        return fetch(base + "/rest/v1/entries?select=*&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset, { headers: headers(t) }).then(asJson);
+        return fetch(base + "/rest/v1/" + tbl(table) + "?select=*&order=created_at.asc,id.asc&limit=" + PAGE + "&offset=" + offset, { headers: headers(t) }).then(asJson);
       });
     });
   };
   /* Same patch on many rows, 100 ids per request. -> Promise<updated rows> / Promise<number changed> */
-  function patchManyRows(ids, patch) {
+  function patchManyRows(ids, patch, table) {
     var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
     return authed(function (t) {
       return chunks.reduce(function (p, c) {
         return p.then(function (all) {
-          return fetch(base + "/rest/v1/entries?id=in.(" + c.join(",") + ")",
+          return fetch(base + "/rest/v1/" + tbl(table) + "?id=in.(" + c.join(",") + ")",
             { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) })
             .then(asJson).then(function (rows) { return all.concat(rows || []); });
         });
@@ -2003,16 +2449,16 @@
     });
   }
   api.adminPatchManyRows = patchManyRows;
-  api.adminPatchMany = function (ids, patch) {
-    return patchManyRows(ids, patch).then(function (rows) { return rows.length; });
+  api.adminPatchMany = function (ids, patch, table) {
+    return patchManyRows(ids, patch, table).then(function (rows) { return rows.length; });
   };
   /* Insert literature rows; rows whose import_key already exists are skipped. */
-  api.adminImport = function (rows) {
+  api.adminImport = function (rows, table) {
     var chunks = []; for (var i = 0; i < rows.length; i += 100) chunks.push(rows.slice(i, i + 100));
     return authed(function (t) {
       return chunks.reduce(function (p, c) {
         return p.then(function () {
-          return fetch(base + "/rest/v1/entries?on_conflict=import_key",
+          return fetch(base + "/rest/v1/" + tbl(table) + "?on_conflict=import_key",
             { method: "POST", headers: headers(t, { Prefer: "resolution=ignore-duplicates,return=minimal" }), body: JSON.stringify(c) }).then(asJson);
         });
       }, Promise.resolve());
@@ -2039,30 +2485,31 @@
     });
   };
   /* Permanent removal (curators only; RLS allows delete to admins). -> Promise<number deleted> */
-  api.adminDeleteMany = function (ids) {
+  api.adminDeleteMany = function (ids, table) {
     var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
     return authed(function (t) {
       return chunks.reduce(function (p, c) {
         return p.then(function (n) {
-          return fetch(base + "/rest/v1/entries?id=in.(" + c.join(",") + ")",
+          return fetch(base + "/rest/v1/" + tbl(table) + "?id=in.(" + c.join(",") + ")",
             { method: "DELETE", headers: headers(t, { Prefer: "return=representation" }) })
             .then(asJson).then(function (rows) { return n + (rows ? rows.length : 0); });
         });
       }, Promise.resolve(0));
     });
   };
-  api.adminPatch = function (id, patch) {
+  api.adminPatch = function (id, patch, table) {
     return authed(function (t) {
-      return fetch(base + "/rest/v1/entries?id=eq." + encodeURIComponent(id),
+      return fetch(base + "/rest/v1/" + tbl(table) + "?id=eq." + encodeURIComponent(id),
         { method: "PATCH", headers: headers(t, { Prefer: "return=representation" }), body: JSON.stringify(patch) }).then(asJson);
     });
   };
-  api.adminApproveMany = function (ids, note) {
+  api.adminApproveMany = function (ids, note, table) {
     var chunks = []; for (var i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    var rpc = tbl(table) === "redox_entries" ? "approve_redox_entries" : "approve_entries";
     return authed(function (t) {
       return chunks.reduce(function (p, c) {
         return p.then(function (all) {
-          return fetch(base + "/rest/v1/rpc/approve_entries", {
+          return fetch(base + "/rest/v1/rpc/" + rpc, {
             method: "POST",
             headers: headers(t),
             body: JSON.stringify({ p_ids: c, p_note: note === undefined ? null : note })
@@ -2071,12 +2518,13 @@
       }, Promise.resolve([]));
     });
   };
-  api.adminApprove = function (id, note) {
-    return api.adminApproveMany([id], note);
+  api.adminApprove = function (id, note, table) {
+    return api.adminApproveMany([id], note, table);
   };
-  api.adminRevokeApproval = function (id, note) {
+  api.adminRevokeApproval = function (id, note, table) {
+    var rpc = tbl(table) === "redox_entries" ? "revoke_redox_approval" : "revoke_entry_approval";
     return authed(function (t) {
-      return fetch(base + "/rest/v1/rpc/revoke_entry_approval", {
+      return fetch(base + "/rest/v1/rpc/" + rpc, {
         method: "POST",
         headers: headers(t),
         body: JSON.stringify({ p_id: id, p_note: note === undefined ? null : note })

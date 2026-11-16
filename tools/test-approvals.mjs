@@ -27,6 +27,16 @@ for (const needle of [
   "grant execute on function public.revoke_entry_approval(uuid, text) to authenticated",
   "grant execute on function public.approve_suggestion(uuid, text) to authenticated",
   "grant execute on function public.revoke_suggestion_approval(uuid, text) to authenticated",
+  // Redox potentials follow the same two-admin rules.
+  "create table if not exists public.redox_entries (",
+  "create or replace function public.redox_enforce_approval_policy()",
+  "create trigger redox_approval_policy_trg",
+  "create or replace function public.approve_redox_entries(p_ids uuid[], p_note text default null)",
+  "create or replace function public.revoke_redox_approval(p_id uuid, p_note text default null)",
+  "grant execute on function public.approve_redox_entries(uuid[], text) to authenticated",
+  "grant execute on function public.revoke_redox_approval(uuid, text) to authenticated",
+  "check (num_nonnulls(entry_id, redox_id) = 1)",
+  "create or replace function public.list_redox(p_user text default '', p_pass text default '')",
 ]) {
   assert.ok(schema.includes(needle), `schema.sql missing: ${needle}`);
 }
@@ -278,5 +288,67 @@ assert.ok(adminJs.includes("adminApproveMany"));
 assert.ok(adminJs.includes("adminRevokeApproval"));
 assert.ok(adminJs.includes("adminApproveSuggestion"));
 assert.ok(adminJs.includes("adminRevokeSuggestionApproval"));
+
+// 9. PhotoreDBox: the same review page on redox_entries
+{
+  fetchCalls.length = 0;
+  await Ent.api.adminApprove("rx-1", null, "redox_entries");
+  assert.ok(fetchCalls[0].url.endsWith("/rest/v1/rpc/approve_redox_entries"));
+  fetchCalls.length = 0;
+  await Ent.api.adminApprove("e-1", null);
+  assert.ok(fetchCalls[0].url.endsWith("/rest/v1/rpc/approve_entries"));
+  fetchCalls.length = 0;
+  await Ent.api.adminRevokeApproval("rx-1", null, "redox_entries");
+  assert.ok(fetchCalls[0].url.endsWith("/rest/v1/rpc/revoke_redox_approval"));
+
+  const rx = {
+    id: "22222222-2222-2222-2222-222222222222", name: "Thioxanthone", smiles: "O=c1c2ccccc2sc2ccccc12",
+    kind: "red", state: "S0", origin: "exp", e_v: -2.0, e_ref: "Fc+/Fc", solvent: "MeCN", e_sce: -1.62,
+    doi: "10.1021/jacs.0c05069", smiles_checked: true, status: "pending",
+    approvals: [{ email: "alice@example.org", at: "2026-11-12T10:00:00Z" }],
+  };
+  const mk = (email) => ({ email, busy: {}, drafts: {}, activeId: "", selected: {}, onSelect: () => {}, onPatch: async () => true, approve: async () => true, reject: async () => true, revoke: async () => true });
+  const cBob = Ent.card(rx, { admin: mk("bob@example.org") });
+  assert.equal(cBob.querySelector('button[data-act="approve"]').textContent, "Approve (2/2)");
+  const cAlice = Ent.card(rx, { admin: mk("alice@example.org") });
+  assert.equal(cAlice.querySelector('button[data-act="approve"]').textContent, "Verified by you (1/2)");
+  assert.equal(cAlice.querySelector('button[data-act="revoke"]').textContent, "Withdraw verification");
+
+  // same value = same origin and quantity, within 0.05 V vs SCE from the same paper or 0.01 V otherwise
+  const other = { ...rx, id: "x", e_sce: -1.66 };
+  assert.equal(Ent.sameValue(rx, other), true);
+  assert.equal(Ent.sameValue(rx, { ...other, doi: "10.1021/cr300503r" }), false);
+  assert.equal(Ent.sameValue(rx, { ...other, doi: "10.1021/cr300503r", e_sce: -1.625 }), true);
+  assert.equal(Ent.sameValue(rx, { ...other, kind: "ox" }), false);
+  assert.equal(Ent.sameValue(rx, { ...other, state: "T1" }), false);
+  assert.equal(Ent.sameValue(rx, { ...other, origin: "calc" }), false);
+  assert.equal(Ent.sameValue(rx, { id: "t", et_kcal: 63, origin: "exp" }), false);
+
+  // e_sce follows e_v, e_ref and the solvent; a ground state carries no E* fields
+  assert.deepEqual(Ent.redoxDerivedPatch({ e_v: -2.1 }, rx), { e_v: -2.1, e_sce: -1.72 });
+  assert.deepEqual(Ent.redoxDerivedPatch({ e_ref: "Ag/Ag+" }, rx), { e_ref: "Ag/Ag+", e_sce: null });
+  assert.deepEqual(Ent.redoxDerivedPatch({ state: "S0" }, { ...rx, state: "T1", excited_from: "estimated", e00_ev: 2.7 }),
+    { state: "S0", excited_from: null, e00_ev: null });
+
+  // a reader's correction to a redox value
+  const sg = { id: "s2", redox_id: rx.id, entry_id: null, status: "pending", changes: { e_v: -2.05 }, approvals: [] };
+  const sc = Ent.suggestionCard(sg, rx, { email: "bob@example.org", busy: {}, approve: () => {}, revoke: () => {}, reject: () => {}, edit: () => {} });
+  assert.ok(sc.querySelectorAll("button").some((b) => b.textContent === "Verify correction (1/2)"));
+}
+{
+  const prxHtml = readFileSync(join(root, "docs/photoredbox/admin.html"), "utf8");
+  for (const needle of ['data-triage="need2"', 'data-triage="wait2"', 'value="approvals"', 'id="f-prop"', 'id="f-eref"', 'value="e-asc"', 'id="up-file"', 'id="selbar"', 'id="triage-bar"']) {
+    assert.ok(prxHtml.includes(needle), `photoredbox/admin.html missing: ${needle}`);
+  }
+  assert.ok(!prxHtml.includes('id="f-role"') && !prxHtml.includes('id="f-etmin"'), "photoredbox/admin.html must not carry triplet-energy filters");
+  assert.ok(prxHtml.indexOf("../assets/site-redox.js") >= 0 && prxHtml.indexOf("../assets/site-redox.js") < prxHtml.indexOf("../assets/admin.js"),
+    "photoredbox/admin.html must load site-redox.js before admin.js");
+  const site = readFileSync(join(root, "docs/assets/site-redox.js"), "utf8");
+  assert.ok(/window\.ENT_SITE\s*=\s*\{\s*kind:\s*"redox"/.test(site));
+  assert.ok(adminJs.includes('TABLE = RX ? "redox_entries"'));
+  assert.ok(adminJs.includes("sg.redox_id"));
+  const untabled = adminJs.split("\n").filter((l) => /api\.admin(Approve|ApproveMany|RevokeApproval|List|Patch|PatchMany|PatchManyRows|Import|DeleteMany)\(/.test(l) && !l.includes("TABLE"));
+  assert.deepEqual(untabled, [], "every curator call on entries or redox_entries passes the table");
+}
 
 console.log("approval tests passed");

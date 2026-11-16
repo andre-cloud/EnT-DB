@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from .config import TrEnDBConfig, load_config
-from .models import Entry, MoleculeGroup
+from .models import Entry, MoleculeGroup, RedoxEntry
 from .query import QueryBuilder, SearchResult, filter_entries, group_by_molecule
 
 PAGE_SIZE = 1000
@@ -22,6 +22,14 @@ PUBLIC_ENTRY_COLUMNS = (
     "uv_lmax,uv_eps,uv_cond,direct_exc,score,uses"
 )
 LEGACY_PUBLIC_ENTRY_COLUMNS = PUBLIC_ENTRY_COLUMNS.replace(",commercial_name,", ",")
+# Exact columns exposed by public.public_redox.
+PUBLIC_REDOX_COLUMNS = (
+    "id,created_at,name,commercial_name,cas,smiles,idcode,structure_note,cls,"
+    "kind,state,couple,excited_from,e00_ev,e00_note,"
+    "origin,e_v,e_unc,e_ref,e_sce,e_reported,e_type,method,conditions,solvent,electrolyte,"
+    "category,uv_lmax,tau_ns,activated_group,"
+    "citation,doi,location,quote,evidence,score"
+)
 
 
 class TrEnDBError(RuntimeError):
@@ -67,6 +75,8 @@ class TrEnDBClient:
         self._cache_ttl = float(cache_ttl_seconds)
         self._memory_cache: tuple[float, list[Entry]] | None = None
         self._offline_entries: list[Entry] | None = None
+        self._offline_redox: list[RedoxEntry] | None = None
+        self._redox_cache: tuple[float, list[RedoxEntry]] | None = None
 
     @classmethod
     def from_batches(cls, batches_dir: str | Path = "docs/batches") -> "TrEnDBClient":
@@ -271,6 +281,57 @@ class TrEnDBClient:
         self._memory_cache = (time.time(), entries)
         self._write_disk_cache(entries)
         return list(entries)
+
+    # ---------------- redox potentials (public_redox) ----------------
+
+    def _page(self, method: str, path: str, *, headers: dict[str, str], body: Any = None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        sep = "&" if "?" in path else "?"
+        while True:
+            url = f"{self.config.supabase_url}/rest/v1/{path}{sep}order=created_at.asc,id.asc&limit={PAGE_SIZE}&offset={offset}"
+            resp = self._http.post(url, headers=headers, json=body) if method == "POST" else self._http.get(url, headers=headers)
+            if resp.status_code == 401:
+                raise TrEnDBError("Access denied (401): check site_user / site_pass or the curator login.")
+            if not resp.is_success:
+                raise TrEnDBError(f"{path.split('?')[0]} failed ({resp.status_code}): {resp.text}")
+            page = resp.json() or []
+            rows.extend(page)
+            if len(page) < PAGE_SIZE:
+                return rows
+            offset += PAGE_SIZE
+
+    def fetch_redox(self, *, force_refresh: bool = False) -> list[RedoxEntry]:
+        """Fetch all approved redox potentials from public.list_redox (or the curator's view)."""
+        if self._offline_redox is not None:
+            return list(self._offline_redox)
+        if self._offline_entries is not None:
+            return []
+        if not force_refresh and self._redox_cache is not None:
+            ts, cached = self._redox_cache
+            if self._cache_ttl <= 0 or (time.time() - ts) <= self._cache_ttl:
+                return list(cached)
+        self._require_configured()
+        email, password = self.config.curator_email, self.config.curator_pass
+        if email and password:
+            token = self._sign_in_curator(email, password)
+            raw = self._page("GET", f"redox_entries?select={PUBLIC_REDOX_COLUMNS}&status=eq.approved", headers=self._headers(bearer_token=token))
+        else:
+            raw = self._page("POST", "rpc/list_redox", headers=self._headers(), body=self._creds_payload())
+            if not raw and not self.check_access() and "@" in self.config.site_user and self.config.site_pass:
+                token = self._sign_in_curator(self.config.site_user, self.config.site_pass)
+                raw = self._page(
+                    "GET", f"redox_entries?select={PUBLIC_REDOX_COLUMNS}&status=eq.approved", headers=self._headers(bearer_token=token)
+                )
+        rows = [RedoxEntry.from_dict(r) for r in raw]
+        self._redox_cache = (time.time(), rows)
+        return list(rows)
+
+    def search_redox(self, **filters: Any) -> list[RedoxEntry]:
+        """Filter approved redox potentials (accepts all trendb.redox.filter_redox arguments)."""
+        from .redox import filter_redox
+
+        return filter_redox(self.fetch_redox(), **filters)
 
     def query(self) -> QueryBuilder:
         """Start a chainable query against the database."""

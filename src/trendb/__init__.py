@@ -14,11 +14,12 @@ from .clean_fields import (
 )
 from .client import TrEnDBClient, TrEnDBError
 from .config import TrEnDBConfig, load_config
-from .models import Entry, MoleculeGroup, ScoreItem, UseReference
+from .models import Entry, MoleculeGroup, RedoxEntry, ScoreItem, UseReference
 from .ocsr import ExtractedFigure, extract_figures_from_pdf, predict_smiles_decimer, run_ocsr_on_pdf
 from .pdf_extract import ExtractedCandidate, extract_pdf
 from .pdf_markdown import MarkdownPage, pdf_to_markdown
 from .query import QueryBuilder, SearchResult, filter_entries, group_by_molecule
+from .redox import RedoxMolecule, RepValue, compare_exp_calc_redox, filter_redox, group_redox_by_molecule, rep_value
 from .resolvers import ResolvedMolecule, Resolver
 from .stats import (
     DatabaseStats,
@@ -47,6 +48,9 @@ __all__ = [
     "MoleculeSpread",
     "NumericStats",
     "QueryBuilder",
+    "RedoxEntry",
+    "RedoxMolecule",
+    "RepValue",
     "ResolvedMolecule",
     "Resolver",
     "ScoreItem",
@@ -65,18 +69,22 @@ __all__ = [
     "clean_method",
     "clean_uv",
     "compare_exp_calc",
+    "compare_exp_calc_redox",
     "compute_descriptors",
     "et_histogram",
     "extract_figures_from_pdf",
     "extract_pdf",
     "filter_entries",
+    "filter_redox",
     "group_by_molecule",
+    "group_redox_by_molecule",
     "load_config",
     "molecule_spread",
     "normalize_row_fields",
     "parse_direct_exc",
     "parse_uv_fields",
     "pdf_to_markdown",
+    "rep_value",
     "predict_smiles_decimer",
     "run_ocsr_on_pdf",
     "summarize_numbers",

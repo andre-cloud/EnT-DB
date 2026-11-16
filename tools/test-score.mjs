@@ -142,4 +142,140 @@ assert.ok(S.checkSuggestion({ et_kcal: "500" }).error);
 assert.ok(S.checkSuggestion({ doi: "https://example.org/x" }).error);
 assert.ok(S.checkSuggestion({}).error);
 
+// ---------- redox potentials ----------
+const R = S.redox;
+const redoxFull = {
+  name: "9,10-Dicyanoanthracene", smiles: "N#Cc1c2ccccc2c(C#N)c2ccccc12", kind: "red", state: "S0", couple: "M/M•−",
+  e: "-0.89", unit: "v", unc: "0.01", ref: "SCE", origin: "exp", e_type: "E1/2 (reversible)",
+  tech: "Cyclic voltammetry", solvent: "MeCN", electrolyte: "0.1 M TBAPF6", temp: "25 °C",
+  cite: "Example J. 2020", doi: "10.1234/example.5678", loc: "Table 1", quote: "E1/2 = −0.89 V vs SCE",
+};
+const redoxCalc = { ...redoxFull, origin: "calc", e_type: "Computed, adiabatic", func: "M06-2X", basis: "def2-TZVP", solv: "SMD, MeCN" };
+// every branch sums to 100, and a complete entry scores 100
+for (const p of [redoxFull, redoxCalc]) for (const state of ["S0", "S1", "T1"]) {
+  const q = state === "S0" ? p : { ...p, state, excited_from: "estimated", e00: "2.89" };
+  const sc = R.scoreEntry(R.normalize(q), okCtx);
+  assert.equal(sc.items.reduce((a, i) => a + i.max, 0), 100, p.origin + " " + state + " max");
+  assert.equal(sc.total, 100, p.origin + " " + state + " total");
+}
+// references: conversion to SCE
+// references: one table (RedoxDB's), offsets to SCE, both directions
+assert.equal(R.toSce(-1, "SCE"), -1);
+assert.equal(R.toSce(-1, "SHE"), -1.241);
+assert.equal(R.toSce(-1, "NHE"), -1.241);
+assert.equal(R.toSce(-1, "Ag/AgCl (sat. KCl)"), -1.045);
+assert.equal(R.toSce(-1, "Ag/AgCl (3 M KCl)"), -1.032);
+assert.equal(R.toSce(-1, "Ag/AgCl (1 M KCl)"), -1);
+assert.equal(R.toSce(-1, "Ag/AgCl (3.5 M NaCl)"), -1.03);
+assert.equal(R.toSce(-1, "Ag/AgCl"), -1.045);                       // filling not stated: sat. KCl
+assert.equal(R.toSce(-1, "Ag/Ag+ (0.01 M AgNO3, MeCN)"), -0.702);
+assert.equal(R.toSce(-1, "Ag/Ag+ (0.1 M AgNO3, MeCN)"), -0.64);
+assert.equal(R.toSce(-1, "Me10Fc+/Me10Fc"), -1.13);
+assert.equal(R.toSce(-1, "Fc+/Fc", "MeCN"), -0.62);
+assert.equal(R.toSce(-1, "Fc+/Fc", "acetonitrile"), -0.62);
+assert.equal(R.toSce(-1, "Fc+/Fc", "DMF"), -0.55);
+assert.equal(R.toSce(-1, "Fc+/Fc", "CH2Cl2"), -0.54);
+assert.equal(R.toSce(-1, "Fc+/Fc", "THF"), -0.44);
+assert.equal(R.toSce(-1, "Fc+/Fc", "DMSO"), -0.57);
+assert.ok(Number.isNaN(R.toSce(-1, "Fc+/Fc", "")));                 // solvent needed
+assert.ok(Number.isNaN(R.toSce(-1, "Fc+/Fc", "MeCN/CH2Cl2 1:1")));  // mixture: not converted
+assert.ok(Number.isNaN(R.toSce(-1, "Ag/Ag+")));                     // concentration unknown
+assert.ok(Number.isNaN(R.toSce(-1, "other")));
+assert.ok(Number.isNaN(R.toSce(null, "SCE")));
+for (const r of R.REF_TABLE) {                                       // round trip for every convertible reference
+  const sce = R.toSce(-1.234, r.id, "MeCN");
+  if (!Number.isNaN(sce)) assert.equal(R.fromSce(sce, r.id, "MeCN"), -1.234, r.id);
+}
+for (const d of R.DISPLAY_REFS) assert.ok(!Number.isNaN(R.fromSce(-1, d.ref, d.solvent)), d.id);
+assert.equal(R.cleanRef("vs. Fc/Fc+"), "Fc+/Fc");
+assert.equal(R.cleanRef("ferrocene"), "Fc+/Fc");
+assert.equal(R.cleanRef("Ag/AgCl (sat. KCl)"), "Ag/AgCl (sat. KCl)");
+assert.equal(R.cleanRef("Ag/AgCl, saturated KCl"), "Ag/AgCl (sat. KCl)");
+assert.equal(R.cleanRef("Ag/AgCl (3 M KCl)"), "Ag/AgCl (3 M KCl)");
+assert.equal(R.cleanRef("Ag/AgCl (3.5 M NaCl)"), "Ag/AgCl (3.5 M NaCl)");
+assert.equal(R.cleanRef("Ag/AgCl"), "Ag/AgCl");
+assert.equal(R.cleanRef("Ag/Ag+ (0.01 M AgNO3)"), "Ag/Ag+ (0.01 M AgNO3, MeCN)");
+assert.equal(R.cleanRef("Ag/Ag+"), "Ag/Ag+");
+assert.equal(R.cleanRef("decamethylferrocene"), "Me10Fc+/Me10Fc");
+assert.equal(R.cleanRef("sce"), "SCE");
+assert.equal(R.cleanRef("Hg/HgO"), "other");
+assert.equal(R.cleanRef(""), "");
+// mV and sign
+let rf = R.normalize({ ...redoxFull, e: "−1920", unit: "mv", ref: "Fc+/Fc" });
+assert.ok(Number.isNaN(rf.v));   // a typographic minus is not a number: the form sends ASCII
+rf = R.normalize({ ...redoxFull, e: "-1920", unit: "mv", ref: "Fc+/Fc" });
+assert.equal(rf.v, -1.92);
+assert.equal(rf.sce, -1.54);
+// a value without SCE conversion loses only its conversion points
+const fcNoSolvent = R.scoreEntry(R.normalize({ ...redoxFull, ref: "Fc+/Fc", solvent: "" }), okCtx);
+assert.equal(item(fcNoSolvent, "Converts to SCE"), 0);
+assert.equal(item(fcNoSolvent, "Solvent"), 0);
+// required fields
+assert.equal(R.requiredError(R.normalize({ ...redoxFull, ref: "" }), okCtx), "Choose the reference electrode the potential was reported against.");
+assert.equal(R.requiredError(R.normalize({ ...redoxFull, e: "7" }), okCtx).startsWith("The potential must be"), true);
+// E0,0 is optional: an estimated E* without it can be sent, but loses the derivation points
+const noE00 = R.normalize({ ...redoxFull, state: "T1", excited_from: "estimated" });
+assert.equal(R.requiredError(noE00, okCtx), null);
+const deriv = R.scoreEntry(noE00, okCtx).items.find((i) => i.label === "Redox couple or E* derivation");
+assert.equal(deriv.got, 0);
+assert.equal(deriv.note, "Give the E0,0 used for the estimate");
+assert.equal(R.requiredError(R.normalize({ ...redoxFull, state: "T1", excited_from: "direct" }), okCtx), null);
+assert.equal(R.requiredError(R.normalize(redoxFull), okCtx), null);
+assert.ok(R.requiredError(R.normalize({}), {}));
+// ground state drops excited-state fields
+rf = R.normalize({ ...redoxFull, excited_from: "estimated", e00: "2.5" });
+assert.equal(rf.excited_from, "");
+assert.ok(Number.isNaN(rf.e00));
+// consistency: compared against SCE with the same kind, state and origin only
+rf = R.normalize(redoxFull);
+const rcons = (same) => item(R.scoreEntry(rf, { ...okCtx, same }), "Consistency with the database");
+assert.equal(rcons([{ name: "a", doi: "x", e_sce: -0.95, origin: "exp", kind: "red", state: "S0" }]), 8);
+assert.equal(rcons([{ name: "a", doi: "x", e_sce: -1.05, origin: "exp", kind: "red", state: "S0" }]), 5);
+assert.equal(rcons([{ name: "a", doi: "x", e_sce: -1.5, origin: "exp", kind: "red", state: "S0" }]), 2);
+assert.equal(rcons([{ name: "a", doi: "10.1234/EXAMPLE.5678", e_sce: -0.89, origin: "exp", kind: "red", state: "S0" }]), 0);
+assert.equal(rcons([{ name: "a", doi: "x", e_sce: 2.0, origin: "exp", kind: "red", state: "T1" }]), 8);   // other state: not a peer
+assert.equal(rcons([{ name: "a", doi: "x", e_sce: null, origin: "exp", kind: "red", state: "S0" }]), 4);  // nothing to compare
+// database row
+const rdoc = R.toDoc(R.normalize({ ...redoxFull, state: "T1", excited_from: "estimated", e00: "2.89", e: "2.0", ref: "Fc+/Fc" }), { total: 90, items: [] });
+assert.equal(rdoc.e_v, 2);
+assert.equal(rdoc.e_sce, 2.38);
+assert.equal(rdoc.e_ref, "Fc+/Fc");
+assert.equal(rdoc.e_reported, "2 ± 0.01 V vs Fc+/Fc");   // numbers are re-printed, as for et_reported
+assert.equal(rdoc.excited_from, "estimated");
+assert.equal(rdoc.e00_ev, 2.89);
+assert.equal(rdoc.conditions, "MeCN, 0.1 M TBAPF6, 25 °C");
+assert.ok(!("status" in rdoc) && !("ip_hash" in rdoc) && !("et_kcal" in rdoc));
+const rcalcDoc = R.toDoc(R.normalize(redoxCalc), { total: 1, items: [] });
+assert.equal(rcalcDoc.method, "Computation, M06-2X, def2-TZVP");
+assert.equal(rcalcDoc.conditions, "SMD, MeCN");
+assert.ok(!("solvent" in rcalcDoc));
+assert.equal(rcalcDoc.e_sce, -0.89);
+// reader corrections
+const rcs = R.checkSuggestion({ e_v: "-1.21", e_ref: "fc/fc+", state: "T1", doi: "doi: 10.1021/jacs.0c05069" });
+assert.equal(rcs.error, null);
+assert.equal(rcs.clean.e_v, -1.21);
+assert.equal(rcs.clean.e_ref, "Fc+/Fc");
+assert.equal(rcs.clean.doi, "10.1021/jacs.0c05069");
+assert.ok(R.checkSuggestion({ e_v: "9" }).error);
+assert.ok(R.checkSuggestion({ state: "T2" }).error);
+assert.ok(R.checkSuggestion({ e_sce: "-1" }).error);
+assert.ok(R.checkSuggestion({ et_kcal: "60" }).error);
+assert.deepEqual(R.checkSuggestion({ category: "photocatalyst", uv_lmax: "450", tau_ns: "1100" }).clean, { category: "photocatalyst", uv_lmax: 450, tau_ns: 1100 });
+assert.ok(R.checkSuggestion({ category: "solvent" }).error);
+assert.ok(R.checkSuggestion({ tau_ns: "-3" }).error);
+// photocatalyst / substrate extras are stored but not scored
+const extra = R.normalize({ ...redoxFull, category: "photocatalyst", uv_lmax: "452", tau_ns: "1100", activated_group: "C(sp3)-Br" });
+assert.equal(R.scoreEntry(extra, okCtx).total, 100);
+const extraDoc = R.toDoc(extra, { total: 100, items: [] });
+assert.equal(extraDoc.category, "photocatalyst");
+assert.equal(extraDoc.uv_lmax, 452);
+assert.equal(extraDoc.tau_ns, 1100);
+assert.equal(extraDoc.activated_group, "C(sp3)-Br");
+assert.equal(R.requiredError(R.normalize({ ...redoxFull, uv_lmax: "50" }), okCtx), "UV-vis λmax must be an integer between 100 and 1500 nm.");
+assert.ok(R.requiredError(R.normalize({ ...redoxFull, tau_ns: "-1" }), okCtx));
+// unstated Ag/AgCl filling converts, with a note
+const agNote = R.scoreEntry(R.normalize({ ...redoxFull, ref: "Ag/AgCl" }), okCtx).items.find((i) => i.label === "Converts to SCE");
+assert.equal(agNote.got, 4);
+assert.equal(agNote.note, "Filling not stated: saturated KCl assumed");
+
 console.log("score tests passed");

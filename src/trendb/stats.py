@@ -8,7 +8,7 @@ import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from . import chem
 from .models import Entry
@@ -120,16 +120,16 @@ class ExpCalcSummary:
             raise ImportError("pandas is required for to_dataframe().") from exc
         return pd.DataFrame(self.to_dicts())
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, quantity: str = "E_T", unit: str = "kcal/mol", digits: int = 1) -> str:
         if not self.n_molecules:
-            return "No molecules have both experimental and computed E_T values."
+            return f"No molecules have both experimental and computed {quantity} values."
         lines = [
-            f"### Experimental vs Computed E_T ({self.n_molecules} paired molecules)",
+            f"### Experimental vs Computed {quantity} ({self.n_molecules} paired molecules)",
             "",
-            f"- **MAE**: {self.mae:.2f} kcal/mol",
-            f"- **RMSE**: {self.rmse:.2f} kcal/mol",
-            f"- **Bias (calc - exp)**: {self.bias:+.2f} kcal/mol",
-            f"- **Max |error|**: {self.max_abs_error:.2f} kcal/mol",
+            f"- **MAE**: {self.mae:.2f} {unit}",
+            f"- **RMSE**: {self.rmse:.2f} {unit}",
+            f"- **Bias (calc - exp)**: {self.bias:+.2f} {unit}",
+            f"- **Max |error|**: {self.max_abs_error:.2f} {unit}",
             f"- **Pearson r / R²**: {self.pearson_r:.4f} / {self.r2:.4f}" if self.pearson_r is not None else "- **Pearson r**: n/a",
             "",
             "| Molecule | Exp mean | Calc mean | Δ(calc-exp) |",
@@ -137,7 +137,7 @@ class ExpCalcSummary:
         ]
         for p in sorted(self.pairs, key=lambda x: x.abs_diff, reverse=True)[:15]:
             lines.append(
-                f"| {p.name} | {p.et_exp_mean:.1f} | {p.et_calc_mean:.1f} | {p.diff_calc_minus_exp:+.1f} |"
+                f"| {p.name} | {p.et_exp_mean:.{digits}f} | {p.et_calc_mean:.{digits}f} | {p.diff_calc_minus_exp:+.{digits}f} |"
             )
         return "\n".join(lines)
 
@@ -161,16 +161,26 @@ class MoleculeSpread:
         return asdict(self)
 
 
-def compare_exp_calc(entries: Iterable[Entry]) -> ExpCalcSummary:
-    """Benchmark computed vs experimental E_T across molecules having both origins."""
+def _value_ok(x: Any) -> bool:
+    return isinstance(x, (int, float)) and math.isfinite(x)
+
+
+def compare_exp_calc(entries: Iterable[Any], value: Callable[[Any], Any] | None = None) -> ExpCalcSummary:
+    """Benchmark computed vs experimental values across molecules having both origins.
+
+    ``value`` reads the number to compare from a row: E_T in kcal/mol by default; for redox
+    rows pass e.g. ``lambda r: r.e_sce`` (and only rows of one kind and state). The pair
+    fields keep their historical ``et_*`` names whatever the quantity.
+    """
+    get = value or (lambda e: e.et_kcal)
     pairs: list[ExpCalcPair] = []
     for grp in group_by_molecule(entries):
-        exps = [e for e in grp.entries if e.origin == "exp" and math.isfinite(e.et_kcal)]
-        calcs = [e for e in grp.entries if e.origin == "calc" and math.isfinite(e.et_kcal)]
+        exps = [e for e in grp.entries if e.origin == "exp" and _value_ok(get(e))]
+        calcs = [e for e in grp.entries if e.origin == "calc" and _value_ok(get(e))]
         if not exps or not calcs:
             continue
-        exp_mean = statistics.fmean(e.et_kcal for e in exps)
-        calc_mean = statistics.fmean(e.et_kcal for e in calcs)
+        exp_mean = statistics.fmean(get(e) for e in exps)
+        calc_mean = statistics.fmean(get(e) for e in calcs)
         diff = calc_mean - exp_mean
         pairs.append(
             ExpCalcPair(

@@ -665,6 +665,346 @@ $$;
 revoke all on function public.revoke_suggestion_approval(uuid, text) from public, anon;
 grant execute on function public.revoke_suggestion_approval(uuid, text) to authenticated;
 
+-- ---------------------------------------------------------------------------
+-- Redox potentials (reduction now, oxidation later), one row per reported value.
+-- Same life cycle as entries: submitted pending, two curators approve, readers suggest fixes.
+-- The value is kept as reported (e_v against e_ref) and, when the reference can be converted,
+-- also against SCE (e_sce), which is what filters, sorting and exp/calc comparisons use.
+-- The conversion is computed by score.js / scoring.py, not here.
+-- ---------------------------------------------------------------------------
+create table if not exists public.redox_entries (
+  id             uuid primary key default gen_random_uuid(),
+  created_at     timestamptz not null default now(),
+  status         text not null default 'pending' check (status in ('pending','approved','rejected')),
+  decided_at     timestamptz,
+  approvals      jsonb not null default '[]'::jsonb,
+  import_key     text,
+  -- molecule (same identity fields as entries; grouped with them by CAS, idcode, SMILES)
+  name           text not null,
+  commercial_name text,
+  cas            text,
+  smiles         text not null,
+  idcode         text,
+  smiles_checked boolean not null default false,
+  structure_note text,                       -- e.g. "Built from scaffold (Table 2) with R = OMe"
+  cls            text,
+  -- what the potential refers to
+  kind           text not null default 'red' check (kind in ('red','ox')),
+  state          text not null default 'S0' check (state in ('S0','S1','T1')),
+  couple         text,                       -- e.g. "M/M•−", "M*/M•−", "M•+/M"
+  excited_from   text check (excited_from in ('direct','estimated')),
+  e00_ev         numeric,                    -- E00 used when E* = E + E00 (eV)
+  e00_note       text,                       -- where E00 comes from
+  -- value
+  origin         text not null check (origin in ('exp','calc')),
+  e_v            numeric not null,           -- V, signed, as reported
+  e_unc          numeric,                    -- V
+  e_ref          text not null,              -- one of EntScore.redox.REFS (checked below)
+  e_sce          numeric,                    -- V vs SCE; null when the reference cannot be converted
+  e_reported     text,                       -- original text, e.g. "−1.92 V vs Fc+/Fc (E1/2)"
+  e_type         text,                       -- E1/2, Ep, onset, computed adiabatic, ...
+  method         text,
+  conditions     text,
+  solvent        text,
+  electrolyte    text,
+  -- photocatalyst / substrate details used by the redox map and the reactivity advisor
+  category       text,                       -- 'photocatalyst' | 'substrate' (checked below)
+  uv_lmax        int,                        -- nm, lowest-energy absorption maximum
+  tau_ns         numeric,                    -- excited-state lifetime (ns), on E* rows
+  activated_group text,                      -- for substrates, e.g. "C(sp3)-Br"
+  -- source
+  citation       text,
+  doi            text,
+  location       text,
+  quote          text,
+  evidence       text,
+  verify_level   text,
+  verify_note    text,
+  -- review
+  source_kind    text not null default 'form',
+  score          int,
+  score_items    jsonb,
+  -- never public
+  submitted_by   text,
+  note           text,
+  ip_hash        text
+);
+alter table public.redox_entries add column if not exists category text;
+alter table public.redox_entries add column if not exists uv_lmax int;
+alter table public.redox_entries add column if not exists tau_ns numeric;
+alter table public.redox_entries add column if not exists activated_group text;
+create unique index if not exists redox_entries_import_key_idx on public.redox_entries (import_key);
+create index if not exists redox_entries_cas_idx    on public.redox_entries (cas);
+create index if not exists redox_entries_status_idx on public.redox_entries (status);
+create index if not exists redox_entries_idcode_idx on public.redox_entries (idcode);
+create index if not exists redox_entries_ip_idx     on public.redox_entries (ip_hash, created_at);
+
+alter table public.redox_entries drop constraint if exists redox_entries_approvals_array;
+alter table public.redox_entries add constraint redox_entries_approvals_array
+  check (jsonb_typeof(approvals) = 'array') not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_doi_format;
+alter table public.redox_entries add constraint redox_entries_doi_format
+  check (doi is null or doi ~ '^10\.[0-9]{4,9}/[^[:space:]]+$') not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_cas_format;
+alter table public.redox_entries add constraint redox_entries_cas_format
+  check (cas is null or cas ~ '^[0-9]{2,7}-[0-9]{2}-[0-9]$') not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_e_range;
+alter table public.redox_entries add constraint redox_entries_e_range
+  check (e_v between -5 and 5 and (e_sce is null or e_sce between -5 and 5)
+         and (e_unc is null or (e_unc >= 0 and e_unc <= 1))) not valid;
+-- Excited-state details only make sense for an excited state.
+alter table public.redox_entries drop constraint if exists redox_entries_excited_fields;
+alter table public.redox_entries add constraint redox_entries_excited_fields
+  check (state <> 'S0' or (excited_from is null and e00_ev is null)) not valid;
+-- Reference electrodes: the table in score.js (EntScore.redox.REF_TABLE), shared with scoring.py.
+alter table public.redox_entries drop constraint if exists redox_entries_e_ref_check;
+alter table public.redox_entries drop constraint if exists redox_entries_e_ref_known;
+alter table public.redox_entries add constraint redox_entries_e_ref_known
+  check (e_ref in ('SCE','SHE','NHE','Fc+/Fc','Me10Fc+/Me10Fc',
+                   'Ag/AgCl (sat. KCl)','Ag/AgCl (3 M KCl)','Ag/AgCl (1 M KCl)','Ag/AgCl (3.5 M NaCl)','Ag/AgCl',
+                   'Ag/Ag+ (0.01 M AgNO3, MeCN)','Ag/Ag+ (0.1 M AgNO3, MeCN)','Ag/Ag+','other')) not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_category_check;
+alter table public.redox_entries drop constraint if exists redox_entries_category_known;
+alter table public.redox_entries add constraint redox_entries_category_known
+  check (category is null or category in ('photocatalyst','substrate')) not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_details_range;
+alter table public.redox_entries add constraint redox_entries_details_range
+  check ((uv_lmax is null or uv_lmax between 100 and 1500) and (tau_ns is null or tau_ns >= 0)) not valid;
+alter table public.redox_entries drop constraint if exists redox_entries_e00_range;
+alter table public.redox_entries add constraint redox_entries_e00_range
+  check (e00_ev is null or (e00_ev > 0 and e00_ev <= 6)) not valid;
+
+alter table public.redox_entries enable row level security;
+drop policy if exists redox_admin_insert on public.redox_entries;
+drop policy if exists redox_admin_select on public.redox_entries;
+drop policy if exists redox_admin_update on public.redox_entries;
+drop policy if exists redox_admin_delete on public.redox_entries;
+create policy redox_admin_insert on public.redox_entries for insert to authenticated with check ((select public.is_admin()));
+create policy redox_admin_select on public.redox_entries for select to authenticated using ((select public.is_admin()));
+create policy redox_admin_update on public.redox_entries for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+create policy redox_admin_delete on public.redox_entries for delete to authenticated using ((select public.is_admin()));
+revoke all on public.redox_entries from anon;
+revoke all on public.redox_entries from authenticated;
+grant select, insert, update, delete on public.redox_entries to authenticated;
+
+-- Same two-admin rules as entries_enforce_approval_policy, with the redox scientific fields.
+create or replace function public.redox_enforce_approval_policy()
+returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_rpc boolean := current_setting('trendb.allow_approval_write', true) = 'on';
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+
+  new.approvals := coalesce(new.approvals, '[]'::jsonb);
+
+  if tg_op = 'INSERT' then
+    if new.status <> 'pending' then
+      raise exception 'New entries must start as pending' using errcode = '42501';
+    end if;
+    if jsonb_typeof(new.approvals) <> 'array' or jsonb_array_length(new.approvals) > 0 then
+      raise exception 'New entries cannot start with approvals' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  if not v_rpc then
+    if new.approvals is distinct from old.approvals then
+      raise exception 'Approvals can only be changed through the approval functions' using errcode = '42501';
+    end if;
+    if new.status = 'approved' and old.status is distinct from 'approved' then
+      raise exception 'Two different admins must approve an entry before it becomes approved' using errcode = '42501';
+    end if;
+    if new.status = 'rejected' or (new.status = 'pending' and old.status in ('approved', 'rejected')) then
+      new.approvals := '[]'::jsonb;
+    elsif old.status = 'pending' and new.status = 'pending' and (
+      new.smiles is distinct from old.smiles or
+      new.kind is distinct from old.kind or
+      new.state is distinct from old.state or
+      new.couple is distinct from old.couple or
+      new.excited_from is distinct from old.excited_from or
+      new.e00_ev is distinct from old.e00_ev or
+      new.e00_note is distinct from old.e00_note or
+      new.origin is distinct from old.origin or
+      new.e_v is distinct from old.e_v or
+      new.e_unc is distinct from old.e_unc or
+      new.e_ref is distinct from old.e_ref or
+      new.e_sce is distinct from old.e_sce or
+      new.e_reported is distinct from old.e_reported or
+      new.e_type is distinct from old.e_type or
+      new.method is distinct from old.method or
+      new.conditions is distinct from old.conditions or
+      new.solvent is distinct from old.solvent or
+      new.electrolyte is distinct from old.electrolyte or
+      new.category is distinct from old.category or
+      new.uv_lmax is distinct from old.uv_lmax or
+      new.tau_ns is distinct from old.tau_ns or
+      new.activated_group is distinct from old.activated_group or
+      new.citation is distinct from old.citation or
+      new.doi is distinct from old.doi or
+      new.location is distinct from old.location or
+      new.quote is distinct from old.quote or
+      new.evidence is distinct from old.evidence
+    ) then
+      new.approvals := '[]'::jsonb;
+    end if;
+  end if;
+
+  if new.status = 'approved' and old.status is distinct from 'approved' then
+    if public.count_valid_approvals(new.approvals) < 2 then
+      raise exception 'Two different admins must approve an entry before it becomes approved' using errcode = '42501';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+drop trigger if exists redox_approval_policy_trg on public.redox_entries;
+create trigger redox_approval_policy_trg
+  before insert or update on public.redox_entries
+  for each row execute function public.redox_enforce_approval_policy();
+
+-- Record the current curator's approval on redox entries (1/2 stays pending; 2/2 publishes).
+create or replace function public.approve_redox_entries(p_ids uuid[], p_note text default null)
+returns setof public.redox_entries
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.redox_entries%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.redox_entries%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+  if p_ids is null or coalesce(array_length(p_ids, 1), 0) = 0 then
+    return;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+
+  for v_row in
+    select * from public.redox_entries
+    where id = any(p_ids)
+    order by array_position(p_ids, id)
+    for update
+  loop
+    if v_row.status = 'approved' then
+      return next v_row;
+      continue;
+    end if;
+
+    select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+    into v_approvals
+    from jsonb_array_elements(
+      case when v_row.status = 'rejected' then '[]'::jsonb else coalesce(v_row.approvals, '[]'::jsonb) end
+    ) with ordinality as t(elem, ord)
+    join public.admins a on lower(a.email) = lower(elem->>'email');
+
+    if not exists (
+      select 1 from jsonb_array_elements(v_approvals) elem
+      where lower(elem->>'email') = v_email
+    ) then
+      v_approvals := v_approvals || jsonb_build_array(
+        jsonb_build_object(
+          'email', v_email,
+          'at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        )
+      );
+    end if;
+
+    if public.count_valid_approvals(v_approvals) >= 2 then
+      v_status := 'approved';
+      v_decided_at := now();
+    else
+      v_status := 'pending';
+      v_decided_at := null;
+    end if;
+
+    update public.redox_entries
+    set approvals = v_approvals,
+        status = v_status,
+        decided_at = v_decided_at,
+        note = case when p_note is null then v_row.note else nullif(p_note, '') end
+    where id = v_row.id
+    returning * into v_updated;
+
+    return next v_updated;
+  end loop;
+
+  perform set_config('trendb.allow_approval_write', 'off', true);
+end;
+$$;
+revoke all on function public.approve_redox_entries(uuid[], text) from public, anon;
+grant execute on function public.approve_redox_entries(uuid[], text) to authenticated;
+
+-- Withdraw the current curator's approval from a redox entry (approved -> pending if < 2 remain).
+create or replace function public.revoke_redox_approval(p_id uuid, p_note text default null)
+returns setof public.redox_entries
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_email text := public.current_admin_email();
+  v_row public.redox_entries%rowtype;
+  v_approvals jsonb;
+  v_status text;
+  v_decided_at timestamptz;
+  v_updated public.redox_entries%rowtype;
+begin
+  if v_email is null then
+    raise exception 'Not an admin' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.redox_entries where id = p_id for update;
+  if not found then
+    return;
+  end if;
+
+  select coalesce(jsonb_agg(elem order by ord), '[]'::jsonb)
+  into v_approvals
+  from jsonb_array_elements(coalesce(v_row.approvals, '[]'::jsonb)) with ordinality as t(elem, ord)
+  where lower(elem->>'email') <> v_email;
+
+  if v_row.status = 'approved' and public.count_valid_approvals(v_approvals) < 2 then
+    v_status := 'pending';
+    v_decided_at := null;
+  else
+    v_status := v_row.status;
+    v_decided_at := v_row.decided_at;
+  end if;
+
+  perform set_config('trendb.allow_approval_write', 'on', true);
+  update public.redox_entries
+  set approvals = v_approvals,
+      status = v_status,
+      decided_at = v_decided_at,
+      note = case when p_note is null then v_row.note else nullif(p_note, '') end
+  where id = v_row.id
+  returning * into v_updated;
+  perform set_config('trendb.allow_approval_write', 'off', true);
+
+  return next v_updated;
+end;
+$$;
+revoke all on function public.revoke_redox_approval(uuid, text) from public, anon;
+grant execute on function public.revoke_redox_approval(uuid, text) to authenticated;
+
+-- A suggestion targets either a triplet-energy entry or a redox entry, never both.
+alter table public.suggestions alter column entry_id drop not null;
+alter table public.suggestions add column if not exists redox_id uuid references public.redox_entries(id) on delete cascade;
+alter table public.suggestions drop constraint if exists suggestions_one_target;
+alter table public.suggestions add constraint suggestions_one_target
+  check (num_nonnulls(entry_id, redox_id) = 1) not valid;
+
 -- What the public site reads: approved rows only, without the private columns.
 -- The view deliberately runs with its owner's rights so anonymous visitors can read it
 -- although they have no access to the table. (Supabase's linter flags this as a
@@ -723,3 +1063,30 @@ revoke all on function public.check_access(text, text) from public, anon, authen
 revoke all on function public.list_entries(text, text) from public, anon, authenticated;
 grant execute on function public.check_access(text, text) to anon, authenticated, service_role;
 grant execute on function public.list_entries(text, text) to anon, authenticated, service_role;
+
+-- Public redox potentials: approved rows only, without the curators' notes and private columns.
+-- Read through list_redox(), gated by the same shared site login as list_entries().
+drop function if exists public.list_redox(text, text);
+drop view if exists public.public_redox;
+create view public.public_redox as
+select id, created_at, name, commercial_name, cas, smiles, idcode, structure_note, cls,
+       kind, state, couple, excited_from, e00_ev, e00_note,
+       origin, e_v, e_unc, e_ref, e_sce, e_reported, e_type, method, conditions, solvent, electrolyte,
+       category, uv_lmax, tau_ns, activated_group,
+       citation, doi, location, quote, evidence, score
+       -- verify_level and verify_note are curators' working notes: never public
+from public.redox_entries
+where status = 'approved';
+
+create or replace function public.list_redox(p_user text default '', p_pass text default '')
+returns setof public.public_redox
+language sql stable security definer
+set search_path = ''
+as $$
+  select * from public.public_redox
+  where public.check_access(p_user, p_pass);
+$$;
+
+revoke all on public.public_redox from anon, authenticated;
+revoke all on function public.list_redox(text, text) from public, anon, authenticated;
+grant execute on function public.list_redox(text, text) to anon, authenticated, service_role;

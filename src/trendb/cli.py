@@ -369,8 +369,11 @@ def main_scrape(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--password", default=None, help="Optional site_access password.")
     parser.add_argument("--format", choices=("json", "csv", "sdf"), default="json")
     parser.add_argument("-o", "--output", default=None, help="Output file path (stdout for json if omitted).")
+    _add_redox_args(parser)
 
     args = parser.parse_args(argv)
+    if args.property == "redox":
+        return _scrape_redox(args)
     client = (
         TrEnDBClient.from_batches(args.batches_dir)
         if args.batches_dir
@@ -430,8 +433,14 @@ def main_stats(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("-o", "--output", default=None, help="Write report to file.")
     parser.add_argument("--descriptors-csv", default=None, help="Also export RDKit descriptors + E_T to CSV.")
+    parser.add_argument("--property", choices=("et", "redox"), default="et", help="Triplet energies (et) or redox potentials.")
+    parser.add_argument(
+        "--quantity", choices=("e_red", "e_ox", "e_star_red", "e_star_ox"), default="e_red", help="Redox quantity to benchmark."
+    )
 
     args = parser.parse_args(argv)
+    if args.property == "redox":
+        return _stats_redox(args)
     client = (
         TrEnDBClient.from_batches(args.batches_dir)
         if args.batches_dir
@@ -484,6 +493,107 @@ def main_stats(argv: Sequence[str] | None = None) -> int:
         st = res.stats()
         text = json.dumps(st.to_dict(), indent=2, ensure_ascii=False) if args.format == "json" else st.to_markdown()
 
+    if args.output:
+        out_p = Path(args.output)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(text, encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+# ---------------- redox potentials ----------------
+
+
+def _add_redox_args(parser: argparse.ArgumentParser) -> None:
+    g = parser.add_argument_group("redox potentials (with --property redox)")
+    g.add_argument("--property", choices=("et", "redox"), default="et", help="Triplet energies (et) or redox potentials.")
+    g.add_argument("--quantity", choices=("e_red", "e_ox", "e_star_red", "e_star_ox"), default=None)
+    g.add_argument("--category", choices=("photocatalyst", "substrate"), default=None)
+    g.add_argument("--e-min", type=float, default=None, help="Minimum potential (V vs --ref).")
+    g.add_argument("--e-max", type=float, default=None, help="Maximum potential (V vs --ref).")
+    g.add_argument("--ref", default="SCE", help="Reference for --e-min/--e-max and the 'e_display' column (default SCE).")
+    g.add_argument("--ref-solvent", default="MeCN", help="Solvent for a Fc+/Fc --ref (default MeCN).")
+
+
+def _redox_client(args: argparse.Namespace) -> TrEnDBClient:
+    if getattr(args, "batches_dir", None):
+        raise SystemExit("--property redox reads the database; --batches-dir holds triplet energies only.")
+    return TrEnDBClient(site_user=args.user, site_pass=args.password)
+
+
+def _scrape_redox(args: argparse.Namespace) -> int:
+    from .scoring import clean_ref
+
+    ref = clean_ref(args.ref) or "SCE"
+    with _redox_client(args) as client:
+        rows = client.search_redox(
+            q=args.text,
+            cas=args.cas,
+            quantity=args.quantity,
+            origin=args.origin,
+            category=args.category,
+            cls=args.cls_name,
+            doi=args.doi,
+            e_min=args.e_min,
+            e_max=args.e_max,
+            ref=ref,
+            solvent=args.ref_solvent,
+            sort_by={"et_asc": "e_asc", "et_desc": "e_desc"}.get(args.sort_by, "added"),
+        )
+    if args.limit:
+        rows = rows[: args.limit]
+    dicts = []
+    for r in rows:
+        d = r.to_dict()
+        d["quantity"] = r.quantity
+        d["e_display"] = r.potential(ref, args.ref_solvent)
+        d["e_display_ref"] = ref
+        dicts.append(d)
+    if args.format == "sdf":
+        raise SystemExit("--format sdf is available for triplet energies only.")
+    if args.format == "csv":
+        import csv
+
+        if not args.output:
+            raise SystemExit("--output is required for --format csv")
+        keys = sorted({k for d in dicts for k in d})
+        with Path(args.output).open("w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys)
+            w.writeheader()
+            w.writerows(dicts)
+    elif args.output:
+        Path(args.output).write_text(json.dumps(dicts, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        print(json.dumps(dicts, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _stats_redox(args: argparse.Namespace) -> int:
+    from .redox import compare_exp_calc_redox
+
+    with _redox_client(args) as client:
+        rows = client.search_redox(cls=args.cls_name)
+    ec = compare_exp_calc_redox(rows, args.quantity)
+    if args.format == "json":
+        text = json.dumps(
+            {
+                "quantity": args.quantity,
+                "unit": "V vs SCE",
+                "n_molecules": ec.n_molecules,
+                "mae": ec.mae,
+                "rmse": ec.rmse,
+                "bias": ec.bias,
+                "max_abs_error": ec.max_abs_error,
+                "pearson_r": ec.pearson_r,
+                "r2": ec.r2,
+                "pairs": ec.to_dicts(),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    else:
+        text = ec.to_markdown(quantity=args.quantity, unit="V (vs SCE)", digits=2)
     if args.output:
         out_p = Path(args.output)
         out_p.parent.mkdir(parents=True, exist_ok=True)

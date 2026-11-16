@@ -268,3 +268,141 @@ class MoleculeGroup:
     @property
     def et_max(self) -> float:
         return max(e.et_kcal for e in self.entries)
+
+
+# Columns of a redox batch row (table redox_entries), uniform so PostgREST bulk inserts accept it.
+REDOX_BATCH_ROW_KEYS: tuple[str, ...] = (
+    "import_key",
+    "name",
+    "commercial_name",
+    "cas",
+    "smiles",
+    "structure_note",
+    "cls",
+    "kind",
+    "state",
+    "couple",
+    "excited_from",
+    "e00_ev",
+    "e00_note",
+    "origin",
+    "e_v",
+    "e_unc",
+    "e_ref",
+    "e_sce",
+    "e_reported",
+    "e_type",
+    "method",
+    "conditions",
+    "solvent",
+    "electrolyte",
+    "category",
+    "uv_lmax",
+    "tau_ns",
+    "activated_group",
+    "citation",
+    "doi",
+    "location",
+    "quote",
+    "evidence",
+    "verify_level",
+    "verify_note",
+    "source_kind",
+    "score",
+    "score_items",
+)
+
+
+def _opt_float(v: Any) -> float | None:
+    return float(v) if v is not None and v != "" else None
+
+
+@dataclass
+class RedoxEntry:
+    """A redox potential (public_redox / redox_entries row): one reported value of one molecule."""
+
+    name: str
+    smiles: str
+    kind: str  # "red" | "ox"
+    state: str  # "S0" | "S1" | "T1"
+    origin: str  # "exp" | "calc"
+    e_v: float  # V, as reported, against e_ref
+    e_ref: str
+    id: str | None = None
+    created_at: str | None = None
+    commercial_name: str | None = None
+    cas: str | None = None
+    idcode: str | None = None
+    structure_note: str | None = None
+    cls: str | None = None
+    couple: str | None = None
+    excited_from: str | None = None
+    e00_ev: float | None = None
+    e00_note: str | None = None
+    e_unc: float | None = None
+    e_sce: float | None = None  # V vs SCE; None when the reference cannot be converted
+    e_reported: str | None = None
+    e_type: str | None = None
+    method: str | None = None
+    conditions: str | None = None
+    solvent: str | None = None
+    electrolyte: str | None = None
+    category: str | None = None  # "photocatalyst" | "substrate"
+    uv_lmax: int | None = None
+    tau_ns: float | None = None
+    activated_group: str | None = None
+    citation: str | None = None
+    doi: str | None = None
+    location: str | None = None
+    quote: str | None = None
+    evidence: str | None = None
+    score: int | None = None
+    # Batch / review metadata (not in public_redox)
+    import_key: str | None = None
+    verify_level: str | None = None
+    verify_note: str | None = None
+    source_kind: str | None = None
+    score_items: list[dict[str, Any]] | None = None
+
+    @property
+    def display_name(self) -> str:
+        return self.commercial_name or self.name
+
+    @property
+    def quantity(self) -> str:
+        """e_red, e_ox, e_star_red or e_star_ox."""
+        return ("e_star_" if self.state != "S0" else "e_") + self.kind
+
+    @property
+    def doi_url(self) -> str | None:
+        return f"https://doi.org/{self.doi}" if self.doi else None
+
+    def potential(self, ref: str = "SCE", solvent: str | None = None) -> float | None:
+        """The potential against another reference (V), from e_sce; None when not convertible."""
+        from .scoring import from_sce
+
+        if self.e_sce is None:
+            return self.e_v if ref == self.e_ref else None
+        v = from_sce(self.e_sce, ref, solvent)
+        return None if v != v else v
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RedoxEntry":
+        known = {f for f in cls.__dataclass_fields__}
+        d = {k: v for k, v in data.items() if k in known}
+        d["name"] = str(d.get("name") or "")
+        d["smiles"] = str(d.get("smiles") or "")
+        d["kind"] = str(d.get("kind") or "red")
+        d["state"] = str(d.get("state") or "S0")
+        d["origin"] = str(d.get("origin") or "exp")
+        d["e_ref"] = str(d.get("e_ref") or "SCE")
+        ev = _opt_float(d.get("e_v"))
+        d["e_v"] = ev if ev is not None else float("nan")
+        for k in ("e00_ev", "e_unc", "e_sce", "tau_ns"):
+            d[k] = _opt_float(d.get(k))
+        d["uv_lmax"] = int(d["uv_lmax"]) if d.get("uv_lmax") is not None else None
+        d["score"] = int(d["score"]) if d.get("score") is not None else None
+        return cls(**d)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in self.__dataclass_fields__ if getattr(self, k) is not None}

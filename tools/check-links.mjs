@@ -24,7 +24,7 @@ for (const f of (existsSync(bdir) ? readdirSync(bdir) : []).filter((x) => /^batc
 }
 const seed = readFileSync(join(root, "supabase/seed.sql"), "utf8");
 if (/'https?:\/\//i.test(seed) || forbidden.test(seed)) problems.push("supabase/seed.sql contains a link");
-for (const f of ["docs/index.html", "docs/admin.html", "docs/assets/common.js", "docs/assets/app.js", "docs/assets/admin.js", "docs/assets/reactions.js"]) {
+for (const f of ["docs/index.html", "docs/admin.html", "docs/assets/common.js", "docs/assets/app.js", "docs/assets/admin.js", "docs/assets/site-redox.js", "docs/assets/reactions.js", "docs/assets/redox.js", "docs/assets/redox-reactions.js", "docs/photoredbox/index.html", "docs/photoredbox/admin.html", "docs/assets/prx-app.js"]) {
   if (forbidden.test(readFileSync(join(root, f), "utf8"))) problems.push(`${f} mentions a library proxy`);
 }
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }

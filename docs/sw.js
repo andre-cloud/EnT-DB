@@ -4,11 +4,12 @@
    - Pinned libraries and fonts from CDNs: saved once and reused (their addresses carry a version).
    - Everything else (the database, doi.org, PubChem, Crossref, sign-in) is never touched or stored here. */
 "use strict";
-var CACHE = "trendb-v1";
+var CACHE = "trendb-v4";
 var CORE = [
   "./", "index.html", "admin.html", "manifest.webmanifest",
   "assets/style.css", "assets/config.js", "assets/score.js", "assets/chem-render.js", "assets/common.js",
-  "assets/reactions.js", "assets/plotent.js", "assets/app.js", "assets/admin.js", "assets/pdf-extract.js",
+  "assets/reactions.js", "assets/plotent.js", "assets/redox-reactions.js", "assets/redox.js", "assets/app.js", "assets/admin.js", "assets/site-redox.js", "assets/pdf-extract.js",
+  "photoredbox/", "photoredbox/index.html", "photoredbox/admin.html", "photoredbox/manifest.webmanifest", "assets/prx-app.js",
   "assets/logo.svg", "assets/favicon.svg", "assets/app-icon.svg", "assets/apple-touch-icon.png",
   "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-192.png", "assets/icon-maskable-512.png"
 ];
@@ -45,7 +46,8 @@ function fetchAndSave(req) {
   }).catch(function () {
     return caches.match(req, { ignoreSearch: true }).then(function (hit) {
       if (hit) return hit;
-      if (req.mode === "navigate") return caches.match("index.html");
+      /* each site falls back on its own page: PhotoreDBox lives in photoredbox/ */
+      if (req.mode === "navigate") return caches.match(/\/photoredbox\//.test(new URL(req.url).pathname) ? "photoredbox/index.html" : "index.html");
       return Response.error();
     });
   });

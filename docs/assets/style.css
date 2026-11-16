@@ -723,3 +723,58 @@ button.chip.slide-chip:hover{border-color:var(--bad);color:var(--bad)}
 .install-text svg{vertical-align:-3px;margin:0 2px}
 .offline-note{margin:0;padding:8px 12px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:.88rem}
 @media (display-mode: standalone){.topbar{padding-top:env(safe-area-inset-top)}}
+
+/* ---------- redox potentials ---------- */
+.sum-redox{display:flex;flex-direction:column;gap:6px;min-width:0}
+.sum-et .sum-redox:not(:first-child){border-top:1px solid var(--line);padding-top:10px;margin-top:4px}
+.redox-grid{display:flex;flex-wrap:wrap;gap:6px 14px}
+.redox-cell{display:flex;align-items:baseline;gap:6px;font-variant-numeric:tabular-nums}
+.redox-cell .q{font-size:.85rem;color:var(--muted)}
+.redox-cell .v{font-family:var(--f-display);font-size:1.35rem;font-weight:600}
+.redox-cell.exp .v{color:var(--exp)}
+.redox-cell.calc .v{color:var(--calc)}
+.redox-sec{border-top:1px solid var(--line);margin-top:14px;padding-top:12px;display:flex;flex-direction:column;gap:10px}
+.redox-h{margin:0;font-family:var(--f-display);font-size:1.15rem}
+.redox-sec .hint{margin:0}
+.redox-sum{margin:0}
+.val-redox .et .q{font-size:1rem;color:var(--muted)}
+.fm-property{max-width:420px;margin:4px 0 10px}
+.estar-help{align-items:end}
+#tools-redox{border-top:1px dashed var(--line);padding-top:8px}
+.redox-admin{display:flex;flex-direction:column;gap:10px}
+.rx-table-wrap{overflow-x:auto}
+.rx-table td .smiles{display:block;font-size:.72rem;color:var(--muted);max-width:260px;overflow-wrap:anywhere}
+.rx-table td{font-variant-numeric:tabular-nums}
+.rx-sugg{border-top:1px solid var(--line);padding-top:8px;margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.rx-table{min-width:1180px}
+.rx-table th{white-space:nowrap}
+.rx-table td .btn{white-space:nowrap}
+/* Redox section */
+.rx-refbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:2px 0 6px}
+.rx-mode{display:flex;flex-direction:column;gap:10px}
+.rx-custom{display:flex;flex-direction:column;gap:10px}
+.rx-margin{height:5px;border-radius:3px;background:var(--track);margin-top:4px;width:90px;overflow:hidden}
+.rx-margin span{display:block;height:100%}
+.rx-margin .good{background:var(--exp)}.rx-margin .border{background:var(--warn)}.rx-margin .bad{background:var(--bad)}
+.rx-ox{fill:var(--calc)}
+.rx-mapwrap{overflow-x:auto}
+.rx-map{min-width:720px}
+.rx-maprow:hover{fill:var(--accent-soft);fill-opacity:.6}
+.rx-mapname{fill:var(--fg)}
+.rx-warn{color:var(--warn)}
+.rx-spec{display:flex;flex-direction:column;gap:8px}
+.pe-body.rx-body-wide{display:flex;flex-direction:column;align-items:stretch}
+.rx-panel-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));align-items:end}
+.rx-panel-row .rx-span{grid-column:1/-1;margin:0}
+.rx-landmark{stroke:var(--muted);stroke-width:1.2;stroke-dasharray:2 3}
+.rx-landmark-t{font-size:10.5px;fill:var(--muted);font-weight:600}
+/* potential scale: landmark labels above the line, range below */
+.scale.scale-v{height:48px}
+.scale.scale-v .track,.scale.scale-v .band{top:20px}
+.scale.scale-v .ref{top:17px;height:12px}
+.scale.scale-v .mark{top:15px}
+.scale.scale-v .lab{top:0}
+.scale.scale-v .end{top:32px}
+/* the common home: TrEnDB · PlotEnT on the first row, PhotoreDBox · PhotoTool on the second */
+.home-grid.home-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:700px){.home-grid.home-grid-2{grid-template-columns:1fr}}

@@ -77,7 +77,7 @@
   function TX(parent, x, y, str, cls, anchor) {
     var t = S("text", { x: x, y: y, "class": cls || "pe-tick", "text-anchor": anchor || "middle" }, parent);
     /* "E_T" -> E with a subscript T */
-    var re = /([A-Za-zτλ])_(\w+)/g, last = 0, m;
+    var re = /([A-Za-zτλ]\*?)_(\w+)/g, last = 0, m;
     while ((m = re.exec(str))) {
       t.appendChild(document.createTextNode(str.slice(last, m.index) + m[1]));
       var sb = S("tspan", { "baseline-shift": "sub", "font-size": "0.75em" }, t); sb.textContent = m[2];
@@ -163,13 +163,15 @@
     try { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return JSON.parse(decodeURIComponent(escape(atob(s)))); } catch (e) { return null; }
   }
   var saveTimer = null;
-  function saveState(tool, st) {
+  /* keeps a tool's settings in the address: <prefix><tool>/<state> (prefix "#plot/" here, "#redox/" for the Redox section) */
+  function saveAt(prefix, tool, st) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () {
-      var h = "#plot/" + tool + "/" + encodeState(st);
+      var h = prefix + tool + "/" + encodeState(st);
       if (location.hash !== h) history.replaceState(null, "", h);
     }, 300);
   }
+  function saveState(tool, st) { saveAt("#plot/", tool, st); }
   function actions(buttons) {
     var a = el("div", "actions pe-actions");
     buttons.forEach(function (b) {
@@ -270,7 +272,7 @@
   };
   function subscriptT(s) {
     /* "E_T" and "k_q" style labels -> text with <sub> */
-    var frag = document.createDocumentFragment(), re = /([A-Za-zτλ])_(\w+|SV)/g, last = 0, m;
+    var frag = document.createDocumentFragment(), re = /([A-Za-zτλ]\*?)_(\w+|SV)/g, last = 0, m;
     while ((m = re.exec(s))) {
       frag.appendChild(document.createTextNode(s.slice(last, m.index) + m[1]));
       frag.appendChild(el("sub", null, m[2])); last = re.lastIndex;
@@ -949,6 +951,13 @@
       TOOL_FN[tool](root, ctx, decodeState(route.data));
     },
     reset: function () { current = { key: "", ver: -1 }; },
+    /* the plotting and form helpers, shared with the Redox section (redox.js) */
+    kit: {
+      S: S, TX: TX, niceTicks: niceTicks, frame: frame, linePath: linePath, download: download, exportSvg: exportSvg, csv: csv,
+      encodeState: encodeState, decodeState: decodeState, saveAt: saveAt, actions: actions, copyLinkBtn: copyLinkBtn,
+      field: field, inp: inp, check: check, table: table, subscriptT: subscriptT, withSubs: withSubs,
+      num: num, sci: sci, fx: fx, mean: mean, kdiff: kdiff, SOLVENTS: SOLVENTS
+    },
     /* exposed for tests */
     _fitSandros: fitSandros, _sandrosLog: sandrosLog, _kdiff: kdiff, _num: num
   };

@@ -1,7 +1,15 @@
-/* TrEnDB review page: curator sign-in, triage queue, batch/PubChem tools, editor & undoable review. */
+/* Review page of TrEnDB (triplet energies, table entries) and of PhotoreDBox (redox potentials,
+   table redox_entries): curator sign-in, triage queue, batch/PubChem tools, editor & undoable review.
+   The page says which database it reviews with window.ENT_SITE = {kind: "redox"} (assets/site-redox.js,
+   loaded before this file); without it the page reviews triplet energies. Only what is about triplet
+   energies (PDF extraction, the literature batches of docs/batches, reactions) is TrEnDB-only. */
 (function () {
   "use strict";
   var $ = Ent.$, el = Ent.el, elT = Ent.elT, api = Ent.api;
+  var RX = !!(window.ENT_SITE && window.ENT_SITE.kind === "redox");
+  var TABLE = RX ? "redox_entries" : undefined, R = EntScore.redox;
+  /* the row a reader's correction is about */
+  function sgTarget(sg) { return RX ? sg.redox_id : sg.entry_id; }
   var state = {
     docs: [], sugg: [], view: "pending", triage: "",
     loaded: false, refreshing: false, loadErr: "", lastSync: null,
@@ -10,7 +18,7 @@
   };
   var dupCache = {};   /* pending id -> duplicates result, recomputed on every load */
   /* the reaction sketcher's "Search database" offers the approved molecules */
-  Ent.reactionCatalog = function () { return approvedDocs(); };
+  if (!RX) Ent.reactionCatalog = function () { return approvedDocs(); };
   function approvedDocs() { return state.docs.filter(function (d) { return d.status === "approved"; }); }
   function pendingDocs() { return state.docs.filter(function (d) { return d.status === "pending"; }); }
   function dupOf(d) {
@@ -76,7 +84,7 @@
 
   function onPatch(id, patch) {
     state.busy[id] = true; render();
-    return api.adminPatch(id, patch).then(function (rows) {
+    return api.adminPatch(id, patch, TABLE).then(function (rows) {
       delete state.busy[id];
       if (rows && rows[0]) {
         applyUpdatedRows(rows);
@@ -105,13 +113,20 @@
     dup: function (d) { var x = dupOf(d); return !!(x && x.flag); },
     unchecked: function (d) { return !d.smiles_checked; },
     nocas: function (d) { return !d.cas; },
-    verify: function (d) { return d.verify_level === "abstract" || d.verify_level === "secondaria"; },
+    verify: function (d) { return d.verify_level === "abstract" || d.verify_level === "secondaria" || (RX && /approximate/i.test(d.verify_note || "")); },
     form: function (d) { return d.source_kind === "form"; },
     low: function (d) { return d.score != null && Number(d.score) < 50; },
     enrich: function (d) { return !!enrichIssueDocIds()[d.id]; }
   };
+  if (RX) {
+    /* PhotoreDBox: what a redox curator sorts by instead of donor/acceptor */
+    TRIAGE_PRED.excited = function (d) { return !!d.state && d.state !== "S0"; };
+    TRIAGE_PRED.noconv = function (d) { return d.e_sce == null || d.e_sce === ""; };
+    TRIAGE_PRED.redoxdb = function (d) { return String(d.import_key || "").indexOf("redoxdb:") === 0; };
+  }
   function updateTriageBar(inView) {
-    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0, need2: 0, wait2: 0, dup: 0, unchecked: 0, nocas: 0, verify: 0, form: 0, low: 0, enrich: 0 };
+    var counts = { "": inView.length, sugg: state.view === "pending" ? state.sugg.length : 0 };
+    Object.keys(TRIAGE_PRED).forEach(function (k) { counts[k] = 0; });
     inView.forEach(function (d) {
       Object.keys(TRIAGE_PRED).forEach(function (k) { if (TRIAGE_PRED[k](d)) counts[k]++; });
     });
@@ -136,10 +151,12 @@
     if (state.triage && state.triage !== "sugg") return [];
     var st = state.search, q = st.q.trim().toLowerCase();
     var out = state.sugg.filter(function (sg) {
-      var entry = byId[sg.entry_id] || null;
+      var entry = byId[sgTarget(sg)] || null;
       if (st.origin && (!entry || entry.origin !== st.origin)) return false;
       if (st.cas && (!entry || String(entry.cas || "").indexOf(st.cas) !== 0)) return false;
       if (st.role && (!entry || (entry.role !== st.role && entry.role !== "both"))) return false;
+      if (st.prop && (!entry || !Ent.isRedox(entry) || Ent.redoxQuantity(entry) !== st.prop)) return false;
+      if (st.category && (!entry || entry.category !== st.category)) return false;
       if (st.cls && (!entry || (entry.cls || "") !== st.cls)) return false;
       if (q) {
         var hay = [entry && entry.name, entry && entry.cas, entry && entry.smiles, entry && entry.doi, sg.comment, sg.submitted_by, JSON.stringify(sg.changes || {})]
@@ -174,9 +191,10 @@
 
   function resetFiltersForJump() {
     var fresh = Ent.newSearch(state.search.defSort);
-    ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "sort"].forEach(function (k) { state.search[k] = fresh[k]; });
+    ["q", "cas", "origin", "role", "cls", "etmin", "etmax", "prop", "category", "emin", "emax", "sort"].forEach(function (k) { state.search[k] = fresh[k]; });
     state.search.ss.smiles = ""; state.search.ss.mode = fresh.ss.mode; state.search.ss.thr = fresh.ss.thr;
-    ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "ss-smiles"].forEach(function (id) { $(id).value = ""; });
+    /* each site has its own filters (TrEnDB: role, E_T range; PhotoreDBox: potential, category, window) */
+    ["q", "f-cas", "f-origin", "f-role", "f-cls", "f-etmin", "f-etmax", "f-prop", "f-category", "f-emin", "f-emax", "ss-smiles"].forEach(function (id) { var n = $(id); if (n) n.value = ""; });
     $("f-sort").value = state.search.sort; $("ss-mode").value = state.search.ss.mode;
     $("ss-thr").value = String(state.search.ss.thr); $("ss-thr").hidden = true;
     state.triage = "";
@@ -273,7 +291,7 @@
 
     if (shownSugg.length) {
       var cards = shownSugg.map(function (sg) {
-        return Ent.suggestionCard(sg, byId[sg.entry_id] || null, {
+        return Ent.suggestionCard(sg, byId[sgTarget(sg)] || null, {
           email: myEmail(), busy: state.busy, approve: approveSuggestion, revoke: revokeSuggestion, reject: rejectSuggestion, edit: editSuggestion,
           patchChanges: patchSuggestionChanges
         });
@@ -336,7 +354,26 @@
     ["Field", "Queue (new)", "Database (existing)"].forEach(function (x) { hr.appendChild(el("th", null, x)); });
     thead.appendChild(hr); tbl.appendChild(thead);
     var tbody = el("tbody");
-    var rows = [
+    function v(x, f) { var y = f(x); return y == null || y === "" ? "—" : String(y); }
+    function asRep(x) { return Ent.fmtV(Number(x.e_v)) + (x.e_unc != null && x.e_unc !== "" ? " ± " + x.e_unc : "") + " V"; }
+    function sce(x) { return x.e_sce != null && x.e_sce !== "" ? Ent.fmtV(Number(x.e_sce)) + " V" : "not converted"; }
+    function qty(x) { var q = Ent.redoxQuantity(x); return ((Ent.REDOX_QTY.filter(function (i) { return i.id === q; })[0] || {}).label || q) + (x.state && x.state !== "S0" ? " (" + x.state + ")" : ""); }
+    var rows = RX ? [
+      ["IUPAC name", d.name || "—", existing.name || "—"],
+      ["Value", asRep(d), asRep(existing)],
+      ["Reference", v(d, function (x) { return x.e_ref; }), v(existing, function (x) { return x.e_ref; })],
+      ["vs SCE", sce(d), sce(existing)],
+      ["Quantity", qty(d), qty(existing)],
+      ["Origin", d.origin === "calc" ? "Computed" : "Experimental", existing.origin === "calc" ? "Computed" : "Experimental"],
+      ["Value type", d.e_type || "—", existing.e_type || "—"],
+      ["Method", d.method || "—", existing.method || "—"],
+      ["Conditions", d.conditions || "—", existing.conditions || "—"],
+      ["Solvent", d.solvent || "—", existing.solvent || "—"],
+      ["DOI", d.doi || "—", existing.doi || "—"],
+      ["Citation", d.citation || "—", existing.citation || "—"],
+      ["Verbatim", d.quote || "—", existing.quote || "—"],
+      ["Score", d.score != null ? String(d.score) : "—", existing.score != null ? String(existing.score) : "—"]
+    ] : [
       ["IUPAC name", d.name || "—", existing.name || "—"],
       ["E_T (kcal/mol)", Ent.fmt(Number(d.et_kcal), 1) + (d.et_unc ? " ± " + d.et_unc : ""), Ent.fmt(Number(existing.et_kcal), 1) + (existing.et_unc ? " ± " + existing.et_unc : "")],
       ["Origin", d.origin === "calc" ? "Computed" : "Experimental", existing.origin === "calc" ? "Computed" : "Experimental"],
@@ -354,8 +391,8 @@
     rows.forEach(function (r) {
       var tr = el("tr", r[1] !== r[2] ? "differs" : null);
       tr.appendChild(elT("th", null, r[0]));
-      tr.appendChild(el("td", null, r[1]));
-      tr.appendChild(el("td", null, r[2]));
+      tr.appendChild(elT("td", null, r[1]));
+      tr.appendChild(elT("td", null, r[2]));
       tbody.appendChild(tr);
     });
     tbl.appendChild(tbody);
@@ -364,7 +401,7 @@
 
   function runApproveSingle(d, note) {
     state.busy[d.id] = true; render();
-    return api.adminApprove(d.id, note).then(function (rows) {
+    return api.adminApprove(d.id, note, TABLE).then(function (rows) {
       delete state.busy[d.id];
       if (rows && rows[0]) applyUpdatedRows(rows);
       else state.busy[d.id] = "err";
@@ -379,7 +416,7 @@
   function revoke(d, note) {
     var prevNote = d.note || null;
     state.busy[d.id] = true; render();
-    return api.adminRevokeApproval(d.id, note === undefined ? prevNote : note).then(function (rows) {
+    return api.adminRevokeApproval(d.id, note === undefined ? prevNote : note, TABLE).then(function (rows) {
       delete state.busy[d.id];
       var updated = rows && rows[0];
       if (updated) {
@@ -447,7 +484,7 @@
           var lab = el("label", "check"), r = el("input"); r.type = "radio"; r.name = "dup-target"; r.value = m.entry.id; r.checked = i === 0;
           r.addEventListener("change", function () { if (r.checked) drawCmp(m.entry); });
           lab.appendChild(r);
-          lab.appendChild(document.createTextNode(Ent.displayName(m.entry) + " · " + Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol · " +
+          lab.appendChild(elT("span", null, Ent.displayName(m.entry) + " · " + (RX ? Ent.redoxValueText(m.entry) : Ent.fmt(Number(m.entry.et_kcal), 1) + " kcal/mol") + " · " +
             (m.entry.origin === "calc" ? "computed" : "experimental") + (m.entry.doi ? " · " + m.entry.doi : "") + " (" + m.why + ")"));
           opts.appendChild(lab);
         });
@@ -484,8 +521,8 @@
                     actionLabel: "Undo",
                     onAction: function () {
                       return Promise.all([
-                        api.adminRevokeApproval(d.id, prev.note),
-                        api.adminApprove(old.id, old.note || null)
+                        api.adminRevokeApproval(d.id, prev.note, TABLE),
+                        api.adminApprove(old.id, old.note || null, TABLE)
                       ]).then(function (res) {
                         var r1 = res[0] && res[0][0], r2 = res[1] && res[1][0];
                         if (r1) applyUpdatedRows([r1]);
@@ -514,6 +551,7 @@
       else if (k === "reactions_add") patch.reactions = (Array.isArray(entry.reactions) ? entry.reactions : []).concat(ch[k] || []);
       else if (ch[k] !== entry[k]) patch[k] = ch[k];
     });
+    if (RX) patch = Ent.redoxDerivedPatch(patch, entry);   /* e_sce follows e_v, e_ref and the solvent */
     if ("smiles" in patch) { patch.idcode = Ent.idCode(patch.smiles); patch.smiles_checked = false; }
     if (Array.isArray(entry.score_items) && Object.keys(patch).length) {
       patch.score_items = entry.score_items.filter(function (i) { return !i.edited; })
@@ -527,7 +565,7 @@
   }
 
   function approveSuggestion(sg, note) {
-    var entry = state.docs.filter(function (d) { return d.id === sg.entry_id; })[0]; if (!entry) return;
+    var entry = state.docs.filter(function (d) { return d.id === sgTarget(sg); })[0]; if (!entry) return;
     var ap = Ent.approvalState(sg, myEmail());
     if (ap.byMe) {
       toast("You already verified this correction; a second curator must approve it.");
@@ -551,7 +589,7 @@
         return;
       }
       var patch = suggestionPatchForEntry(updatedSg, entry);
-      var apply = Object.keys(patch).length ? api.adminPatch(entry.id, patch) : Promise.resolve([entry]);
+      var apply = Object.keys(patch).length ? api.adminPatch(entry.id, patch, TABLE) : Promise.resolve([entry]);
       return apply.then(function (rows) {
         if (!rows || !rows[0]) throw new Error("not saved");
         state.docs = state.docs.map(function (d) { return d.id === entry.id ? rows[0] : d; }); dupCache = {};
@@ -591,7 +629,7 @@
   function buildSuggestionChanges(sg, entry, patch) {
     var next = {};
     Object.keys(patch || {}).forEach(function (k) {
-      if (k === "score_items" || k === "idcode" || k === "smiles_checked") return;
+      if (k === "score_items" || k === "idcode" || k === "smiles_checked" || k === "e_sce") return;
       next[k] = patch[k];
     });
     var orig = sg.changes || {};
@@ -751,7 +789,7 @@
   function runPatch(docs, patch, verb) {
     bulkError("");
     var ids = docs.map(function (d) { return d.id; });
-    return api.adminPatchMany(ids, patch).then(function (n) {
+    return api.adminPatchMany(ids, patch, TABLE).then(function (n) {
       clearSel();
       if (n < ids.length) bulkError((ids.length - n) + " of " + ids.length + " entries could not be " + verb + ".");
       else toast(n + " " + (n === 1 ? "entry " : "entries ") + verb + ".");
@@ -776,7 +814,7 @@
         "Verify " + sel.length + " (1/2)", "primary", function () {
           bulkError("");
           var ids = sel.map(function (d) { return d.id; });
-          api.adminApproveMany(ids).then(function (rows) {
+          api.adminApproveMany(ids, undefined, TABLE).then(function (rows) {
             clearSel();
             if (!rows || rows.length < ids.length) bulkError((ids.length - (rows ? rows.length : 0)) + " of " + ids.length + " entries could not be verified.");
             else toast("Moved " + rows.length + (rows.length === 1 ? " entry" : " entries") + " to queue with your verification (1/2).");
@@ -818,7 +856,7 @@
     askThen(title, parts.join(". ") + ".", btnLbl, "primary", function () {
       bulkError("");
       var ids = ok.map(function (d) { return d.id; });
-      api.adminApproveMany(ids).then(function (rows) {
+      api.adminApproveMany(ids, undefined, TABLE).then(function (rows) {
         clearSel();
         dupSkipped.forEach(function (d) { state.selected[d.id] = true; });
         var updated = rows || [];
@@ -857,7 +895,7 @@
     askThen("Delete " + what + " permanently?", (docs.length === 1 ? "This removes it" : "This removes them") + " from the database for good, together with any corrections suggested for " + (docs.length === 1 ? "it" : "them") + ". It cannot be undone.",
       "Delete permanently", "danger primary", function () {
         bulkError("");
-        api.adminDeleteMany(docs.map(function (d) { return d.id; })).then(function (n) {
+        api.adminDeleteMany(docs.map(function (d) { return d.id; }), TABLE).then(function (n) {
           docs.forEach(function (d) { delete state.selected[d.id]; });
           if (n < docs.length) bulkError((docs.length - n) + " of " + docs.length + " entries could not be deleted.");
           else toast("Deleted " + n + (n === 1 ? " entry." : " entries."));
@@ -870,18 +908,42 @@
   }
 
   /* ---------- literature batches published with the site + manual JSON upload ---------- */
-  var UPLOAD_KEYS = [
+  var UPLOAD_KEYS = RX ? [
+    /* columns of redox_entries a batch row may carry (tools/import_redoxdb.py writes these) */
+    "import_key", "name", "commercial_name", "cas", "smiles", "idcode", "smiles_checked", "structure_note", "cls",
+    "kind", "state", "couple", "excited_from", "e00_ev", "e00_note", "origin", "e_v", "e_unc", "e_ref", "e_sce", "e_reported",
+    "e_type", "method", "conditions", "solvent", "electrolyte", "category", "uv_lmax", "tau_ns", "activated_group",
+    "citation", "doi", "location", "quote", "evidence", "verify_level", "verify_note", "source_kind",
+    "score", "score_items", "status", "created_at"
+  ] : [
     "import_key", "name", "commercial_name", "cas", "smiles", "idcode", "smiles_checked", "structure_note",
     "cls", "role", "origin", "et_kcal", "et_unc", "et_reported", "et_type", "method",
     "conditions", "citation", "doi", "location", "quote", "evidence", "verify_level",
     "verify_note", "uv_lmax", "uv_eps", "uv_cond", "direct_exc", "source_kind",
     "score", "score_items", "uses", "status", "created_at"
   ];
+  function numOrNull(v) { return v == null || v === "" ? null : Number(v); }
   function toImportRows(list) {
     var base = Date.now();
     return list.map(function (r, i) {
       var o = {};
-      UPLOAD_KEYS.forEach(function (k) { o[k] = r[k] !== undefined ? r[k] : null; });
+      UPLOAD_KEYS.forEach(function (k) { o[k] = r[k] !== undefined && !(RX && r[k] === "") ? r[k] : null; });
+      if (RX) {
+        o.smiles_checked = !!r.smiles_checked;
+        o.kind = r.kind === "ox" ? "ox" : "red";
+        o.state = R.STATES.indexOf(r.state) >= 0 ? r.state : "S0";
+        o.origin = r.origin === "calc" ? "calc" : "exp";
+        o.e_v = Number(r.e_v); o.e_ref = R.cleanRef(r.e_ref);
+        ["e_unc", "e00_ev", "tau_ns", "uv_lmax", "score"].forEach(function (k) { o[k] = numOrNull(o[k]); });
+        if (o.e_sce == null) { var sce = R.toSce(o.e_v, o.e_ref, o.solvent); o.e_sce = isFinite(sce) ? sce : null; }
+        else o.e_sce = Number(o.e_sce);
+        if (o.state === "S0") { o.excited_from = null; o.e00_ev = null; }
+        o.source_kind = r.source_kind || "import";
+        o.status = "pending";
+        o.created_at = new Date(base + i).toISOString();
+        o.idcode = Ent.idCode(r.smiles) || r.idcode || null;
+        return o;
+      }
       o.smiles_checked = !!r.smiles_checked;
       o.role = (r.role === "acceptor" || r.role === "donor" || r.role === "both") ? r.role : "acceptor";
       o.origin = r.origin === "calc" ? "calc" : "exp";
@@ -895,6 +957,8 @@
 
   var pendingImport = [], lastBatchesPromise = Promise.resolve();
   function checkBatches() {
+    /* the literature batches of docs/batches hold triplet energies only */
+    if (RX || !$("imp")) { lastBatchesPromise = Promise.resolve(); updateToolsBadge(); return lastBatchesPromise; }
     lastBatchesPromise = api.batches().then(function (rows) {
       var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
       pendingImport = rows.filter(function (r) { return r.import_key && !have[r.import_key]; });
@@ -907,10 +971,10 @@
     }, function () { $("imp").hidden = true; updateToolsBadge(); });
     return lastBatchesPromise;
   }
-  $("imp-go").addEventListener("click", function () {
+  if ($("imp-go")) $("imp-go").addEventListener("click", function () {
     var rows = toImportRows(pendingImport);
     $("imp-go").disabled = true; $("imp-text").textContent = "Importing " + rows.length + " entries…";
-    api.adminImport(rows).then(function () {
+    api.adminImport(rows, TABLE).then(function () {
       $("imp-go").disabled = false; $("imp").hidden = true;
       addToolLog("Imported " + rows.length + " literature batch entries.");
       toast("Imported " + rows.length + " literature entries.");
@@ -1029,6 +1093,7 @@
     Object.keys(r).forEach(function (k) {
       if (typeof r[k] === "string" && /https?:\/\//i.test(r[k])) errs.push(k + " contains a web link; only DOIs are allowed.");
     });
+    if (RX) return errs.concat(redoxRowErrors(r));
     var smi = String(r.smiles || "").trim();
     if (!String(r.name || "").trim()) errs.push("name is required.");
     if (!smi) errs.push("smiles is required.");
@@ -1051,7 +1116,52 @@
     }
     return errs;
   }
+  function given(v) { return v != null && v !== ""; }
+  /* the checks of the server (submit) for one uploaded redox row */
+  function redoxRowErrors(r) {
+    var errs = [], smi = String(r.smiles || "").trim();
+    if (!String(r.name || "").trim()) errs.push("name is required.");
+    if (!smi) errs.push("smiles is required.");
+    else if (Ent.structureOk(smi) === false) errs.push("SMILES could not be read.");
+    var v = EntScore.num(r.e_v);
+    if (!given(r.e_v) || !(Math.abs(v) <= R.E_MAX)) errs.push("e_v must be a number between −" + R.E_MAX + " and +" + R.E_MAX + " V.");
+    if (!R.cleanRef(r.e_ref)) errs.push("e_ref (the reference electrode) is missing.");
+    if (given(r.kind) && R.KINDS.indexOf(r.kind) < 0) errs.push("kind must be \"red\" or \"ox\".");
+    if (given(r.state) && R.STATES.indexOf(r.state) < 0) errs.push("state must be S0, S1 or T1.");
+    if (given(r.origin) && r.origin !== "exp" && r.origin !== "calc") errs.push("origin must be \"exp\" or \"calc\".");
+    if (given(r.excited_from) && ["direct", "estimated"].indexOf(r.excited_from) < 0) errs.push("excited_from must be \"direct\" or \"estimated\".");
+    if (given(r.category) && R.CATEGORIES.indexOf(r.category) < 0) errs.push("category must be \"photocatalyst\" or \"substrate\".");
+    if (given(r.e_unc) && !(Number(r.e_unc) >= 0 && Number(r.e_unc) <= 1)) errs.push("e_unc must be between 0 and 1 V.");
+    if (given(r.e_sce) && !(Math.abs(Number(r.e_sce)) <= R.E_MAX)) errs.push("e_sce must be a number between −" + R.E_MAX + " and +" + R.E_MAX + " V.");
+    if (given(r.e00_ev) && !(Number(r.e00_ev) > 0 && Number(r.e00_ev) <= 6)) errs.push("e00_ev must be above 0 and at most 6 eV.");
+    if (given(r.tau_ns) && !(Number(r.tau_ns) >= 0)) errs.push("tau_ns must be a positive number.");
+    if (given(r.uv_lmax) && !(isInt(r.uv_lmax) && r.uv_lmax >= 100 && r.uv_lmax <= 1500)) errs.push("uv_lmax must be an integer between 100 and 1500.");
+    if (r.doi && !EntScore.isDoi(EntScore.cleanDoi(r.doi))) errs.push("\"" + r.doi + "\" is not a valid DOI.");
+    if (r.cas && !EntScore.casValid(EntScore.cleanCas(r.cas))) errs.push("\"" + r.cas + "\" is not a valid CAS number.");
+    if (!r.doi && !r.citation) errs.push("a DOI or a citation is required.");
+    return errs;
+  }
+  /* Score of an uploaded redox row that has none, against the redox values already in the database */
+  function scoreRedoxRow(copy) {
+    var calc = copy.origin === "calc";
+    var f = R.normalize({
+      name: copy.name, commercial_name: copy.commercial_name || "", cas: copy.cas || "", cls: copy.cls || "", smiles: copy.smiles,
+      kind: copy.kind, state: copy.state, couple: copy.couple || "", excited_from: copy.excited_from || "",
+      e00: given(copy.e00_ev) ? copy.e00_ev : "", e00_note: copy.e00_note || "",
+      e: copy.e_v, unit: "v", unc: given(copy.e_unc) ? copy.e_unc : "", ref: copy.e_ref, origin: copy.origin, e_type: copy.e_type || "",
+      tech: calc ? "" : (copy.method || ""), solvent: copy.solvent || "", electrolyte: copy.electrolyte || "",
+      func: calc ? (copy.method || "") : "", solv: calc ? (copy.solvent || copy.conditions || "") : "",
+      cite: copy.citation || "", doi: copy.doi || "", loc: copy.location || "", quote: copy.quote || "",
+      category: copy.category || "", activated_group: copy.activated_group || "", uv_lmax: copy.uv_lmax, tau_ns: copy.tau_ns
+    });
+    var known = Ent.duplicates(copy, approvedDocs(), []).db.map(function (m) {
+      var e = m.entry; return { name: e.name, doi: e.doi, e_sce: e.e_sce, origin: e.origin, kind: e.kind, state: e.state };
+    });
+    return R.scoreEntry(f, { structureOk: Ent.structureOk(copy.smiles), doiResolves: null, same: known });
+  }
   function parseAndValidateUpload(raw, fileName) {
+    /* a RedoxDB batch may come as {rows: [...], review: [...]} */
+    if (RX && raw && !Array.isArray(raw) && Array.isArray(raw.rows)) raw = raw.rows;
     if (!Array.isArray(raw) || !raw.length) return { fatal: "The JSON file must be a non-empty array of entry objects." };
     var slug = String(fileName || "upload").replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 40) || "upload";
     var have = {}; state.docs.forEach(function (d) { if (d.import_key) have[d.import_key] = 1; });
@@ -1081,7 +1191,14 @@
         var near = nearestKey(k);
         warn("Unknown field \"" + k + "\" is ignored" + (near ? "; did you mean \"" + near + "\"?" : "."), rowNo);
       });
-      if (r.role == null || r.role === "") warn("role is missing; imported as \"acceptor\".", rowNo);
+      if (RX) {
+        if (!given(r.origin)) warn("origin is missing; imported as \"exp\".", rowNo);
+        if (!given(r.kind)) warn("kind is missing; imported as \"red\".", rowNo);
+        var refIn = String(r.e_ref).trim(), refOut = R.cleanRef(r.e_ref);
+        if (refOut !== refIn) warn("e_ref \"" + refIn.slice(0, 40) + "\" is read as \"" + refOut + "\".", rowNo);
+        if (!given(r.e_sce) && isNaN(R.toSce(EntScore.num(r.e_v), refOut, r.solvent))) warn("The potential cannot be converted to SCE (reference " + refOut + (refOut === "Fc+/Fc" ? " without a single known solvent" : "") + "); it is kept as reported.", rowNo);
+        if ((r.state || "S0") === "S0" && (given(r.excited_from) || given(r.e00_ev))) warn("excited_from and e00_ev apply only to excited states (S1, T1); dropped on S0 rows.", rowNo);
+      } else if (r.role == null || r.role === "") warn("role is missing; imported as \"acceptor\".", rowNo);
       else if (ROLES.indexOf(r.role) < 0) warn("role \"" + String(r.role).slice(0, 40) + "\" is not acceptor, donor or both; imported as \"acceptor\".", rowNo);
       var name = String(r.name).trim(), smi = String(r.smiles).trim(), et = Number(r.et_kcal);
       var doi = r.doi ? EntScore.cleanDoi(r.doi) : null, cas = r.cas ? EntScore.cleanCas(r.cas) : null;
@@ -1089,6 +1206,14 @@
       copy.import_key = ik; copy.name = name.slice(0, 200);
       copy.commercial_name = r.commercial_name ? String(r.commercial_name).trim().slice(0, 200) || null : null;
       copy.smiles = smi; copy.doi = doi; copy.cas = cas;
+      if (RX) {
+        copy.e_v = EntScore.num(r.e_v); copy.e_ref = R.cleanRef(r.e_ref);
+        copy.kind = r.kind === "ox" ? "ox" : "red"; copy.state = R.STATES.indexOf(r.state) >= 0 ? r.state : "S0";
+        copy.origin = r.origin === "calc" ? "calc" : "exp";
+        if (copy.score == null) { var rsc = scoreRedoxRow(copy); copy.score = rsc.total; copy.score_items = rsc.items; }
+        valid.push(copy);
+        return;
+      }
       if (copy.score == null) {
         var norm = EntScore.normalize({
           name: copy.name, commercial_name: copy.commercial_name || "", cas: cas || "", cls: copy.cls || "", smiles: smi, role: copy.role,
@@ -1151,7 +1276,7 @@
     var rows = toImportRows(uploadRows);
     $("up-go").disabled = true; $("up-pick").disabled = true;
     $("up-info").textContent = "Importing " + rows.length + " entries…";
-    api.adminImport(rows).then(function () {
+    api.adminImport(rows, TABLE).then(function () {
       $("up-pick").disabled = false;
       var left = uploadReport && uploadReport.rejected.length;
       /* the discarded rows stay listed (and downloadable) until Clear or the next file */
@@ -1618,7 +1743,7 @@
       var rows = toImportRows(res.rows);
       pdfBusy = true; $("pdf-load-up").disabled = true; $("pdf-pick").disabled = true;
       $("pdf-info").textContent = "Importing " + rows.length + " extracted entries…";
-      api.adminImport(rows).then(function () {
+      api.adminImport(rows, TABLE).then(function () {
         pdfBusy = false; $("pdf-pick").disabled = false;
         addToolLog("Imported " + rows.length + " PDF-extracted entries into the queue.");
         toast("Imported " + rows.length + (rows.length === 1 ? " entry" : " entries") + " into the queue.");
@@ -1649,7 +1774,7 @@
     if (backfilled || !state.loaded || !window.OCL) return;
     backfilled = true;
     state.docs.filter(function (d) { return !d.idcode && Ent.idCode(d.smiles); })
-      .reduce(function (p, d) { return p.then(function () { return api.adminPatch(d.id, { idcode: Ent.idCode(d.smiles) }).catch(function () {}); }); }, Promise.resolve());
+      .reduce(function (p, d) { return p.then(function () { return api.adminPatch(d.id, { idcode: Ent.idCode(d.smiles) }, TABLE).catch(function () {}); }); }, Promise.resolve());
   }
 
   /* ---------- Scope-aware IUPAC names & CAS enrichment ---------- */
@@ -1761,7 +1886,7 @@
     drawEnrichIssues();
   }
   function patchGroupDocs(ids, patch) {
-    return api.adminPatchManyRows(ids, patch).then(function (rows) {
+    return api.adminPatchManyRows(ids, patch, TABLE).then(function (rows) {
       var byUp = applyUpdatedRows(rows);
       if ("smiles" in patch) {
         Object.keys(byUp).forEach(function (id) { delete casMiss[id]; delete nameTried[id]; });
@@ -2153,7 +2278,7 @@
         var br = batchByKey[d.import_key];
         var patch = { smiles: br.smiles, idcode: Ent.idCode(br.smiles) || br.idcode || null };
         if (br.structure_note) patch.structure_note = br.structure_note;
-        return api.adminPatch(d.id, patch).then(function (rows) {
+        return api.adminPatch(d.id, patch, TABLE).then(function (rows) {
           if (rows && rows[0]) { state.docs = state.docs.map(function (x) { return x.id === d.id ? rows[0] : x; }); okN++; }
           else failN++;
         }, function (e) { if (e && e.status === 401) throw e; failN++; });
@@ -2197,7 +2322,7 @@
         $("iupac-text").textContent = "Renaming… " + done + " / " + names.length + " structures";
         var docs = byDocs[n];
         docs.forEach(function (d) { attemptedIds[d.id] = 1; });
-        return api.adminPatchMany(docs.map(function (d) { return d.id; }), { name: n }).then(function (updated) {
+        return api.adminPatchMany(docs.map(function (d) { return d.id; }), { name: n }, TABLE).then(function (updated) {
           if (updated === 0) {
             fail++;
             docs.forEach(function (d) { failedDocs.push(d); failReasons[d.id] = "Database did not update this entry"; });
@@ -2263,7 +2388,7 @@
   }
 
   function saveEnrichDocs(docs, patch, run, tool, failMsg, molKey, onSaved) {
-    return api.adminPatchManyRows(docs.map(function (d) { return d.id; }), patch).then(function (rows) {
+    return api.adminPatchManyRows(docs.map(function (d) { return d.id; }), patch, TABLE).then(function (rows) {
       var byUp = applyUpdatedRows(rows);
       var missed = [];
       docs.forEach(function (d) {
@@ -2443,15 +2568,18 @@
     if (!silent) state.loaded = false;
     state.refreshing = true; state.loadErr = "";
     render();
-    return Promise.all([api.adminList(), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
-      state.docs = r[0] || []; state.sugg = r[1] || [];
+    return Promise.all([api.adminList(TABLE), api.adminSuggestions().catch(function () { return []; })]).then(function (r) {
+      /* corrections to triplet energies carry entry_id, corrections to redox potentials redox_id */
+      state.docs = r[0] || []; state.sugg = (r[1] || []).filter(function (sg) { return !!sgTarget(sg); });
       dupCache = {}; state.loaded = true; state.refreshing = false; state.lastSync = new Date();
       render(); backfill(); checkBatches(); drawCas(); drawComm(); drawEnrichIssues();
     }, function (err) {
       state.refreshing = false;
       if (err && err.status === 401) signedOut("Your session ended. Sign in again.");
       else {
-        if (!silent) state.loadErr = "The entries could not be loaded. Use Refresh to try again.";
+        if (!silent) state.loadErr = RX && err && (err.status === 404 || /redox_entries|schema cache/i.test(err.message || ""))
+          ? "The database has no redox_entries table yet. Run supabase/schema.sql in the Supabase SQL editor, then Refresh."
+          : "The entries could not be loaded. Use Refresh to try again.";
         else toast("Refresh failed. Check your connection.");
         render();
       }
@@ -2464,7 +2592,7 @@
     enrichIssues = []; eiModalFilter = "all"; eiModalTool = ""; eiModalQuery = "";
     nameTried = {}; casMiss = {}; commMiss = {}; toolLogs = [];
     closeEnrichModal(); drawEnrichIssues(); drawToolLog();
-    $("cas").hidden = true; $("comm").hidden = true; $("iupac").hidden = true; $("smi-sync").hidden = true; $("imp").hidden = true;
+    $("cas").hidden = true; $("comm").hidden = true; $("iupac").hidden = true; $("smi-sync").hidden = true; if ($("imp")) $("imp").hidden = true;
     $("tools-aside").classList.remove("open");
     $("toggle-tools").setAttribute("aria-expanded", "false");
     state.activeId = ""; state.triage = "";
