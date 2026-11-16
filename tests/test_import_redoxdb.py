@@ -33,6 +33,9 @@ MEASUREMENTS = [
     {"molecule_key": "lit:pho:rubpy3", "quantity": "e_star_ox", "value": -0.81, "value_type": "reported", "kind": "experimental",
      "method": "excited-state potential as reported", "solvent": "MeCN", "ref_original": "SCE", "doi": DOI, "confidence": "high",
      "source": "Prier 2013", "import_key": "lit:pho:rubpy3|e_star_ox|-0.81"},
+    {"molecule_key": "lit:pho:rubpy3", "quantity": "e_ox", "value": 1.04, "value_type": "E1/2", "kind": "experimental",
+     "method": "CV, E1/2", "solvent": "H2O", "ref_original": "NHE", "conversion": "E(SCE) = E(NHE) - 0.241 (from 1.28 V vs NHE)",
+     "doi": DOI, "confidence": "high", "source": "Prier 2013", "import_key": "lit:pho:rubpy3|e_ox|1.04"},
     {"molecule_key": "lit:sub:toluene", "quantity": "e_ox", "value": 2.36, "value_type": "Ep/2", "kind": "experimental",
      "method": "CV, E_p/2", "solvent": "MeCN", "ref_original": "Ag/AgCl (3.5 M NaCl)", "conversion": "E(SCE) = E(Ag/AgCl) - 0.03 V",
      "doi": ROTH, "confidence": "medium", "source": "Roth 2016", "import_key": "lit:sub:toluene|e_ox|2.36"},
@@ -63,6 +66,7 @@ def test_rows_and_review(clone: Path) -> None:
     assert set(by_key) == {
         "redoxdb:lit:pho:rubpy3|e_red|-1.33",
         "redoxdb:lit:pho:rubpy3|e_star_ox|-0.81",
+        "redoxdb:lit:pho:rubpy3|e_ox|1.04",
         "redoxdb:lit:sub:toluene|e_ox|2.36",
         "redoxdb:lit:sub:toluene|e_ox|2.12|calc",
     }
@@ -97,6 +101,12 @@ def test_value_back_against_its_own_reference(clone: Path) -> None:
     assert calc["method"].startswith("Computation, DFT B3LYP")
 
 
+def test_nhe_values_stay_against_sce(clone: Path) -> None:
+    row = {r["import_key"]: r for r in convert(clone)["rows"]}["redoxdb:lit:pho:rubpy3|e_ox|1.04"]
+    assert row["e_ref"] == "SCE" and row["e_v"] == 1.04 and row["e_sce"] == 1.04
+    assert "RedoxDB: E(SCE) = E(NHE) - 0.241 (from 1.28 V vs NHE)" in row["e_reported"]
+
+
 def test_rows_pass_the_redox_rules(clone: Path) -> None:
     for r in convert(clone)["rows"]:
         payload = {"name": r["name"], "smiles": r["smiles"], "kind": r["kind"], "state": r["state"], "e": r["e_v"], "ref": r["e_ref"],
@@ -108,4 +118,4 @@ def test_rows_pass_the_redox_rules(clone: Path) -> None:
 def test_cli_writes_batch_and_review(clone: Path, tmp_path: Path) -> None:
     out, rev = tmp_path / "batch.json", tmp_path / "review.json"
     assert main([str(clone), "-o", str(out), "--review", str(rev)]) == 0
-    assert len(json.loads(out.read_text())) == 4 and len(json.loads(rev.read_text())) == 3
+    assert len(json.loads(out.read_text())) == 5 and len(json.loads(rev.read_text())) == 3

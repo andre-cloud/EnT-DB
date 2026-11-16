@@ -10,7 +10,8 @@ Rules:
   ("MLCT (T1)" -> T1); "mixed" or no state -> review.
 - An E* value with an E0,0 from the same source is "estimated" with that E0,0; e00 alone is no row.
 - The value against SCE is RedoxDB's; when RedoxDB converted it from another reference that
-  TrEnDB knows (e.g. Ag/AgCl (3.5 M NaCl), NHE), e_v is the value back against that reference.
+  TrEnDB knows (e.g. Ag/AgCl (3.5 M NaCl)), e_v is the value back against that reference.
+  Values RedoxDB converted from NHE/SHE stay against SCE, with RedoxDB's conversion noted.
 - confidence high -> verify_level "primaria"; medium -> "secondaria"; low -> "secondaria" with
   "approximate value, verify before use". RedoxDB's notes go to verify_note (curators only).
 - Every row needs a DOI (TrEnDB cites sources by DOI) and a readable SMILES; the rest is review.
@@ -42,6 +43,7 @@ E_TYPE = {
     "derived": "Other or not stated",
 }
 STATE = {"S1": "S1", "T1": "T1", "MLCT (T1)": "T1"}
+KEEP_SCE = {"SCE", "other", "NHE", "SHE"}  # imported against SCE, not back-converted
 
 
 def _load(repo: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -64,7 +66,7 @@ def _original_reference(m: dict[str, Any], solvent: str | None) -> tuple[float, 
     v = float(m["value"])
     raw = (m.get("ref_original") or "").strip()
     ref = clean_ref(raw) if raw else "SCE"
-    if not ref or ref in ("SCE", "other"):
+    if not ref or ref in KEEP_SCE:
         return v, "SCE"
     back = from_sce(v, ref, solvent)
     return (v, "SCE") if math.isnan(back) else (back, ref)
@@ -171,7 +173,7 @@ def convert(repo: str | Path) -> dict[str, Any]:
         sc = score_redox(f, ctx)
         doc = to_redox_doc(f, sc)
         doc["e_sce"] = round(float(m["value"]), 3)  # RedoxDB's own value against SCE
-        if e_ref != "SCE" and m.get("conversion"):
+        if m.get("conversion") and (e_ref != "SCE" or clean_ref(m.get("ref_original") or "") in ("NHE", "SHE")):
             doc["e_reported"] = f"{doc['e_reported']} (RedoxDB: {m['conversion']})"
         if mol.get("excited_state") == "MLCT (T1)" and excited:
             doc["structure_note"] = "Excited state: MLCT (T1)"
