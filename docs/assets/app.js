@@ -162,7 +162,7 @@
     if (sec === "home") {
       $("home-db-count").textContent = state.loaded
         ? state.docs.length + (state.docs.length === 1 ? " value" : " values") + " · " + Ent.groupByMolecule(state.docs).length + " molecules"
-        : state.failed ? "Could not be loaded" : "Loading…";
+        : state.failed ? "Could not be loaded" : "Triplet energies database";
     }
     if (sec === "plot") readRoute();   /* the tool keeps its latest settings in the address */
     if (sec === "plot") window.PlotEnT.render($("plot-view"), state.plotRoute, plotCtx);
@@ -514,6 +514,7 @@
   function gate(title, text, withForm, err, isCuratorModal) {
     state.curatorModal = !!isCuratorModal;
     $("app-body").hidden = true; $("gate").hidden = false;
+    $("home-view").hidden = !!isCuratorModal;   /* the public landing: the hub sits above the sign-in */
     $("gate-title").textContent = title; $("gate-text").textContent = text; $("gate-fields").hidden = !withForm;
     $("gate-user-text").textContent = isCuratorModal ? "Curator email" : "User or curator email";
     $("gate-cancel").hidden = !isCuratorModal;
@@ -529,7 +530,7 @@
   }
   function cancelCuratorGate() {
     state.curatorModal = false; $("gate-pass").value = "";
-    $("gate").hidden = true; $("app-body").hidden = false;
+    $("gate").hidden = true; $("app-body").hidden = false; $("home-view").hidden = state.section !== "home";
     syncAuthUi();
   }
   function lock(msg) {
@@ -604,6 +605,8 @@
     tryAccess({ user: u, pass: p }, true).then(function () { $("gate-send").disabled = false; });
   });
   $("gate-cancel").addEventListener("click", cancelCuratorGate);
+  /* on the public landing a card keeps its address (the section opens after sign-in) and moves to the form */
+  $("home-view").addEventListener("click", function (e) { if (e.target.closest(".home-card") && !$("gate").hidden) $("gate-user").focus(); });
   $("pub-signin").addEventListener("click", function () {
     $("gate-user").value = ""; $("gate-pass").value = "";
     state.curatorModal = true;

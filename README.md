@@ -24,7 +24,8 @@ Site: https://nuniwo-source.github.io/TrEnDB/
   ("Search database"), and a product can start from a copy of the chosen reactants ("Copy from reactants"), so atoms
   that end up in the product need not be redrawn. Each reaction can carry a description of at most 50 words. Curators can edit or delete single reactions
   before approving, and the public card shows them only when "Reactions it was employed in" is clicked.
-- **Home and PlotEnT.** After signing in, a home page leads to the database or to PlotEnT, a set of plots and
+- **Home and PlotEnT.** The home page is public and leads to TrEnDB, PlotEnT, PhotoreDBox and PhotoTool, with the
+  sign-in below it (a card picked before signing in opens once signed in). PlotEnT is a set of plots and
   calculators that run in the browser on the database values: a photocatalyst finder (donors on one triplet-energy
   axis around a substrate, with Sandros-predicted relative rates), a Sandros fit that extrapolates an acceptor's E_T
   from measured k_q values (with error bars, an optional slope factor for non-vertical transfer and tips for measuring
