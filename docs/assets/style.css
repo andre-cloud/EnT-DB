@@ -232,7 +232,7 @@ h1.brand .sub{font-weight:500;font-size:.55em;color:var(--muted);letter-spacing:
 .card h2,.et .v{letter-spacing:0}
 
 /* ---- Shared workstation layout (admin.html + index.html) ---- */
-body.modal-open{overflow:hidden}
+body:has(.sk:not([hidden])){overflow:hidden}
 a.btn{text-decoration:none;display:inline-flex;align-items:center}
 .admin-page .wrap,.pub-page .wrap{max-width:860px;gap:12px}
 .admin-page .topbar,.pub-page .topbar{align-items:center}
@@ -395,9 +395,6 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center}
 .score-pop li.zero .pts{color:var(--bad)}
 .score-pop li small{display:block;color:var(--muted)}
 
-.scale .oor-badge{position:absolute;top:-2px;font:600 .66rem var(--f-mono);padding:1px 4px;border-radius:4px;background:var(--warn-soft);color:var(--warn);pointer-events:none}
-.scale .oor-badge.low{left:0}
-.scale .oor-badge.high{right:0}
 
 .copy-row{display:flex;align-items:center;gap:6px;min-width:0}
 .copy-row .smiles,.copy-row .formula,.copy-row .doi-wrap{flex:1 1 auto;min-width:0}
@@ -738,17 +735,8 @@ button.chip.slide-chip:hover{border-color:var(--bad);color:var(--bad)}
 .redox-sec .hint{margin:0}
 .redox-sum{margin:0}
 .val-redox .et .q{font-size:1rem;color:var(--muted)}
-.fm-property{max-width:420px;margin:4px 0 10px}
 .estar-help{align-items:end}
 #tools-redox{border-top:1px dashed var(--line);padding-top:8px}
-.redox-admin{display:flex;flex-direction:column;gap:10px}
-.rx-table-wrap{overflow-x:auto}
-.rx-table td .smiles{display:block;font-size:.72rem;color:var(--muted);max-width:260px;overflow-wrap:anywhere}
-.rx-table td{font-variant-numeric:tabular-nums}
-.rx-sugg{border-top:1px solid var(--line);padding-top:8px;margin-top:8px;display:flex;flex-direction:column;gap:6px}
-.rx-table{min-width:1180px}
-.rx-table th{white-space:nowrap}
-.rx-table td .btn{white-space:nowrap}
 /* Redox section */
 .rx-refbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:2px 0 6px}
 .rx-mode{display:flex;flex-direction:column;gap:10px}

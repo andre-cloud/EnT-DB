@@ -134,10 +134,7 @@
 
   /* ---------- downloads & sharing ---------- */
   function download(name, text, type) {
-    var url = URL.createObjectURL(new Blob([text], { type: type }));
-    var a = document.createElement("a"); a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    Ent.downloadBlob(new Blob([text], { type: type }), name);
   }
   /* the SVG with the theme's colours written in, so it looks the same outside the site */
   function exportSvg(svg, name) {
@@ -955,7 +952,7 @@
     kit: {
       S: S, TX: TX, niceTicks: niceTicks, frame: frame, linePath: linePath, download: download, exportSvg: exportSvg, csv: csv,
       encodeState: encodeState, decodeState: decodeState, saveAt: saveAt, actions: actions, copyLinkBtn: copyLinkBtn,
-      field: field, inp: inp, check: check, table: table, subscriptT: subscriptT, withSubs: withSubs,
+      field: field, inp: inp, needData: needData, check: check, table: table, subscriptT: subscriptT, withSubs: withSubs,
       num: num, sci: sci, fx: fx, mean: mean, kdiff: kdiff, SOLVENTS: SOLVENTS
     },
     /* exposed for tests */

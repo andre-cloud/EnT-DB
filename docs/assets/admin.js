@@ -1039,10 +1039,7 @@
   function downloadDiscarded() {
     if (!uploadReport || !uploadReport.rejected.length) return;
     var blob = new Blob([JSON.stringify(discardedJson(), null, 2) + "\n"], { type: "application/json" });
-    var a = document.createElement("a"), url = URL.createObjectURL(blob);
-    a.href = url; a.download = uploadReport.slug + ".discarded.json";
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    Ent.downloadBlob(blob, uploadReport.slug + ".discarded.json");
   }
   function drawUploadReport() {
     var box = $("up-report");
@@ -1300,10 +1297,7 @@
   var pdfFiles = [], pdfResult = null, pdfBusy = false, pdfModalReturn = null, pdfAbort = null;
   function downloadJsonFile(data, filename) {
     var blob = new Blob([JSON.stringify(data, null, 1) + "\n"], { type: "application/json" });
-    var a = document.createElement("a"), url = URL.createObjectURL(blob);
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    Ent.downloadBlob(blob, filename);
   }
   function drawPdfResult() {
     var box = $("pdf-result");
@@ -1403,14 +1397,12 @@
     if (!pdfResult || !pdfResult.reviewItems.length) return;
     pdfModalReturn = document.activeElement;
     $("pdf-modal").hidden = false;
-    Ent.syncModalOpen();
     drawPdfModal();
   }
   function closePdfModal() {
     var m = $("pdf-modal");
     if (!m || m.hidden) return;
     m.hidden = true;
-    Ent.syncModalOpen();
     if (pdfModalReturn && pdfModalReturn.focus) pdfModalReturn.focus();
     pdfModalReturn = null;
   }
@@ -1905,7 +1897,6 @@
     if (!enrichIssues.length) return;
     eiReturn = document.activeElement;
     $("ei-modal").hidden = false;
-    Ent.syncModalOpen();
     drawEnrichModal();
     $("ei-modal-q").focus();
   }
@@ -1913,7 +1904,6 @@
     var m = $("ei-modal");
     if (!m || m.hidden) return;
     m.hidden = true;
-    Ent.syncModalOpen();
     if (eiReturn && eiReturn.focus) eiReturn.focus();
     eiReturn = null;
   }

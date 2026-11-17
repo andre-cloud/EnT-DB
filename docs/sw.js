@@ -2,14 +2,15 @@
    - The site's own files: network first, so every visit gets the latest version; the saved copy
      is used only when there is no connection.
    - Pinned libraries and fonts from CDNs: saved once and reused (their addresses carry a version).
+   - Curator pages and their scripts are saved on first use, not pre-loaded for every visitor.
    - Everything else (the database, doi.org, PubChem, Crossref, sign-in) is never touched or stored here. */
 "use strict";
-var CACHE = "trendb-v4";
+var CACHE = "trendb-v5";
 var CORE = [
-  "./", "index.html", "admin.html", "manifest.webmanifest",
+  "./", "index.html", "manifest.webmanifest",
   "assets/style.css", "assets/config.js", "assets/score.js", "assets/chem-render.js", "assets/common.js",
-  "assets/reactions.js", "assets/plotent.js", "assets/redox-reactions.js", "assets/redox.js", "assets/app.js", "assets/admin.js", "assets/site-redox.js", "assets/pdf-extract.js",
-  "photoredbox/", "photoredbox/index.html", "photoredbox/admin.html", "photoredbox/manifest.webmanifest", "assets/prx-app.js",
+  "assets/reactions.js", "assets/plotent.js", "assets/redox-reactions.js", "assets/redox.js", "assets/app.js",
+  "photoredbox/", "photoredbox/index.html", "photoredbox/manifest.webmanifest", "assets/prx-app.js",
   "assets/logo.svg", "assets/favicon.svg", "assets/app-icon.svg", "assets/apple-touch-icon.png",
   "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-192.png", "assets/icon-maskable-512.png"
 ];

@@ -311,11 +311,6 @@
     rootEl.replaceChildren(back, h, lede, refBar(rerender), body);
     return body;
   }
-  function needData(ctx, body) {
-    if (ctx.loaded()) return false;
-    body.appendChild(el("p", "status", ctx.failed && ctx.failed() ? "The database could not be loaded. Reload the page to try again." : "Loading the database…"));
-    return true;
-  }
   var BASE = "#tools";   /* the section's address: set by render (PhotoreDBox: "#tools") */
   function save(tool, st) { K().saveAt(BASE + "/", tool, st); }
   function field(label, input, hint) {
@@ -329,7 +324,7 @@
   function map(rootEl, ctx, init, rerender) {
     var st = Object.assign({ cls: "", sort: "e_star_red", sub: "", E: "" }, init || {});
     var body = toolShell(rootEl, "map", rerender);
-    if (needData(ctx, body)) return;
+    if (K().needData(ctx, body)) return;
     var pcs = photocatalysts(ctx), subs = substrates(ctx);
     var classes = pcs.map(function (m) { return m.cls; }).filter(function (c, i, a) { return c && a.indexOf(c) === i; }).sort();
     var panel = el("div", "pe-panel rx-panel-row"), out = el("div", "pe-out");
@@ -404,7 +399,7 @@
   function advisor(rootEl, ctx, init, rerender) {
     var st = Object.assign({ mode: "pc", pc: "", esr: "", eso: "", er: "", eo: "", rx: "", sub: "", dir: "ox", E: "", partner: "", avoid: true, vis: false }, init || {});
     var body = toolShell(rootEl, "advisor", rerender);
-    if (needData(ctx, body)) return;
+    if (K().needData(ctx, body)) return;
     var pcs = photocatalysts(ctx), subs = substrates(ctx), lib = root.EntRedoxReactions || [];
     var panel = el("div", "pe-panel"), out = el("div", "pe-out");
     body.appendChild(panel); body.appendChild(out);
@@ -554,7 +549,7 @@
   function estar(rootEl, ctx, init, rerender) {
     var st = Object.assign({ pc: "", ref: "SCE", solvent: "MeCN", eox: "", ered: "", mode: "ev", e00: "", state: "T1", q: "", qox: "", qred: "", coul: false, eps: 37.5, r: 7 }, init || {});
     var body = toolShell(rootEl, "estar", rerender);
-    if (needData(ctx, body)) return;
+    if (K().needData(ctx, body)) return;
     var mols = catalog(ctx), pcs = photocatalysts(ctx), subs = substrates(ctx), spectra = { abs: null, em: null };
     var panel = el("div", "pe-panel"), out = el("div", "pe-out");
     body.appendChild(panel); body.appendChild(out);

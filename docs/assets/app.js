@@ -106,7 +106,7 @@
   }
   $("slide-open").addEventListener("click", function () {
     var items = state.slideOrder.map(function (k) { return state.slideSel[k]; }).filter(Boolean);
-    if (items.length && Ent.slideGraphic) {
+    if (items.length) {
       Ent.slideGraphic.open(items, {
         onRemove: function (it) {
           delete state.slideSel[it.key];

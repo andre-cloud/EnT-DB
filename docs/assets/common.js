@@ -207,10 +207,6 @@
     });
   };
 
-  Ent.lookupCommercialName = function (cas) {
-    return Ent.lookupCommercialNameDetailed(cas).then(function (r) { return r.value; });
-  };
-
   /* Look up PubChem synonyms for a CAS number or compound name: resolves to { values, code, reason }. */
   Ent.lookupCommercialSynonyms = function (query, by) {
     var q = String(query || "").trim();
@@ -418,20 +414,8 @@
     var val = String(text || "");
     if (!val) return;
     function flash() { flashBtn(btn, flashLabel || "Copied"); }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(val).then(flash, function () { fallbackCopy(val, flash); });
-    } else fallbackCopy(val, flash);
+    navigator.clipboard.writeText(val).then(flash, function () { flashBtn(btn, "Copy failed"); });
   };
-  function fallbackCopy(val, done) {
-    try {
-      var ta = document.createElement("textarea");
-      ta.value = val; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.left = "-9999px";
-      document.body.appendChild(ta); ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      done();
-    } catch (e) {}
-  }
   function copyBtn(getVal, label) {
     var b = el("button", "btn tiny", "Copy"); b.type = "button";
     b.setAttribute("aria-label", label || "Copy value");
@@ -457,13 +441,7 @@
     var xyz = buildXYZ(smiles, title);
     if (!xyz) return false;
     var blob = new Blob([xyz], { type: "chemical/x-xyz;charset=utf-8" });
-    if (Ent.downloadBlob) Ent.downloadBlob(blob, safeXyzName(title));
-    else {
-      var url = URL.createObjectURL(blob), a = document.createElement("a");
-      a.href = url; a.download = safeXyzName(title); a.style.display = "none";
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    }
+    Ent.downloadBlob(blob, safeXyzName(title));
     flashBtn(btn, "Saved");
     return true;
   };
@@ -497,11 +475,6 @@
     row.appendChild(smiBtn); row.appendChild(btns.dl); row.appendChild(btns.cp);
     return row;
   }
-  var syncModalOpen = Ent.syncModalOpen = function () {
-    var ed = $("ed"), sk = $("sk"), ei = $("ei-modal"), pm = $("pdf-modal");
-    var open = !!((ed && !ed.hidden) || (sk && !sk.hidden) || (ei && !ei.hidden) || (pm && !pm.hidden));
-    document.body.classList.toggle("modal-open", open);
-  };
 
   var THEME_KEY = "entdb-theme", THEMES = ["auto", "light", "dark"];
   function applyTheme(t, btn) {
@@ -735,7 +708,6 @@
   }
 
   function bindPaperPreview(paper, getCardData) {
-    if (!Ent.cardGraphic) return;
     paper.classList.add("paper-interactive");
     paper.setAttribute("role", "button");
     paper.setAttribute("tabindex", "0");
@@ -1287,7 +1259,7 @@
     if (items.length > 1) chips.appendChild(el("span", "chip plain", items.length + " values"));
     var sim = bestSimilarity(items, o);
     if (sim != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(sim, 2)));
-    if (o.onSlideToggle && Ent.slideGraphic && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
+    if (o.onSlideToggle && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
     /* the whole card already links to the page (the title's overlay); this only says so, top right */
     var top = el("div", "sum-top"), more = el("span", "sum-more", "See more →");
     more.setAttribute("aria-hidden", "true");
@@ -1374,7 +1346,7 @@
     if (items.length > 1) chips.appendChild(el("span", "chip plain", items.length + " values"));
     var best = bestSimilarity(items, o);
     if (best != null) chips.appendChild(el("span", "chip", "Similarity " + fmt(best, 2)));
-    if (o.onSlideToggle && Ent.slideGraphic && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
+    if (o.onSlideToggle && g.et.length) chips.appendChild(slidePickBtn(g.et, o, picked));
     head.appendChild(chips); c.appendChild(head);
 
     var etRows = g.et;
@@ -1668,13 +1640,13 @@
     var h = el("h2", null, title); h.id = "dlg-title"; box.setAttribute("aria-labelledby", "dlg-title"); box.appendChild(h);
     var host = $("ed"); dlgReturn = document.activeElement;
     build(box);
-    host.replaceChildren(box); host.hidden = false; syncModalOpen();
+    host.replaceChildren(box); host.hidden = false;
     var first = box.querySelector("input, select, textarea, button"); if (first) first.focus();
     return box;
   };
   Ent.closeDialog = function () {
     var host = $("ed"); if (!host || host.hidden) return;
-    host.hidden = true; host.replaceChildren(); syncModalOpen();
+    host.hidden = true; host.replaceChildren();
     if (dlgReturn && dlgReturn.focus) dlgReturn.focus(); dlgReturn = null;
   };
 
@@ -2189,7 +2161,7 @@
         });
       });
 
-      var host = $("ed"); host.replaceChildren(box); host.hidden = false; syncModalOpen();
+      var host = $("ed"); host.replaceChildren(box); host.hidden = false;
       edReturn = document.activeElement;
       drawStruct(); syncDirty();
       var first = $("ed-name"); if (first) first.focus();
@@ -2198,7 +2170,7 @@
     close: function () {
       var host = $("ed"); if (!host || host.hidden) return;
       edCanClose = null;
-      host.hidden = true; host.replaceChildren(); syncModalOpen();
+      host.hidden = true; host.replaceChildren();
       if (edReturn && edReturn.focus) edReturn.focus(); edReturn = null;
     }
   };
@@ -2246,7 +2218,7 @@
     if (!editor) return;
     suppressChange = true;
     try {
-      var mf = smi && Ent.toCleanMolfile ? Ent.toCleanMolfile(smi) : null;
+      var mf = smi ? Ent.toCleanMolfile(smi) : null;
       if (mf && editor.setMolFile) editor.setMolFile(mf);
       else editor.setSmiles(smi || "");
     } finally {
@@ -2259,7 +2231,7 @@
       $("sk-title").textContent = opts.title; $("sk-smiles").value = opts.smiles || ""; $("sk-save").textContent = opts.saveLabel;
       $("sk-hint").textContent = opts.hint + " The sketcher is built for a mouse and may respond poorly to touch."; skMsg("");
       skReturn = document.activeElement;
-      $("sk").hidden = false; syncModalOpen(); $("sk-smiles").focus();
+      $("sk").hidden = false; $("sk-smiles").focus();
       if (!editor) {
         try {
           if (!window.OCL || !OCL.StructureEditor) throw new Error("no editor");
@@ -2273,7 +2245,7 @@
       if (editor) { try { loadEditorStructure(opts.smiles || ""); } catch (e) { if (opts.smiles) skMsg("This SMILES could not be drawn."); } }
     },
     close: function () {
-      $("sk").hidden = true; skOpts = null; syncModalOpen();
+      $("sk").hidden = true; skOpts = null;
       if (skReturn && skReturn.focus) skReturn.focus(); skReturn = null;
     },
     bind: function () {
