@@ -219,6 +219,36 @@ helpers of `plotent.js` (`PlotEnT.kit`), the service worker and the server funct
 The redox data, the reaction library and the tools are adapted from [RedoxDB](https://github.com/alebusso12/RedoxDB)
 by alebusso12, used with permission.
 
+### Python API
+
+The `trendb` package reads the redox potentials as it reads the triplet energies (same login, same cache),
+and PhotoTool's calculations are in `trendb.photoredox`. Potentials are V vs SCE unless a `ref` is given.
+
+```python
+from trendb import TrEnDBClient, excited_potentials, quench_dg
+
+with TrEnDBClient() as db:
+    rows = (db.redox_query().photocatalysts().excited_state("T1")
+              .between(-2.0, -1.5, ref="Fc+/Fc", solvent="MeCN").execute())
+    rows.to_csv("pc.csv", ref="Fc+/Fc", solvent="MeCN")   # also to_json, to_dataframe, to_sdf
+    table = rows.molecule_table()                         # one record per molecule: E_ox, E_red, E*ox, E*red, E0,0, τ
+    print(db.redox_stats().to_markdown())
+    print(db.search_redox(quantity="e_red").exp_vs_calc("e_red").to_markdown(unit="V (vs SCE)", digits=2))
+
+    # reactivity advisor
+    for m in db.reactions_for("4CzIPN"):                  # library reactions the photocatalyst can drive
+        print(m.reaction.name, m.cycle.mode, m.verdict)
+    best = db.rank_photocatalysts(substrate_e=1.2, direction="ox", visible_only=True)   # or a library id / substrate name
+    reach = db.substrates_in_reach("4CzIPN")
+
+eso, esr = excited_potentials(e_ox=0.77, e_red=-1.33, e00=2.12)
+dg = quench_dg(quencher_e_ox=0.8, e_star_red=esr)["reductive"]
+```
+
+`TrEnDBClient.from_records(redox=...)` and `from_batches(..., redox="file.json")` work offline on a JSON list of
+rows (e.g. the RedoxDB batch or a `to_json` export). The reaction library is read from
+`docs/assets/redox-reactions.js`; outside the repository pass `load_reactions(path)`.
+
 ### Importing RedoxDB
 
 ```

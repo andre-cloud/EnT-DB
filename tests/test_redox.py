@@ -92,3 +92,77 @@ def test_client_fetch_redox_pages_through_list_redox() -> None:
         assert len(rows) == 6 and isinstance(rows[0], RedoxEntry)
         assert [x.id for x in client.search_redox(kind="ox")] == ["5"]
     assert len(calls) == 1  # one short page, then cached
+
+
+# ---------------- query builder, exports, molecule records, statistics, offline ----------------
+
+
+def test_result_exports_and_molecule_table(tmp_path) -> None:
+    res = filter_redox(_rows(), quantity="e_red", sort_by="e_asc")
+    assert [x.id for x in res] == ["3", "1", "2", "6"]
+    d = res.to_dicts("Fc+/Fc", "MeCN")
+    assert d[1]["quantity"] == "e_red" and d[1]["e_display"] == pytest.approx(-1.75)
+    assert json.loads(res.to_json(tmp_path / "r.json").read_text())[0]["id"] == "3"
+    header = res.to_csv(tmp_path / "r.csv").read_text().splitlines()[0].split(",")
+    assert {"id", "quantity", "e_display", "uv_lmax"} <= set(header)
+    table = {m["name"]: m for m in filter_redox(_rows()).molecule_table()}
+    ir = table["Ir-F"]
+    assert ir["e_red"] == -1.37 and ir["e_red_origin"] == "exp" and ir["e_red_n"] == 2
+    assert ir["e_star_red"] == 1.21 and ir["e00_ev"] == 2.58 and ir["excited_state"] == "T1" and ir["is_photocatalyst"]
+    assert table["Toluene"]["activated_group"] == "benzylic C-H" and not table["Toluene"]["is_photocatalyst"]
+
+
+def test_new_filters() -> None:
+    r = _rows()
+    assert [x.id for x in filter_redox(r, in_solvent="mecn")] == ["2"]
+    assert [x.id for x in filter_redox(r, reported_ref="Fc+/Fc")] == ["2"]
+    assert [x.id for x in filter_redox(r, excited_from="estimated")] == ["4"]
+    assert len(filter_redox(r, limit=2)) == 2
+    with pytest.raises(ValueError):
+        filter_redox(r, quantity="e_foo")
+
+
+def test_stats_and_spread() -> None:
+    st = filter_redox(_rows()).stats()
+    assert st.total_values == 6 and st.unique_molecules == 3 and st.not_convertible == 1
+    assert st.by_quantity["e_red"] == 4 and st.photocatalysts == 1 and st.substrates == 1
+    assert st.potentials["e_red"].count == 3  # type: ignore[union-attr]
+    assert "| E_red (PC/PC•−) | 3 |" in st.to_markdown()
+    sp = filter_redox(_rows()).spread("e_red")
+    assert [(s.name, s.origin, s.count) for s in sp] == [("Ir-F", "exp", 2)]
+
+
+def test_offline_client_query_builder_and_triplet_energies(tmp_path) -> None:
+    path = tmp_path / "redox.json"
+    path.write_text(json.dumps(ROWS))
+    client = TrEnDBClient.from_records(
+        entries=[{"name": "Ir-F", "cas": "870987-63-6", "smiles": "C", "et_kcal": 60.1, "origin": "exp"}], redox=path
+    )
+    q = client.redox_query().photocatalysts().reductions().ground_state().between(-1.8, -1.7, ref="Fc+/Fc", solvent="MeCN")
+    assert [x.id for x in q.execute()] == ["1", "2"] and q.count() == 2
+    assert client.redox_query().oxidations().first().id == "5"  # type: ignore[union-attr]
+    mols = client.redox_molecules(with_triplet_energies=True)
+    ir = next(m for m in mols if m.display_name == "Ir-F")
+    assert ir.et_ev == pytest.approx(60.1 / 23.0605, abs=0.01)
+    assert client.find_redox_molecule("toluene").cas == "108-88-3"  # type: ignore[union-attr]
+    assert client.find_redox_molecule("870987-63-6").display_name == "Ir-F"  # type: ignore[union-attr]
+    assert client.redox_stats(category="photocatalyst").total_values == 3  # row 4 has no category
+    assert len(TrEnDBClient.from_batches(tmp_path, redox=path).fetch_redox()) == 6
+
+
+def test_redox_disk_cache(tmp_path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=ROWS)
+
+    def make() -> TrEnDBClient:
+        return TrEnDBClient(supabase_url="https://x.supabase.co", supabase_anon_key="sb_publishable_x",
+                            cache_path=tmp_path / "cache.json", cache_ttl_seconds=60,
+                            http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert len(make().fetch_redox()) == 6
+    assert (tmp_path / "cache.redox.json").is_file()
+    assert len(make().fetch_redox()) == 6
+    assert len(calls) == 1  # the second client read the disk cache

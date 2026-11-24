@@ -5,13 +5,36 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
 from .config import TrEnDBConfig, load_config
 from .models import Entry, MoleculeGroup, RedoxEntry
+from .photoredox import (
+    CatalystRank,
+    Reaction,
+    ReactionMatch,
+    SubstrateMatch,
+    load_reactions,
+    rank_photocatalysts,
+    reactions_for,
+    substrates_in_reach,
+)
 from .query import QueryBuilder, SearchResult, filter_entries, group_by_molecule
+from .redox import (
+    RedoxMolecule,
+    RedoxQuery,
+    RedoxResult,
+    RedoxStats,
+    analyze_redox,
+    filter_redox,
+    find_molecule,
+    group_redox_by_molecule,
+    photocatalysts,
+    substrates,
+)
+from .scoring import to_sce
 
 PAGE_SIZE = 1000
 # Exact columns exposed by public.public_entries in supabase/schema.sql (curators' working notes stay private).
@@ -34,6 +57,12 @@ PUBLIC_REDOX_COLUMNS = (
 
 class TrEnDBError(RuntimeError):
     """Raised when TrEnDB API requests fail or return unexpected payloads."""
+
+
+def _load_redox_file(path: str | Path) -> list[RedoxEntry]:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = data.get("redox", data.get("rows", [])) if isinstance(data, dict) else data
+    return [RedoxEntry.from_dict(r) for r in rows]
 
 
 class TrEnDBClient:
@@ -79,8 +108,11 @@ class TrEnDBClient:
         self._redox_cache: tuple[float, list[RedoxEntry]] | None = None
 
     @classmethod
-    def from_batches(cls, batches_dir: str | Path = "docs/batches") -> "TrEnDBClient":
-        """Create an offline client reading local batch JSON files."""
+    def from_batches(cls, batches_dir: str | Path = "docs/batches", *, redox: str | Path | None = None) -> "TrEnDBClient":
+        """Create an offline client reading local batch JSON files.
+
+        ``redox``: a JSON file of redox rows (e.g. the RedoxDB import batch or ``RedoxResult.to_json``).
+        """
         bdir = Path(batches_dir)
         idx_file = bdir / "index.json"
         if idx_file.is_file():
@@ -97,6 +129,23 @@ class TrEnDBClient:
 
         inst = cls(supabase_url="", supabase_anon_key="")
         inst._offline_entries = rows
+        if redox is not None:
+            inst._offline_redox = _load_redox_file(redox)
+        return inst
+
+    @classmethod
+    def from_records(
+        cls,
+        entries: Iterable[Entry | dict[str, Any]] | None = None,
+        redox: Iterable[RedoxEntry | dict[str, Any]] | str | Path | None = None,
+    ) -> "TrEnDBClient":
+        """Offline client over given rows: triplet-energy entries and/or redox values (rows or a JSON file of rows)."""
+        inst = cls(supabase_url="", supabase_anon_key="")
+        inst._offline_entries = [e if isinstance(e, Entry) else Entry.from_dict(e) for e in (entries or [])]
+        if isinstance(redox, (str, Path)):
+            inst._offline_redox = _load_redox_file(redox)
+        else:
+            inst._offline_redox = [r if isinstance(r, RedoxEntry) else RedoxEntry.from_dict(r) for r in (redox or [])]
         return inst
 
     def close(self) -> None:
@@ -307,10 +356,15 @@ class TrEnDBClient:
             return list(self._offline_redox)
         if self._offline_entries is not None:
             return []
-        if not force_refresh and self._redox_cache is not None:
-            ts, cached = self._redox_cache
-            if self._cache_ttl <= 0 or (time.time() - ts) <= self._cache_ttl:
-                return list(cached)
+        if not force_refresh:
+            if self._redox_cache is not None:
+                ts, cached = self._redox_cache
+                if self._cache_ttl <= 0 or (time.time() - ts) <= self._cache_ttl:
+                    return list(cached)
+            disk = self._read_redox_disk_cache()
+            if disk is not None:
+                self._redox_cache = (time.time(), disk)
+                return list(disk)
         self._require_configured()
         email, password = self.config.curator_email, self.config.curator_pass
         if email and password:
@@ -325,13 +379,129 @@ class TrEnDBClient:
                 )
         rows = [RedoxEntry.from_dict(r) for r in raw]
         self._redox_cache = (time.time(), rows)
+        self._write_redox_disk_cache(rows)
         return list(rows)
 
-    def search_redox(self, **filters: Any) -> list[RedoxEntry]:
-        """Filter approved redox potentials (accepts all trendb.redox.filter_redox arguments)."""
-        from .redox import filter_redox
+    @property
+    def _redox_cache_path(self) -> Path | None:
+        return self._cache_path.with_name(self._cache_path.stem + ".redox.json") if self._cache_path else None
 
+    def _read_redox_disk_cache(self) -> list[RedoxEntry] | None:
+        path = self._redox_cache_path
+        if not path or not path.is_file() or self._cache_ttl <= 0:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if time.time() - float(payload.get("fetched_at", 0)) <= self._cache_ttl:
+                return [RedoxEntry.from_dict(r) for r in payload.get("redox", [])]
+        except Exception:
+            return None
+        return None
+
+    def _write_redox_disk_cache(self, rows: list[RedoxEntry]) -> None:
+        path = self._redox_cache_path
+        if not path or self._cache_ttl <= 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"fetched_at": time.time(), "redox": [r.to_dict() for r in rows]}, ensure_ascii=False), encoding="utf-8")
+
+    def search_redox(self, **filters: Any) -> RedoxResult:
+        """Filter approved redox potentials (accepts all trendb.redox.filter_redox arguments)."""
         return filter_redox(self.fetch_redox(), **filters)
+
+    def redox_query(self) -> RedoxQuery:
+        """Start a chainable query on the redox potentials."""
+        return RedoxQuery(self)
+
+    def redox_molecules(self, *, with_triplet_energies: bool = False, **filters: Any) -> list[RedoxMolecule]:
+        """One record per molecule with representative potentials (V vs SCE), optionally with TrEnDB's E_T attached."""
+        rows = self.search_redox(**filters) if filters else self.fetch_redox()
+        et = self.fetch_entries() if with_triplet_energies else None
+        return group_redox_by_molecule(rows, et)
+
+    def photocatalysts(self, **filters: Any) -> list[RedoxMolecule]:
+        """Photocatalysts with at least one excited-state potential (PhotoTool's list)."""
+        return photocatalysts(self.redox_molecules(**filters))
+
+    def substrates(self, **filters: Any) -> list[RedoxMolecule]:
+        """Molecules that are not photocatalysts and have a ground-state potential."""
+        return substrates(self.redox_molecules(**filters))
+
+    def find_redox_molecule(self, query: str) -> RedoxMolecule | None:
+        """A molecule by CAS, name or commercial name (exact first, then substring)."""
+        return find_molecule(self.redox_molecules(), query)
+
+    def redox_stats(self, *, top_n: int = 10, **filters: Any) -> RedoxStats:
+        """Counts and potential distributions (V vs SCE) of the redox values."""
+        rows = self.search_redox(**filters) if filters else self.fetch_redox()
+        return analyze_redox(rows, top_n=top_n)
+
+    # ---------------- PhotoTool: reactivity advisor ----------------
+
+    def reactions(self, path: str | Path | None = None) -> list[Reaction]:
+        """The advisor's reaction library (``docs/assets/redox-reactions.js`` of the repository, or ``path``)."""
+        return load_reactions(path, repo_root=self.config.repo_root)
+
+    def _resolve_pc(self, pc: Any) -> Any:
+        if isinstance(pc, str):
+            found = self.find_redox_molecule(pc)
+            if found is None:
+                raise TrEnDBError(f"No molecule with redox values matches {pc!r}.")
+            return found
+        return pc
+
+    def reactions_for(self, pc: Any, *, reactions: list[Reaction] | None = None) -> list[ReactionMatch]:
+        """Reactions of the library that a photocatalyst (name/CAS, molecule or potentials) can drive, best first."""
+        return reactions_for(self._resolve_pc(pc), reactions if reactions is not None else self.reactions())
+
+    def substrates_in_reach(self, pc: Any, *, max_dg: float = 0.15) -> list[SubstrateMatch]:
+        """Substrates in the database a photocatalyst can oxidise or reduce with ΔG ≤ ``max_dg`` eV."""
+        return substrates_in_reach(self._resolve_pc(pc), self.substrates(), max_dg=max_dg)
+
+    def rank_photocatalysts(
+        self,
+        reaction: str | Reaction | None = None,
+        *,
+        substrate: str | None = None,
+        substrate_e: float | None = None,
+        direction: str | None = None,
+        partner: Any = None,
+        ref: str = "SCE",
+        solvent: str | None = None,
+        avoid_overkill: bool = True,
+        visible_only: bool = False,
+    ) -> list[CatalystRank]:
+        """Photocatalysts of the database for a reaction (library id or Reaction), or for a substrate, best first.
+
+        For a substrate give its name/CAS (``substrate``, potential from the database) or ``substrate_e`` in V
+        against ``ref``; ``direction`` is "ox" (it must be oxidised) or "red". ``partner`` (name/CAS or molecule)
+        closes the cycle.
+        """
+        pcs = self.photocatalysts()
+        if reaction is not None:
+            if isinstance(reaction, str):
+                lib = {r.id: r for r in self.reactions()}
+                if reaction not in lib:
+                    raise TrEnDBError(f"Unknown reaction {reaction!r}; ids: {', '.join(sorted(lib))}")
+                reaction = lib[reaction]
+            return rank_photocatalysts(pcs, reaction, avoid_overkill=avoid_overkill, visible_only=visible_only)
+        name = "substrate"
+        if substrate is not None:
+            mol = self._resolve_pc(substrate)
+            name = mol.display_name
+            if direction is None:
+                direction = "ox" if mol.e_ox is not None else "red"
+            substrate_e = mol.e_ox if direction == "ox" else mol.e_red
+            if substrate_e is None:
+                raise TrEnDBError(f"{name} has no {'oxidation' if direction == 'ox' else 'reduction'} potential in the database.")
+        elif substrate_e is not None:
+            substrate_e = to_sce(substrate_e, ref, solvent)
+        if isinstance(partner, str):
+            partner = self._resolve_pc(partner)
+        return rank_photocatalysts(
+            pcs, substrate_e=substrate_e, direction=direction or "ox", partner=partner, substrate_name=name,
+            avoid_overkill=avoid_overkill, visible_only=visible_only,
+        )
 
     def query(self) -> QueryBuilder:
         """Start a chainable query against the database."""

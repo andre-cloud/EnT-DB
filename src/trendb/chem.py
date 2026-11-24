@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 if TYPE_CHECKING:
     from .models import Entry
@@ -121,8 +121,11 @@ def exact_match(query_smiles: str, target_smiles: str, *, keep_stereo: bool = Tr
     return qc == tc
 
 
-def write_sdf(entries: Iterable[Entry], path: str | Path) -> int:
-    """Write entries with valid structures to an SDF file with 2D coordinates."""
+def write_sdf(entries: Iterable[Any], path: str | Path, props: Callable[[Any], dict[str, Any]] | None = None) -> int:
+    """Write entries with valid structures to an SDF file with 2D coordinates.
+
+    ``props`` maps an entry to its SD properties (default: the triplet-energy fields of an Entry).
+    """
     require_rdkit()
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +139,7 @@ def write_sdf(entries: Iterable[Entry], path: str | Path) -> int:
             m = Chem.Mol(mol)
             AllChem.Compute2DCoords(m)
             m.SetProp("_Name", e.name or "")
-            props = {
+            fields = props(e) if props else {
                 "name": e.name,
                 "smiles": e.smiles,
                 "et_kcal": e.et_kcal,
@@ -151,7 +154,7 @@ def write_sdf(entries: Iterable[Entry], path: str | Path) -> int:
                 "score": e.score,
                 "id": e.id,
             }
-            for k, v in props.items():
+            for k, v in fields.items():
                 if v is not None and v != "":
                     m.SetProp(k, str(v))
             writer.write(m)
